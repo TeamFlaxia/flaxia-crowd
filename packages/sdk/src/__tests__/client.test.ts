@@ -22,6 +22,16 @@ describe('FlaxiaClient', () => {
       expect((c as any).baseUrl).toBe('http://localhost:8787');
     });
 
+    it('normalizes a /crowd-suffixed baseUrl', () => {
+      const c = new FlaxiaClient({ apiKey, baseUrl: 'https://api.flaxia.crowd/crowd' });
+      expect((c as any).baseUrl).toBe('https://api.flaxia.crowd');
+    });
+
+    it('normalizes trailing slashes', () => {
+      const c = new FlaxiaClient({ apiKey, baseUrl: 'https://api.flaxia.crowd/' });
+      expect((c as any).baseUrl).toBe('https://api.flaxia.crowd');
+    });
+
     it('uses default baseUrl when not provided', () => {
       const c = new FlaxiaClient({ apiKey });
       expect((c as any).baseUrl).toBe('https://api.flaxia.crowd');
@@ -51,7 +61,7 @@ describe('FlaxiaClient', () => {
       });
 
       expect(result).toEqual(mockTask);
-      expect(fetch).toHaveBeenCalledWith(`${baseUrl}/tasks`, {
+      expect(fetch).toHaveBeenCalledWith(`${baseUrl}/crowd/tasks`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -142,7 +152,7 @@ describe('FlaxiaClient', () => {
 
       const result = await client.getTask('task_1');
       expect(result).toEqual(mockTask);
-      expect(fetch).toHaveBeenCalledWith(`${baseUrl}/tasks/task_1`, {
+      expect(fetch).toHaveBeenCalledWith(`${baseUrl}/crowd/tasks/task_1`, {
         headers: { 'Authorization': `Bearer ${apiKey}` },
       });
     });

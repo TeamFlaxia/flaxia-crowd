@@ -270,6 +270,15 @@ export interface TaskRecord {
   error?: string;
 }
 
+/** Response returned by POST /crowd/tasks (a partial snapshot, not a full TaskRecord). */
+export interface SubmitTaskResponse {
+  message: string;
+  taskId: string;
+  id: string;
+  status: TaskStatus;
+  createdAt: number;
+}
+
 // --- Node Types ---
 
 export interface NodeConfig {

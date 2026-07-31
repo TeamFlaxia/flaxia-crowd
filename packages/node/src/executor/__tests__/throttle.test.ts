@@ -1,25 +1,34 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { CpuThrottle } from '../throttle';
 
-describe('CpuThrottle', () => {
-  let originalRic: typeof window.requestIdleCallback;
-
-  beforeEach(() => {
-    originalRic = window.requestIdleCallback;
+/**
+ * The throttle estimates load via a calibrated busy-loop. Tests drive the
+ * estimation with a controllable `performance.now` mock: with `step` set to 1,
+ * each loop reports elapsed == baseline (idle); with a larger step, the loop
+ * reports a larger elapsed time, which reads as high load.
+ */
+function mockPerformanceNow(stepRef: { value: number }) {
+  let tick = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => {
+    tick += stepRef.value;
+    return tick;
   });
+}
 
+describe('CpuThrottle', () => {
   afterEach(() => {
-    window.requestIdleCallback = originalRic;
+    vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it('should clamp maxLoad between 0.05 and 0.30', () => {
-    const t1 = new CpuThrottle(0.01);
+    const t1 = new CpuThrottle(0.01, 1000);
     expect(t1.maxLoadValue).toBe(0.05);
 
-    const t2 = new CpuThrottle(0.5);
+    const t2 = new CpuThrottle(0.5, 1000);
     expect(t2.maxLoadValue).toBe(0.30);
 
-    const t3 = new CpuThrottle(0.15);
+    const t3 = new CpuThrottle(0.15, 1000);
     expect(t3.maxLoadValue).toBe(0.15);
   });
 
@@ -28,118 +37,75 @@ describe('CpuThrottle', () => {
     expect(t.lastMeasuredLoad).toBe(0);
   });
 
-  it('should measure idle delay and return a load value', async () => {
-    window.requestIdleCallback = ((cb: IdleRequestCallback) => {
-      queueMicrotask(() => cb({ didTimeout: false, timeRemaining: () => 50 }));
-      return 0;
-    }) as any;
+  it('should calibrate on first getCurrentLoad and report idle load', async () => {
+    const step = { value: 1 };
+    mockPerformanceNow(step);
 
-    const t = new CpuThrottle();
+    const t = new CpuThrottle(0.5, 1000);
     const load = await t.getCurrentLoad();
-    expect(load).toBeGreaterThanOrEqual(0);
-    expect(load).toBeLessThanOrEqual(1);
+    expect(load).toBe(0);
+    expect(t.lastMeasuredLoad).toBe(0);
+  });
+
+  it('should report high load when the busy loop is slower than baseline', async () => {
+    const step = { value: 1 };
+    mockPerformanceNow(step);
+
+    const t = new CpuThrottle(0.1, 1000);
+    await t.calibrate();
+
+    step.value = 5;
+    const load = await t.getCurrentLoad();
+    expect(load).toBe(1);
   });
 
   it('should indicate pause when load exceeds threshold', async () => {
-    vi.useFakeTimers();
-    window.requestIdleCallback = ((cb: IdleRequestCallback) => {
-      setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 }), 200);
-      return 0;
-    }) as any;
+    const step = { value: 1 };
+    mockPerformanceNow(step);
 
-    const t = new CpuThrottle(0.1);
+    const t = new CpuThrottle(0.1, 1000);
+    await t.calibrate();
 
-    const promise = t.shouldPause();
-    await vi.advanceTimersByTimeAsync(200);
-    const result = await promise;
-    expect(result).toBe(true);
-
-    vi.useRealTimers();
+    step.value = 5;
+    expect(await t.shouldPause()).toBe(true);
   });
 
   it('should not pause when load is below threshold', async () => {
-    vi.useFakeTimers();
-    window.requestIdleCallback = ((cb: IdleRequestCallback) => {
-      setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 50 }), 10);
-      return 0;
-    }) as any;
+    const step = { value: 1 };
+    mockPerformanceNow(step);
 
-    const t = new CpuThrottle(0.5);
+    const t = new CpuThrottle(0.5, 1000);
+    await t.calibrate();
 
-    const promise = t.shouldPause();
-    await vi.advanceTimersByTimeAsync(10);
-    const result = await promise;
-    expect(result).toBe(false);
-
-    vi.useRealTimers();
+    expect(await t.shouldPause()).toBe(false);
   });
 
-  it('should wait for slot when CPU is busy and eventually proceed', async () => {
-    let callCount = 0;
-    window.requestIdleCallback = ((cb: IdleRequestCallback) => {
-      callCount++;
-      const delay = callCount <= 2 ? 200 : 10;
-      setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 }), delay);
-      return 0;
-    }) as any;
-
+  it('should wait for slot while busy and proceed when load drops', async () => {
     vi.useFakeTimers();
-    const t = new CpuThrottle(0.1);
+    const step = { value: 1 };
+    mockPerformanceNow(step);
 
-    const promise = t.waitForSlot();
+    const t = new CpuThrottle(0.1, 1000);
+    await t.calibrate();
 
-    // First 2 checks see high load, 3rd check sees low load
-    // Loop until we've advanced past the 3rd check
-    for (let i = 0; i < 5; i++) {
-      await vi.advanceTimersByTimeAsync(500);
-    }
+    step.value = 5;
+    const promise = t.waitForSlot(10000);
+    step.value = 1;
+    await vi.advanceTimersByTimeAsync(500);
 
     await expect(promise).resolves.toBeUndefined();
     vi.useRealTimers();
   });
 
-  it('should start and stop periodic measuring', async () => {
-    window.requestIdleCallback = ((cb: IdleRequestCallback) => {
-      queueMicrotask(() => cb({ didTimeout: false, timeRemaining: () => 50 }));
-      return 0;
-    }) as any;
+  it('should give up waiting after maxWaitMs on a persistently busy machine', async () => {
+    const step = { value: 1 };
+    mockPerformanceNow(step);
 
-    vi.useFakeTimers();
-    const t = new CpuThrottle();
+    const t = new CpuThrottle(0.1, 1000);
+    await t.calibrate();
 
-    t.startMeasuring(1000);
-    // Initial measurement via queueMicrotask
-    await vi.advanceTimersByTimeAsync(0);
-    const afterStart = t.lastMeasuredLoad;
-    expect(afterStart).toBeGreaterThanOrEqual(0);
-
-    // Advance past the interval
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(t.lastMeasuredLoad).toBeGreaterThanOrEqual(0);
-
-    t.stopMeasuring();
-    await vi.advanceTimersByTimeAsync(0);
-    const before = t.lastMeasuredLoad;
-    await vi.advanceTimersByTimeAsync(2000);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(t.lastMeasuredLoad).toBe(before);
-
-    vi.useRealTimers();
-  });
-
-  it('should fallback to setTimeout if requestIdleCallback is not available', async () => {
-    (window as any).requestIdleCallback = undefined;
-
-    vi.useFakeTimers();
-    const t = new CpuThrottle();
-
-    const promise = t.getCurrentLoad();
-    await vi.advanceTimersByTimeAsync(0);
-    const load = await promise;
-
-    expect(load).toBeGreaterThanOrEqual(0);
-    expect(load).toBeLessThanOrEqual(1);
-
-    vi.useRealTimers();
+    step.value = 5;
+    const promise = t.waitForSlot(1);
+    await expect(promise).resolves.toBeUndefined();
   });
 });

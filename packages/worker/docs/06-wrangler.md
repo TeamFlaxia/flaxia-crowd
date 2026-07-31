@@ -44,9 +44,18 @@ id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # wrangler kv:namespace create CROWD_KV
 以下は `wrangler secret put` で設定する（wrangler.tomlには書かない）：
 
 ```bash
-wrangler secret put CROWD_API_SECRET    # SDK認証用シークレット
-wrangler secret put CROWD_HMAC_SECRET   # コールバック署名用
+wrangler secret put NODE_TOKEN_SECRET   # ノード登録トークン署名・コールバック署名用（必須）
 ```
+
+- `NODE_TOKEN_SECRET` を設定しない場合、`/crowd/nodes/register` は503を返し、ノードは接続できない。
+- ローカル開発時は `wrangler.toml` と同じディレクトリに `.dev.vars` を作成し `NODE_TOKEN_SECRET=...` を記述する。
+
+## ノード登録フロー（HMACトークン）
+
+ノード認証はKV不要のHMAC-SHA256署名トークン方式。
+
+1. `POST /crowd/nodes/register` に `{ siteId, nodeId, capabilities }` を送信 → `{ token, nodeId, expiresAt }` を返却（有効期限24時間）。
+2. `WS /crowd/signal?token=<token>` で接続。署名と期限を検証し、`nodeId` はトークン内の値を使用する（クライアント指定不可）。
 
 ## KV Namespace の作成コマンド
 

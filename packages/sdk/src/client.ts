@@ -1,8 +1,9 @@
-import type { TaskPayload, WorkloadType, TaskRecord } from './types';
+import type { TaskPayload, WorkloadType, TaskRecord, SubmitTaskResponse } from './types';
 import { AuthenticationError, FlaxiaError, TaskNotFoundError, ValidationError } from './errors';
 
 export interface FlaxiaClientConfig {
   apiKey: string;
+  /** Orchestrator root URL, e.g. 'https://api.flaxia.crowd' or 'https://host/crowd'. */
   baseUrl?: string;
 }
 
@@ -10,6 +11,7 @@ export interface SubmitTaskOptions {
   workload: WorkloadType;
   payload: TaskPayload;
   callbackUrl?: string;
+  timeoutMs?: number;
 }
 
 export interface TaskSubscription {
@@ -17,6 +19,23 @@ export interface TaskSubscription {
   onDone: (callback: (result: unknown) => void) => void;
   onError: (callback: (error: string) => void) => void;
   close: () => void;
+}
+
+/**
+ * Normalizes a base URL so the SDK can be configured with either the host root
+ * ('https://host') or a '/crowd'-prefixed URL, while all requests consistently
+ * target the worker's actual routes ('/crowd/tasks', '/crowd/subscribe').
+ */
+function normalizeBaseUrl(raw: string): string {
+  let base = raw.trim().replace(/\/+$/, '');
+  if (base.endsWith('/crowd')) {
+    base = base.slice(0, -'/crowd'.length);
+  }
+  return base;
+}
+
+function toWsUrl(baseUrl: string): string {
+  return baseUrl.replace(/^http/, 'ws');
 }
 
 export class FlaxiaClient {
@@ -28,32 +47,40 @@ export class FlaxiaClient {
       throw new AuthenticationError('API Key is required');
     }
     this.apiKey = config.apiKey;
-    this.baseUrl = config.baseUrl || 'https://api.flaxia.crowd';
+    this.baseUrl = normalizeBaseUrl(config.baseUrl || 'https://api.flaxia.crowd');
   }
 
-  async submit(options: SubmitTaskOptions): Promise<TaskRecord> {
+  async submit(options: SubmitTaskOptions): Promise<SubmitTaskResponse> {
     if (!options.workload || !options.payload) {
       throw new ValidationError('workload and payload are required');
     }
 
-    const response = await fetch(`${this.baseUrl}/tasks`, {
+    const body: Record<string, unknown> = {
+      workload: options.workload,
+      payload: options.payload,
+    };
+    if (options.callbackUrl) body.callbackUrl = options.callbackUrl;
+    if (options.timeoutMs !== undefined) body.timeoutMs = options.timeoutMs;
+
+    const response = await fetch(`${this.baseUrl}/crowd/tasks`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
       },
-      body: JSON.stringify(options),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
-      throw new FlaxiaError(response.statusText || 'Failed to submit task', 'SUBMIT_ERROR', response.status);
+      const message = await this.extractError(response);
+      throw new FlaxiaError(message, 'SUBMIT_ERROR', response.status);
     }
 
-    return response.json() as Promise<TaskRecord>;
+    return response.json() as Promise<SubmitTaskResponse>;
   }
 
   async getTask(taskId: string): Promise<TaskRecord> {
-    const response = await fetch(`${this.baseUrl}/tasks/${taskId}`, {
+    const response = await fetch(`${this.baseUrl}/crowd/tasks/${taskId}`, {
       headers: {
         'Authorization': `Bearer ${this.apiKey}`,
       },
@@ -64,7 +91,8 @@ export class FlaxiaClient {
     }
 
     if (!response.ok) {
-      throw new FlaxiaError(response.statusText || 'Failed to fetch task', 'FETCH_ERROR', response.status);
+      const message = await this.extractError(response);
+      throw new FlaxiaError(message, 'FETCH_ERROR', response.status);
     }
 
     return response.json() as Promise<TaskRecord>;
@@ -82,14 +110,24 @@ export class FlaxiaClient {
       return await Promise.race([
         this.pollUntilDone(taskId, intervalMs, timeoutMs, start),
         new Promise<TaskRecord>((resolve, reject) => {
+          const remaining = timeoutMs - (Date.now() - start);
+          if (remaining <= 0) {
+            reject(new FlaxiaError('Task polling timed out', 'POLLING_TIMEOUT', 408));
+            return;
+          }
+
           const timer = setTimeout(() => {
-            reject(new Error('fallback'));
-          }, timeoutMs - (Date.now() - start));
+            reject(new FlaxiaError('Task polling timed out', 'POLLING_TIMEOUT', 408));
+          }, remaining);
 
           const finish = async () => {
             clearTimeout(timer);
             ws.close();
-            try { resolve(await this.getTask(taskId)); } catch { reject(); }
+            try {
+              resolve(await this.getTask(taskId));
+            } catch (err) {
+              reject(err instanceof Error ? err : new Error(String(err)));
+            }
           };
 
           ws.onDone(finish);
@@ -113,8 +151,7 @@ export class FlaxiaClient {
   }
 
   async subscribe(taskId: string): Promise<TaskSubscription> {
-    const wsBase = this.baseUrl.replace('http', 'ws');
-    const ws = new WebSocket(`${wsBase}/crowd/subscribe?taskId=${taskId}`);
+    const ws = new WebSocket(`${toWsUrl(this.baseUrl)}/crowd/subscribe?taskId=${taskId}`);
 
     let tokenCallback: ((token: string) => void) | null = null;
     let doneCallback: ((result: unknown) => void) | null = null;
@@ -147,5 +184,13 @@ export class FlaxiaClient {
         reject(new FlaxiaError('WebSocket connection failed', 'WS_CONNECT_ERROR', 0));
       };
     });
+  }
+
+  private async extractError(response: Response): Promise<string> {
+    try {
+      const data = await response.json();
+      if (data && typeof data.error === 'string' && data.error) return data.error;
+    } catch {}
+    return response.statusText || 'Request failed';
   }
 }

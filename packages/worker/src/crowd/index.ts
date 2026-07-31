@@ -1,44 +1,48 @@
 import { Hono } from 'hono'
 import type { Env } from '../index'
 import type { TaskRecord, WorkloadType } from '@flaxia/sdk'
+import {
+  createNodeToken,
+  NODE_TOKEN_TTL_MS,
+  verifyNodeToken,
+  validateCallbackUrl,
+  safeEqual,
+} from '../security'
+import { DEFAULT_TIMEOUT_MS } from '../worker/Coordinator'
 
 const VALID_WORKLOADS: readonly string[] = [
   'ai-inference', 'image-process', 'file-convert', 'container',
   'vector-embed', 'vector-store', 'vector-query'
 ]
 
+const MIN_TIMEOUT_MS = 1000
+const MAX_TIMEOUT_MS = 3600000
+
+function originAllowed(origin: string, env: Env): boolean {
+  const allowed = (env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
+  if (allowed.length === 0) return true
+  return allowed.some(pattern => {
+    if (pattern === origin) return true
+    if (pattern.startsWith('*.')) {
+      const suffix = pattern.slice(2)
+      return origin === suffix || origin.endsWith(`.${suffix}`)
+    }
+    return false
+  })
+}
+
 export async function validateApiKey(env: Env, authHeader: string | undefined): Promise<boolean> {
   if (!authHeader) return false
   const [scheme, token] = authHeader.split(' ')
   if (scheme !== 'Bearer' || !token) return false
   const staticKeys = (env.API_KEYS || '').split(',').map(k => k.trim()).filter(Boolean)
-  return staticKeys.includes(token)
-}
-
-function getClientIp(c: any): string {
-  return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
-}
-
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>()
-
-function checkRateLimit(env: Env, key: string): boolean {
-  const maxStr = env.RATE_LIMIT_MAX || '100'
-  const max = parseInt(maxStr, 10) || 100
-  const now = Date.now()
-  const entry = rateLimitMap.get(key)
-  if (!entry || now > entry.resetAt) {
-    rateLimitMap.set(key, { count: 1, resetAt: now + 60000 })
-    return true
-  }
-  if (entry.count >= max) return false
-  entry.count++
-  return true
+  return staticKeys.some(key => safeEqual(key, token))
 }
 
 function validatePayloadSize(env: Env, body: string): boolean {
   const maxStr = env.MAX_PAYLOAD_SIZE || '1048576'
   const max = parseInt(maxStr, 10) || 1048576
-  return body.length <= max
+  return new TextEncoder().encode(body).byteLength <= max
 }
 
 const app = new Hono<{ Bindings: Env }>()
@@ -48,23 +52,68 @@ function getCoordinator(c: any) {
   return c.env.COORDINATOR.get(id)
 }
 
+function checkOrigin(c: any): boolean {
+  const origin = c.req.header('Origin')
+  if (!origin) return true
+  return originAllowed(origin, c.env)
+}
+
+// --- Node registration & signaling ---
+
+app.post('/nodes/register', async (c) => {
+  let body: { siteId?: string; nodeId?: string; capabilities?: string[] }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400)
+  }
+
+  if (!body || typeof body.siteId !== 'string' || !body.siteId) {
+    return c.json({ error: 'siteId is required' }, 400)
+  }
+
+  const capabilities = Array.isArray(body.capabilities)
+    ? body.capabilities.filter((cap): cap is string => typeof cap === 'string')
+    : []
+  const nodeId = typeof body.nodeId === 'string' && body.nodeId
+    ? body.nodeId
+    : crypto.randomUUID()
+
+  if (!c.env.NODE_TOKEN_SECRET) {
+    return c.json({ error: 'Node token secret is not configured' }, 503)
+  }
+
+  const exp = Date.now() + NODE_TOKEN_TTL_MS
+  const token = await createNodeToken(c.env.NODE_TOKEN_SECRET, {
+    siteId: body.siteId,
+    nodeId,
+    capabilities,
+    exp,
+  })
+
+  return c.json({ token, nodeId, expiresAt: exp })
+})
+
 app.get('/signal', async (c) => {
   const upgradeHeader = c.req.header('Upgrade')
   if (!upgradeHeader || upgradeHeader !== 'websocket') {
     return c.text('Expected Upgrade: websocket', 426)
   }
-  const origin = c.req.header('Origin')
-  if (origin) {
-    const allowed = (c.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
-    if (allowed.length > 0 && !allowed.some(a => origin === a || (a.startsWith('*.') && origin.endsWith(a.slice(1))))) {
-      return c.text('Origin not allowed', 403)
-    }
+  if (!checkOrigin(c)) {
+    return c.text('Origin not allowed', 403)
   }
-  if (!checkRateLimit(c.env, `signal:${getClientIp(c)}`)) {
-    return c.text('Rate limit exceeded', 429)
+
+  const token = c.req.query('token')
+  const payload = await verifyNodeToken(c.env.NODE_TOKEN_SECRET, token)
+  if (!payload) {
+    return c.text('Invalid or expired token', 401)
   }
+
   const url = new URL(c.req.url)
   url.pathname = '/ws'
+  url.searchParams.set('nodeId', payload.nodeId)
+  url.searchParams.set('capabilities', payload.capabilities.join(','))
+
   const stub = getCoordinator(c)
   return stub.fetch(new Request(url.toString(), {
     headers: c.req.raw.headers,
@@ -77,18 +126,13 @@ app.get('/subscribe', async (c) => {
   if (!upgradeHeader || upgradeHeader !== 'websocket') {
     return c.text('Expected Upgrade: websocket', 426)
   }
-  const origin = c.req.header('Origin')
-  if (origin) {
-    const allowed = (c.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
-    if (allowed.length > 0 && !allowed.some(a => origin === a || (a.startsWith('*.') && origin.endsWith(a.slice(1))))) {
-      return c.text('Origin not allowed', 403)
-    }
+  if (!checkOrigin(c)) {
+    return c.text('Origin not allowed', 403)
   }
-  if (!checkRateLimit(c.env, `subscribe:${getClientIp(c)}`)) {
-    return c.text('Rate limit exceeded', 429)
-  }
+
   const taskId = c.req.query('taskId')
   if (!taskId) return c.text('taskId is required', 400)
+
   const url = new URL(c.req.url)
   url.pathname = '/subscribe'
   const stub = getCoordinator(c)
@@ -98,17 +142,49 @@ app.get('/subscribe', async (c) => {
   }))
 })
 
+// --- Task submission & polling ---
+
 app.post('/tasks', async (c) => {
   const auth = c.req.header('Authorization')
   if (!await validateApiKey(c.env, auth)) return c.json({ error: 'Unauthorized' }, 401)
-  if (!checkRateLimit(c.env, `tasks:${getClientIp(c)}`)) return c.json({ error: 'Rate limit exceeded' }, 429)
 
   const rawBody = await c.req.text()
   if (!validatePayloadSize(c.env, rawBody)) return c.json({ error: 'Payload too large' }, 413)
 
-  const body = JSON.parse(rawBody) as { workload: string; payload: unknown; timeoutMs?: number; callbackUrl?: string }
-  if (!body.workload || !VALID_WORKLOADS.includes(body.workload)) return c.json({ error: 'Invalid workload type' }, 400)
+  let body: { workload?: string; payload?: unknown; timeoutMs?: number; callbackUrl?: string }
+  try {
+    body = JSON.parse(rawBody)
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400)
+  }
+
+  if (typeof body.workload !== 'string' || !VALID_WORKLOADS.includes(body.workload)) {
+    return c.json({ error: 'Invalid workload type' }, 400)
+  }
   if (!body.payload) return c.json({ error: 'payload is required' }, 400)
+
+  let timeoutMs = body.timeoutMs
+  if (timeoutMs === undefined || timeoutMs === null) {
+    timeoutMs = DEFAULT_TIMEOUT_MS
+  } else if (
+    typeof timeoutMs !== 'number' ||
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs < MIN_TIMEOUT_MS ||
+    timeoutMs > MAX_TIMEOUT_MS
+  ) {
+    return c.json({ error: 'timeoutMs must be between 1000 and 3600000' }, 400)
+  }
+
+  let callbackUrl: string | undefined
+  if (body.callbackUrl !== undefined) {
+    if (typeof body.callbackUrl !== 'string') {
+      return c.json({ error: 'callbackUrl must be a string' }, 400)
+    }
+    callbackUrl = validateCallbackUrl(body.callbackUrl)
+    if (!callbackUrl) {
+      return c.json({ error: 'callbackUrl is not allowed (HTTPS required, internal addresses blocked)' }, 400)
+    }
+  }
 
   const taskId = crypto.randomUUID()
   const task: TaskRecord = {
@@ -118,8 +194,8 @@ app.post('/tasks', async (c) => {
     payload: body.payload as any,
     createdAt: Date.now(),
     retryCount: 0,
-    timeoutMs: body.timeoutMs || 30000,
-    callbackUrl: body.callbackUrl,
+    timeoutMs,
+    callbackUrl,
   }
 
   const stub = getCoordinator(c)
@@ -134,7 +210,6 @@ app.post('/tasks', async (c) => {
 app.get('/tasks/:id', async (c) => {
   const auth = c.req.header('Authorization')
   if (!await validateApiKey(c.env, auth)) return c.json({ error: 'Unauthorized' }, 401)
-  if (!checkRateLimit(c.env, `tasks:${getClientIp(c)}`)) return c.json({ error: 'Rate limit exceeded' }, 429)
 
   const id = c.req.param('id')
   const stub = getCoordinator(c)

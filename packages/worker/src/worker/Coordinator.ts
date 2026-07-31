@@ -1,14 +1,26 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../index";
 import type { TaskRecord, WorkloadType } from "@flaxia/sdk";
+import { signPayload } from "../security";
+
+export const DEFAULT_TIMEOUT_MS = 60000;
+export const MAX_RETRIES = 3;
+export const STALE_NODE_MS = 60000;
+export const ALARM_INTERVAL_MS = 30000;
 
 interface NodeRecord {
   id: string;
   status: "idle" | "busy";
   capabilities: WorkloadType[];
   cpuLoad: number;
+  connectedAt: number;
   lastPongAt: number;
   currentTaskId?: string;
+}
+
+interface RateEntry {
+  count: number;
+  resetAt: number;
 }
 
 export class Coordinator extends DurableObject<Env> {
@@ -23,10 +35,16 @@ export class Coordinator extends DurableObject<Env> {
     const url = new URL(request.url);
 
     if (url.pathname === "/ws") {
+      if (!(await this.checkRateLimit(request, "signal"))) {
+        return new Response("Rate limit exceeded", { status: 429 });
+      }
       return this.handleWebSocket(request, url);
     }
 
     if (url.pathname === "/subscribe") {
+      if (!(await this.checkRateLimit(request, "subscribe"))) {
+        return new Response("Rate limit exceeded", { status: 429 });
+      }
       return this.handleSubscribe(request, url);
     }
 
@@ -41,22 +59,25 @@ export class Coordinator extends DurableObject<Env> {
       return Response.json(task);
     }
 
-    if (url.pathname === "/assign-next") {
-      await this.tryAssignAll();
-      return new Response("OK");
-    }
-
     return new Response("Not Found", { status: 404 });
   }
 
   // --- WebSocket: Node signaling ---
 
   private async handleWebSocket(request: Request, url: URL): Promise<Response> {
+    const nodeId = url.searchParams.get("nodeId");
+    if (!nodeId) return new Response("nodeId is required", { status: 400 });
+    const capabilities = (url.searchParams.get("capabilities") || "").split(",").filter(Boolean) as WorkloadType[];
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    const nodeId = url.searchParams.get("nodeId") || crypto.randomUUID();
-    const capabilities = (url.searchParams.get("capabilities") || "").split(",").filter(Boolean) as WorkloadType[];
+    // If the node reconnects while a task is still in flight, fail the orphaned task
+    // so it can be retried instead of sitting in `processing` until timeout.
+    const existing = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    if (existing?.currentTaskId) {
+      await this.failTask(existing.currentTaskId, "Node reconnected before completing task");
+    }
 
     this.ctx.acceptWebSocket(server, [nodeId]);
 
@@ -69,7 +90,8 @@ export class Coordinator extends DurableObject<Env> {
       id: nodeId,
       status: "idle",
       capabilities,
-      cpuLoad: 0,
+      cpuLoad: existing?.cpuLoad ?? 0,
+      connectedAt: existing?.connectedAt ?? Date.now(),
       lastPongAt: Date.now(),
     };
 
@@ -92,14 +114,20 @@ export class Coordinator extends DurableObject<Env> {
 
     if (!nodeId || nodeId.startsWith("client:")) return;
 
+    let data: Record<string, unknown>;
     try {
-      const data = JSON.parse(message as string);
+      data = JSON.parse(message as string);
+    } catch {
+      return;
+    }
 
+    try {
       if (data.type === "pong") {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (node) {
           node.lastPongAt = Date.now();
-          node.cpuLoad = data.cpuLoad || 0;
+          const load = typeof data.cpuLoad === "number" ? data.cpuLoad : 0;
+          node.cpuLoad = Math.min(1, Math.max(0, load));
           await this.ctx.storage.put(`node:${nodeId}`, node);
         }
         return;
@@ -107,24 +135,13 @@ export class Coordinator extends DurableObject<Env> {
 
       if (data.type === "result" || data.type === "error") {
         const isError = data.type === "error";
-        const taskId = data.taskId;
+        const taskId = typeof data.taskId === "string" ? data.taskId : "";
 
         if (isError) {
-          await this.failTask(taskId, data.error || "Node error");
+          const error = typeof data.error === "string" ? data.error : "Node error";
+          await this.failTask(taskId, error, nodeId);
         } else {
           await this.completeTask(taskId, data.payload, nodeId);
-        }
-
-        const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
-        if (node) {
-          node.status = "idle";
-          node.currentTaskId = undefined;
-          await this.ctx.storage.put(`node:${nodeId}`, node);
-          const idleNodes = await this.getIdleNodes();
-          if (!idleNodes.includes(nodeId)) {
-            idleNodes.push(nodeId);
-            await this.ctx.storage.put("nodes:idle", idleNodes);
-          }
         }
 
         await this.tryAssignAll();
@@ -132,10 +149,14 @@ export class Coordinator extends DurableObject<Env> {
       }
 
       if (data.type === "progress") {
+        const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+        if (!node || node.currentTaskId !== data.taskId) return;
+        if (typeof data.token !== "string") return;
+
         const subs = this.ctx.getWebSockets(`client:${data.taskId}`);
         const msg = JSON.stringify({ type: "token", token: data.token });
-        for (const ws of subs) {
-          try { ws.send(msg); } catch {}
+        for (const sub of subs) {
+          try { sub.send(msg); } catch {}
         }
         return;
       }
@@ -145,16 +166,26 @@ export class Coordinator extends DurableObject<Env> {
   async webSocketClose(ws: WebSocket) {
     const tags = this.ctx.getTags(ws);
     const tag = tags[0];
-    if (!tag) return;
 
-    if (tag.startsWith("client:")) return;
+    if (!tag) {
+      try { ws.close(); } catch {}
+      return;
+    }
+
+    if (tag.startsWith("client:")) {
+      try { ws.close(); } catch {}
+      return;
+    }
+
+    // Reciprocate the close frame. Required for compatibility dates before 2026-04-07.
+    try { ws.close(); } catch {}
 
     const otherSockets = this.ctx.getWebSockets(tag).filter(s => s !== ws);
     if (otherSockets.length > 0) return;
 
     const node = await this.ctx.storage.get<NodeRecord>(`node:${tag}`);
     if (node?.currentTaskId) {
-      await this.failTask(node.currentTaskId, "Node disconnected");
+      await this.failTask(node.currentTaskId, "Node disconnected", undefined, false);
     }
 
     await this.ctx.storage.delete(`node:${tag}`);
@@ -171,7 +202,9 @@ export class Coordinator extends DurableObject<Env> {
     if (!taskId) return new Response("taskId is required", { status: 400 });
 
     const existing = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
-    if (existing?.status === "done" || existing?.status === "failed") {
+    if (!existing) return new Response("Task not found", { status: 404 });
+
+    if (existing.status === "done" || existing.status === "failed") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       server.accept();
@@ -193,7 +226,14 @@ export class Coordinator extends DurableObject<Env> {
   // --- Task management ---
 
   private async handleEnqueue(request: Request): Promise<Response> {
-    const body = await request.json() as TaskRecord;
+    let body: TaskRecord;
+    try {
+      body = await request.json() as TaskRecord;
+    } catch {
+      return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
+    if (!body?.id) return Response.json({ error: "Task id is required" }, { status: 400 });
 
     await this.ctx.storage.put(`task:${body.id}`, body);
 
@@ -205,8 +245,8 @@ export class Coordinator extends DurableObject<Env> {
     await this.tryAssignAll();
 
     const alarm = await this.ctx.storage.getAlarm();
-    if (!alarm || alarm > Date.now() + body.timeoutMs) {
-      await this.ctx.storage.setAlarm(Date.now() + (body.timeoutMs || 60000));
+    if (!alarm || alarm > Date.now() + (body.timeoutMs || DEFAULT_TIMEOUT_MS)) {
+      await this.ctx.storage.setAlarm(Date.now() + (body.timeoutMs || DEFAULT_TIMEOUT_MS));
     }
 
     return Response.json({ message: "Task submitted", taskId: body.id });
@@ -215,11 +255,14 @@ export class Coordinator extends DurableObject<Env> {
   private async completeTask(taskId: string, result: unknown, nodeId: string) {
     const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
     if (!task || task.status !== "processing") return;
+    if (task.assignedNodeId !== nodeId) return;
+
     task.status = "done";
     task.result = result;
     task.completedAt = Date.now();
-    task.assignedNodeId = nodeId;
     await this.ctx.storage.put(`task:${taskId}`, task);
+
+    await this.releaseNode(nodeId);
 
     const processing = await this.getProcessing();
     this.processingCache = processing.filter(id => id !== taskId);
@@ -227,26 +270,52 @@ export class Coordinator extends DurableObject<Env> {
 
     const subs = this.ctx.getWebSockets(`client:${taskId}`);
     const msg = JSON.stringify({ type: "done", result });
-    for (const ws of subs) {
-      try { ws.send(msg); ws.close(); } catch {}
+    for (const sub of subs) {
+      try { sub.send(msg); sub.close(); } catch {}
     }
 
     if (task.callbackUrl) {
-      this.deliverCallback(task.callbackUrl, {
+      await this.deliverCallback(task.callbackUrl, {
         taskId, status: 'done', result: task.result,
       });
     }
   }
 
-  private async failTask(taskId: string, error: string) {
+  private async failTask(taskId: string, error: string, expectedNodeId?: string, release = true) {
     const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
     if (!task || (task.status !== "pending" && task.status !== "processing")) return;
+    if (expectedNodeId && task.assignedNodeId && task.assignedNodeId !== expectedNodeId) return;
+
+    if (task.assignedNodeId && release) {
+      await this.releaseNode(task.assignedNodeId);
+    }
+
+    // Retry transient failures (timeout / disconnect) up to MAX_RETRIES times.
+    if (task.status === "processing" && task.retryCount < MAX_RETRIES) {
+      task.retryCount++;
+      task.status = "pending";
+      task.assignedNodeId = undefined;
+      task.assignedAt = undefined;
+      await this.ctx.storage.put(`task:${taskId}`, task);
+
+      const processing = await this.getProcessing();
+      this.processingCache = processing.filter(id => id !== taskId);
+      await this.ctx.storage.put("queue:processing", this.processingCache);
+
+      const pending = await this.getPending();
+      if (!pending.includes(taskId)) {
+        pending.push(taskId);
+        this.pendingCache = pending;
+        await this.ctx.storage.put("queue:pending", pending);
+      }
+      return;
+    }
+
     task.status = "failed";
     task.error = error;
     task.completedAt = Date.now();
     await this.ctx.storage.put(`task:${taskId}`, task);
 
-    // Remove from pending or processing
     if (task.assignedNodeId) {
       const processing = await this.getProcessing();
       this.processingCache = processing.filter(id => id !== taskId);
@@ -259,23 +328,44 @@ export class Coordinator extends DurableObject<Env> {
 
     const subs = this.ctx.getWebSockets(`client:${taskId}`);
     const msg = JSON.stringify({ type: "error", error });
-    for (const ws of subs) {
-      try { ws.send(msg); ws.close(); } catch {}
+    for (const sub of subs) {
+      try { sub.send(msg); sub.close(); } catch {}
     }
 
     if (task.callbackUrl) {
-      this.deliverCallback(task.callbackUrl, {
+      await this.deliverCallback(task.callbackUrl, {
         taskId, status: 'failed', error: task.error,
       });
     }
   }
 
+  private async releaseNode(nodeId: string) {
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    if (!node) return;
+    node.status = "idle";
+    node.currentTaskId = undefined;
+    await this.ctx.storage.put(`node:${nodeId}`, node);
+
+    const idleNodes = await this.getIdleNodes();
+    if (!idleNodes.includes(nodeId)) {
+      idleNodes.push(nodeId);
+      await this.ctx.storage.put("nodes:idle", idleNodes);
+    }
+  }
+
   private async deliverCallback(url: string, body: Record<string, unknown>) {
     try {
+      const payload = JSON.stringify(body);
+      const signature = this.env.NODE_TOKEN_SECRET
+        ? await signPayload(this.env.NODE_TOKEN_SECRET, payload)
+        : '';
       await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(signature ? { 'X-Flaxia-Signature': signature } : {}),
+        },
+        body: payload,
         signal: AbortSignal.timeout(5000),
       });
     } catch {
@@ -290,23 +380,30 @@ export class Coordinator extends DurableObject<Env> {
     const idleNodes = await this.getIdleNodes();
     if (idleNodes.length === 0) return;
 
+    let remainingIdle = [...idleNodes];
+
     for (const taskId of [...pendingIds]) {
       const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
       if (!task || task.status !== "pending") continue;
 
       let chosenNode: string | null = null;
       let bestLoad = Infinity;
+      let bestConnectedAt = Infinity;
 
-      for (const nodeId of idleNodes) {
-        if (chosenNode) break;
+      for (const nodeId of remainingIdle) {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (!node || node.status !== "idle") continue;
         if (!node.capabilities.includes(task.workload as WorkloadType)) continue;
         const sockets = this.ctx.getWebSockets(nodeId);
         if (sockets.length === 0) continue;
-        if (node.cpuLoad < bestLoad) {
+
+        if (
+          node.cpuLoad < bestLoad ||
+          (node.cpuLoad === bestLoad && node.connectedAt < bestConnectedAt)
+        ) {
           chosenNode = nodeId;
           bestLoad = node.cpuLoad;
+          bestConnectedAt = node.connectedAt;
         }
       }
 
@@ -322,7 +419,9 @@ export class Coordinator extends DurableObject<Env> {
 
       const processing = await this.getProcessing();
       this.processingCache = processing;
-      this.processingCache.push(taskId);
+      if (!this.processingCache.includes(taskId)) {
+        this.processingCache.push(taskId);
+      }
       await this.ctx.storage.put("queue:processing", this.processingCache);
 
       const node = await this.ctx.storage.get<NodeRecord>(`node:${chosenNode}`);
@@ -330,48 +429,64 @@ export class Coordinator extends DurableObject<Env> {
         node.status = "busy";
         node.currentTaskId = taskId;
         await this.ctx.storage.put(`node:${chosenNode}`, node);
-        await this.ctx.storage.put("nodes:idle", idleNodes.filter(id => id !== chosenNode));
       }
 
+      remainingIdle = remainingIdle.filter(id => id !== chosenNode);
+      await this.ctx.storage.put("nodes:idle", remainingIdle);
+
       const sockets = this.ctx.getWebSockets(chosenNode);
+      let sent = false;
       for (const sock of sockets) {
         try {
           sock.send(JSON.stringify({
             type: "task",
             taskId: task.id,
             workload: task.workload,
-            payload: task.payload
+            payload: task.payload,
+            timeoutMs: task.timeoutMs,
           }));
+          sent = true;
           break;
         } catch {}
+      }
+
+      // If the send failed, immediately fail the task (with retry) instead of
+      // leaving it stuck in `processing`.
+      if (!sent) {
+        await this.failTask(taskId, "Failed to deliver task to node");
       }
     }
   }
 
   async alarm() {
-    const processingIds = await this.getProcessing();
     const now = Date.now();
+    const processingIds = await this.getProcessing();
 
     for (const taskId of processingIds) {
       const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
-      if (task && task.assignedAt && now - task.assignedAt > (task.timeoutMs || 600000)) {
+      if (task && task.assignedAt && now - task.assignedAt > (task.timeoutMs || DEFAULT_TIMEOUT_MS)) {
         await this.failTask(taskId, "Task timed out");
       }
     }
 
-    // Send pings to all idle nodes to keep them alive
+    // Ping live nodes and garbage-collect stale ones (idle or busy).
     const idleNodes = await this.getIdleNodes();
-    for (const nodeId of idleNodes) {
-      const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
-      if (!node) continue;
+    const nodeEntries = await this.ctx.storage.list({ prefix: "node:" });
 
-      if (now - node.lastPongAt > 60000) {
-        await this.ctx.storage.delete(`node:${nodeId}`);
-        await this.ctx.storage.put("nodes:idle", idleNodes.filter(id => id !== nodeId));
+    for (const [key, record] of nodeEntries) {
+      const nodeId = key.slice("node:".length);
+      const node = record as unknown as NodeRecord;
+
+      if (now - node.lastPongAt > STALE_NODE_MS) {
+        if (node.currentTaskId) {
+          await this.failTask(node.currentTaskId, "Node stale", undefined, false);
+        }
+        await this.ctx.storage.delete(key);
+        const idx = idleNodes.indexOf(nodeId);
+        if (idx !== -1) idleNodes.splice(idx, 1);
         continue;
       }
 
-      // Send ping to keep the node alive
       const sockets = this.ctx.getWebSockets(nodeId);
       for (const sock of sockets) {
         try {
@@ -379,13 +494,43 @@ export class Coordinator extends DurableObject<Env> {
         } catch {}
       }
     }
+    await this.ctx.storage.put("nodes:idle", idleNodes);
+
+    // GC expired rate-limit entries.
+    const rateEntries = await this.ctx.storage.list({ prefix: "rate:" });
+    for (const [key, entry] of rateEntries) {
+      const rate = entry as unknown as RateEntry;
+      if (now > rate.resetAt) {
+        await this.ctx.storage.delete(key);
+      }
+    }
 
     const pending = await this.getPending();
     const processing = await this.getProcessing();
     const remainingIdle = await this.getIdleNodes();
     if (pending.length > 0 || processing.length > 0 || remainingIdle.length > 0) {
-      await this.ctx.storage.setAlarm(Date.now() + 30000);
+      await this.ctx.storage.setAlarm(now + ALARM_INTERVAL_MS);
     }
+  }
+
+  // --- Rate limiting (storage-backed, shared across Worker isolates) ---
+
+  private async checkRateLimit(request: Request, kind: string): Promise<boolean> {
+    const maxStr = this.env.RATE_LIMIT_MAX || '100';
+    const max = parseInt(maxStr, 10) || 100;
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const key = `rate:${kind}:${ip}`;
+    const now = Date.now();
+
+    const entry = await this.ctx.storage.get<RateEntry>(key);
+    if (!entry || now > entry.resetAt) {
+      await this.ctx.storage.put(key, { count: 1, resetAt: now + 60000 });
+      return true;
+    }
+    if (entry.count >= max) return false;
+    entry.count++;
+    await this.ctx.storage.put(key, entry);
+    return true;
   }
 
   // --- Helpers ---

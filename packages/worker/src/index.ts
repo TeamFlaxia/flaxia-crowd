@@ -9,6 +9,7 @@ export interface Env {
   CORS_ORIGINS: string
   RATE_LIMIT_MAX: string
   MAX_PAYLOAD_SIZE: string
+  NODE_TOKEN_SECRET: string
 }
 
 const app = new Hono<{ Bindings: Env }>()
@@ -24,7 +25,13 @@ const corsMiddleware = cors({
     const allowed = getOrigins(c.env as Env | undefined)
     if (allowed.includes('*')) return origin || '*'
     if (!origin) return allowed[0]
-    if (allowed.includes(origin)) return origin
+    for (const pattern of allowed) {
+      if (pattern === origin) return origin
+      if (pattern.startsWith('*.')) {
+        const suffix = pattern.slice(2)
+        if (origin === suffix || origin.endsWith(`.${suffix}`)) return origin
+      }
+    }
     return allowed[0]
   },
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
