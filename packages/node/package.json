@@ -1,6 +1,6 @@
 {
   "name": "@flaxia/node",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "private": false,
   "main": "dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",
-    "@flaxia/sdk": "^0.1.0",
+    "@flaxia/sdk": "^0.2.0",
     "@huggingface/transformers": "^4.2.0",
     "rollup": "^4.61.0"
   },
