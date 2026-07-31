@@ -12,7 +12,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/RemydreScarlet/flaxia-crowd.git"
+    "url": "https://github.com/TeamFlaxia/flaxia-crowd.git"
   },
   "scripts": {
     "build": "rm -f tsconfig.tsbuildinfo && vite build && tsc -b",
