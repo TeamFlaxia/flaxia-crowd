@@ -27,6 +27,7 @@ build/
 .env
 .env.*
 !.env.example
+.dev.vars
 
 # logs
 *.log
