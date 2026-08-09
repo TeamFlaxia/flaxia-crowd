@@ -4,7 +4,7 @@
 
 export type TaskStatus = 'pending' | 'assigning' | 'processing' | 'done' | 'failed';
 
-export type WorkloadType = 'ai-inference' | 'image-process' | 'file-convert' | 'container' | 'vector-embed' | 'vector-store' | 'vector-query' | 'moe-inference';
+export type WorkloadType = 'ai-inference' | 'image-process' | 'file-convert' | 'container' | 'vector-embed' | 'vector-store' | 'vector-query' | 'moe-inference' | 'nudenet';
 
 // --- AI Inference ---
 
@@ -248,9 +248,42 @@ export interface VectorQueryResult {
   searchDurationMs: number;
 }
 
+// --- NudeNet (NSFW detection) ---
+
+export interface NudeNetPayload {
+  /** URL of an image to scan (must be fetchable from the browser node). */
+  imageUrl?: string;
+  /** Base64-encoded image data (used when imageUrl is not available). */
+  imageBase64?: string;
+  /** MIME type of the image, required when using imageBase64. */
+  mimeType?: string;
+  /** ONNX model to use. '320n' (default) or '640m'. */
+  model?: '320n' | '640m';
+  /** NMS score threshold (default: 0.25). */
+  scoreThreshold?: number;
+  /** NMS IoU threshold (default: 0.45). */
+  iouThreshold?: number;
+  /** Maximum number of detections to keep (default: 100). */
+  topK?: number;
+}
+
+export interface NudeNetDetection {
+  /** NudeNet class label, e.g. 'FEMALE_GENITALIA_EXPOSED'. */
+  label: string;
+  /** Confidence score of the detection. */
+  score: number;
+  /** Bounding box in original image pixel coordinates: [x1, y1, x2, y2]. */
+  box: [number, number, number, number];
+}
+
+export interface NudeNetResult {
+  detections: NudeNetDetection[];
+  durationMs: number;
+}
+
 // --- Core Task Types ---
 
-export type TaskPayload = AiInferencePayload | ImageProcessPayload | FileConvertPayload | ContainerPayload | VectorEmbedPayload | VectorStorePayload | VectorQueryPayload | MoEInferencePayload;
+export type TaskPayload = AiInferencePayload | ImageProcessPayload | FileConvertPayload | ContainerPayload | VectorEmbedPayload | VectorStorePayload | VectorQueryPayload | MoEInferencePayload | NudeNetPayload;
 
 export interface TaskRecord {
   id: string;

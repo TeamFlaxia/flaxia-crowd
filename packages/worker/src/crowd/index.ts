@@ -12,7 +12,7 @@ import { DEFAULT_TIMEOUT_MS } from '../worker/Coordinator'
 
 const VALID_WORKLOADS: readonly string[] = [
   'ai-inference', 'image-process', 'file-convert', 'container',
-  'vector-embed', 'vector-store', 'vector-query'
+  'vector-embed', 'vector-store', 'vector-query', 'nudenet'
 ]
 
 const MIN_TIMEOUT_MS = 1000

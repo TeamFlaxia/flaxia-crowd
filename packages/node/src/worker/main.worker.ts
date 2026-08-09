@@ -51,6 +51,10 @@ self.onmessage = async (e: MessageEvent) => {
           const { handleVectorQuery } = await import('../workloads/vector-query');
           result = await handleVectorQuery(payload);
           break;
+        case 'nudenet':
+          const { handleNudeNet } = await import('../workloads/nudenet');
+          result = await handleNudeNet(payload);
+          break;
         default:
           throw new Error(`Unknown workload type: ${workload}`);
       }
