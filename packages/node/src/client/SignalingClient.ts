@@ -4,6 +4,9 @@ import { WorkerPool } from '../executor/WorkerPool';
 
 import type { NodeConfig, WorkloadType } from '@flaxia/sdk';
 
+const log = (...args: unknown[]) => console.log('[flaxia-node]', ...args);
+const logError = (...args: unknown[]) => console.error('[flaxia-node]', ...args);
+
 export interface TaskMessage {
   type: 'task';
   taskId: string;
@@ -37,6 +40,7 @@ class SignalingClient {
 
   async connect() {
     if (this.destroyed) return;
+    log(`connect nodeId=${this.nodeId}`);
 
     if (this.ws) {
       const old = this.ws;
@@ -49,6 +53,7 @@ class SignalingClient {
 
     const token = await this.obtainToken();
     if (!token) {
+      logError('token acquisition failed; scheduling reconnect');
       this.scheduleReconnect();
       return;
     }
@@ -62,6 +67,7 @@ class SignalingClient {
 
     ws.onopen = () => {
       this.reconnectAttempts = 0;
+      log(`signal connected ${wsUrl.toString()}`);
     };
 
     ws.onmessage = async (event) => {
@@ -77,13 +83,17 @@ class SignalingClient {
         return;
       }
       if (data.type === 'task') {
+        const msg = data as unknown as TaskMessage;
+        log(`task received taskId=${msg.taskId} workload=${msg.workload} timeoutMs=${msg.timeoutMs ?? 'default'}`);
         try {
-          await this.handleTask(data as unknown as TaskMessage);
+          await this.handleTask(msg);
         } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          logError(`task failed taskId=${msg.taskId} workload=${msg.workload} error=${message}`);
           this.send({
             type: 'error',
             taskId: String(data.taskId ?? ''),
-            error: err instanceof Error ? err.message : String(err),
+            error: message,
           });
         }
       }
@@ -94,6 +104,7 @@ class SignalingClient {
       if (this.ws !== ws) return;
       this.ws = null;
       if (this.destroyed) return;
+      log(`signal disconnected; scheduling reconnect attempt=${this.reconnectAttempts + 1}`);
       this.scheduleReconnect();
     };
   }
@@ -108,6 +119,7 @@ class SignalingClient {
   }
 
   disconnect() {
+    log(`disconnect nodeId=${this.nodeId}`);
     this.destroyed = true;
     this.suspended = false;
     this.removeVisibilityHandler();
@@ -117,6 +129,7 @@ class SignalingClient {
 
   suspend() {
     if (this.suspended || this.destroyed) return;
+    log('suspended (visibility or manual)');
     this.suspended = true;
     if (this.ws) {
       const old = this.ws;
@@ -129,6 +142,7 @@ class SignalingClient {
 
   resume() {
     if (!this.suspended || this.destroyed) return;
+    log('resumed');
     this.suspended = false;
     this.workerPool.resume();
     this.connect();
@@ -141,6 +155,7 @@ class SignalingClient {
         try {
           const cached = JSON.parse(cachedRaw) as NodeToken;
           if (cached.token && cached.nodeId && cached.expiresAt > Date.now() + 60000) {
+            log(`token cached nodeId=${cached.nodeId} expiresIn=${Math.round((cached.expiresAt - Date.now()) / 1000)}s`);
             return cached;
           }
         } catch {}
@@ -156,16 +171,24 @@ class SignalingClient {
           capabilities: this.config.capabilities ?? ['ai-inference', 'image-process'],
         }),
       });
-      if (!response.ok) return null;
+      if (!response.ok) {
+        logError(`node register failed HTTP ${response.status} (${base}/crowd/nodes/register)`);
+        return null;
+      }
 
       const data = (await response.json()) as NodeToken;
-      if (!data.token) return null;
+      if (!data.token) {
+        logError('node register returned no token');
+        return null;
+      }
 
+      log(`node registered nodeId=${this.nodeId} expiresIn=${Math.round((data.expiresAt - Date.now()) / 1000)}s`);
       try {
         localStorage.setItem(NODE_TOKEN_KEY, JSON.stringify(data));
       } catch {}
       return data;
-    } catch {
+    } catch (err) {
+      logError('node register threw', err instanceof Error ? err.message : err);
       return null;
     }
   }
@@ -178,6 +201,7 @@ class SignalingClient {
 
   private async handleTask(data: TaskMessage) {
     const timeoutMs = data.timeoutMs ? data.timeoutMs + 30000 : undefined;
+    const startedAt = performance.now();
     const result = await this.workerPool.run(
       data.taskId,
       data.workload,
@@ -189,6 +213,9 @@ class SignalingClient {
       { maxCpuLoad: this.config.maxCpuLoad },
     );
     this.send({ type: 'result', taskId: data.taskId, payload: result });
+    log(
+      `task result sent taskId=${data.taskId} workload=${data.workload} durationMs=${Math.round(performance.now() - startedAt)}`,
+    );
   }
 
   private setupVisibilityHandler() {

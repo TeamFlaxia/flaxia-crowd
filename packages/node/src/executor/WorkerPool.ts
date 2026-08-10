@@ -1,5 +1,7 @@
 import type { WorkloadType } from "@flaxia/sdk";
 
+const log = (...args: unknown[]) => console.log("[flaxia-node]", ...args);
+
 interface ActiveTask {
   id: string;
   resolve: (value: unknown) => void;
@@ -63,6 +65,7 @@ export class WorkerPool {
       if (!this.active) {
         job();
       } else {
+        log(`task queued id=${id} workload=${workload} (active task running)`);
         this.queue.push(job);
       }
     });
@@ -87,6 +90,8 @@ export class WorkerPool {
 
     const timeout = timeoutMs ?? this.defaultTimeoutMs;
     let settled = false;
+    const startedAt = performance.now();
+    log(`task start id=${id} workload=${workload} timeoutMs=${timeout}`);
 
     const settle = (fn: () => void) => {
       if (settled) return;
@@ -116,10 +121,13 @@ export class WorkerPool {
         return;
       }
       if (type === 'done') {
+        log(`task done id=${id} workload=${workload} durationMs=${Math.round(performance.now() - startedAt)}`);
         settle(() => resolve(result));
       } else if (type === 'error') {
+        log(`task failed id=${id} workload=${workload} error=${error}`);
         settle(() => reject(new Error(error)));
       } else {
+        log(`task unknown-message id=${id} type=${String(type)}`);
         settle(() => reject(new Error(`Unknown message type: ${String(type)}`)));
       }
     };
@@ -129,6 +137,7 @@ export class WorkerPool {
     const timer = setTimeout(() => {
       // Terminate the stuck worker first, then settle. Because tasks are
       // serialized, only this task is affected; queued tasks run on the new worker.
+      log(`task timeout id=${id} workload=${workload} (worker terminated after ${timeout}ms)`);
       this.cleanupWorker();
       settle(() => reject(new Error('TIMEOUT')));
     }, timeout);
@@ -144,6 +153,7 @@ export class WorkerPool {
   }
 
   private handleWorkerError(err: Error) {
+    log(`worker error error=${err.message}`);
     const active = this.active;
     this.cleanupWorker();
     if (active) {

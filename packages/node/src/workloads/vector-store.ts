@@ -13,7 +13,15 @@ async function getEngine(): Promise<VectorStoreEngine> {
 
 export async function handleVectorStore(payload: VectorStorePayload): Promise<VectorStoreResult> {
   const eng = await getEngine();
-  return eng.store(payload);
+  const startedAt = performance.now();
+  try {
+    const result = await eng.store(payload);
+    console.log(`[flaxia-node] vector-store: done durationMs=${Math.round(performance.now() - startedAt)}`);
+    return result;
+  } catch (err) {
+    console.error(`[flaxia-node] vector-store: failed error=${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  }
 }
 
 export async function handleVectorStoreAssignShard(rangeStart: number, rangeEnd: number): Promise<void> {

@@ -5,12 +5,14 @@ let throttle: CpuThrottle | null = null;
 
 self.onmessage = async (e: MessageEvent) => {
   const { id, workload, payload, config } = e.data;
+  const taskStartedAt = performance.now();
 
   try {
     if (!throttle) {
       throttle = new CpuThrottle(config?.maxCpuLoad);
     }
 
+    console.log(`[flaxia-node:worker] task start id=${id} workload=${workload}`);
     await throttle.waitForSlot();
 
     const heartbeat = setInterval(() => {
@@ -60,10 +62,15 @@ self.onmessage = async (e: MessageEvent) => {
       }
 
       self.postMessage({ id, type: 'done', result });
+      console.log(
+        `[flaxia-node:worker] task done id=${id} workload=${workload} durationMs=${Math.round(performance.now() - taskStartedAt)}`,
+      );
     } finally {
       clearInterval(heartbeat);
     }
   } catch (err) {
-    self.postMessage({ id, type: 'error', error: err instanceof Error ? err.message : String(err) });
+    const error = err instanceof Error ? err.message : String(err);
+    console.error(`[flaxia-node:worker] task error id=${id} workload=${workload} error=${error}`);
+    self.postMessage({ id, type: 'error', error });
   }
 };

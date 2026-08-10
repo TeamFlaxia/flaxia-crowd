@@ -46,10 +46,21 @@ function getSession(url: string): Promise<ort.InferenceSession> {
   let cached = sessionCache.get(url);
   if (!cached) {
     cached = (async () => {
+      const modelName = url.split('/').pop() ?? url;
+      const startedAt = performance.now();
+      console.log(`[flaxia-node] nudenet: downloading model ${modelName}`);
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Failed to download ONNX model: ${url} (HTTP ${res.status})`);
       const buffer = await res.arrayBuffer();
-      return ort.InferenceSession.create(buffer, { executionProviders: ['wasm'] });
+      console.log(
+        `[flaxia-node] nudenet: model loaded ${modelName} bytes=${buffer.byteLength} downloadMs=${Math.round(performance.now() - startedAt)}`,
+      );
+      const sessionStartedAt = performance.now();
+      const session = await ort.InferenceSession.create(buffer, { executionProviders: ['wasm'] });
+      console.log(
+        `[flaxia-node] nudenet: session ready ${modelName} sessionMs=${Math.round(performance.now() - sessionStartedAt)}`,
+      );
+      return session;
     })();
     sessionCache.set(url, cached);
   }
@@ -174,13 +185,19 @@ export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetRes
   try {
     const { tensor, ratio } = preprocess(bitmap);
 
+    const startedAtMs = performance.now();
     const [yoloSession, nmsSession] = await Promise.all([getSession(MODEL_URL), getSession(NMS_MODEL_URL)]);
+    console.log(`[flaxia-node] nudenet: sessions ready loadMs=${Math.round(performance.now() - startedAtMs)}`);
 
+    const runStartedAt = performance.now();
     const { output0 } = await yoloSession.run({ images: tensor });
     const config = new ort.Tensor('float32', new Float32Array([topK, iouThreshold, scoreThreshold]), [3]);
     const { selected } = await nmsSession.run({ detection: output0, config });
 
     const detections = decode(selected as ort.Tensor, ratio);
+    console.log(
+      `[flaxia-node] nudenet: done detections=${detections.length} inferMs=${Math.round(performance.now() - runStartedAt)} totalMs=${Math.round(performance.now() - startedAt)}`,
+    );
     return { detections, durationMs: Date.now() - startedAt };
   } finally {
     bitmap.close();

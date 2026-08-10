@@ -63,6 +63,8 @@ export const handleAiInference = async (
       dtype: options.dtype ?? 'q4f16',
       device: options.device,
     };
+    const loadStartedAt = performance.now();
+    console.log(`[flaxia-node] ai-inference: loading pipeline task=${task} model=${model} dtype=${pipelineOpts.dtype} device=${pipelineOpts.device ?? 'wasm'}`);
     try {
       generator = await pipeline(task as any, model, pipelineOpts);
     } catch (err) {
@@ -71,9 +73,15 @@ export const handleAiInference = async (
         pipelineOpts.device = 'wasm';
         generator = await pipeline(task as any, model, pipelineOpts);
       } else {
+        console.error(
+          `[flaxia-node] ai-inference: pipeline load FAILED task=${task} model=${model} error=${err instanceof Error ? err.message : String(err)}`,
+        );
         throw err;
       }
     }
+    console.log(
+      `[flaxia-node] ai-inference: pipeline ready task=${task} model=${model} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
+    );
     pipelineCache.set(cacheKey, generator);
   }
 
@@ -98,6 +106,10 @@ export const handleAiInference = async (
     genOptions.streamer = streamer;
   }
 
+  const inputStart = performance.now();
   const output = await generator(input, genOptions);
+  console.log(
+    `[flaxia-node] ai-inference: done task=${task} model=${model} execMs=${Math.round(performance.now() - inputStart)} inputLen=${String(input).length}`,
+  );
   return { output };
 };

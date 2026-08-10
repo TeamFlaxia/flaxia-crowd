@@ -2,8 +2,9 @@ import type { ImageProcessPayload, ImageProcessResult } from '@flaxia/sdk';
 
 export const handleImageProcess = async (payload: ImageProcessPayload): Promise<ImageProcessResult> => {
   const { operation, imageBase64, mimeType, options } = payload;
+  const startedAt = performance.now();
+  const inputBytes = Math.round(imageBase64.length * 0.75);
 
-  // Convert Base64 to ImageBitmap
   const response = await fetch(`data:${mimeType};base64,${imageBase64}`);
   const blob = await response.blob();
   const bitmap = await createImageBitmap(blob);
@@ -44,6 +45,10 @@ export const handleImageProcess = async (payload: ImageProcessPayload): Promise<
     reader.onerror = reject;
     reader.readAsDataURL(outputBlob);
   });
+
+  console.log(
+    `[flaxia-node] image-process: done operation=${operation} output=${outputFormat} inputBytes=${inputBytes} resultBytes=${outputBlob.size} durationMs=${Math.round(performance.now() - startedAt)}`,
+  );
 
   return {
     imageBase64: resultBase64,

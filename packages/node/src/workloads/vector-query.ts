@@ -13,5 +13,13 @@ async function getEngine(): Promise<VectorStoreEngine> {
 
 export async function handleVectorQuery(payload: VectorQueryPayload): Promise<VectorQueryResult> {
   const eng = await getEngine();
-  return eng.query(payload);
+  const startedAt = performance.now();
+  try {
+    const result = await eng.query(payload);
+    console.log(`[flaxia-node] vector-query: done durationMs=${Math.round(performance.now() - startedAt)}`);
+    return result;
+  } catch (err) {
+    console.error(`[flaxia-node] vector-query: failed error=${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  }
 }
