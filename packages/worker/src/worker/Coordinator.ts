@@ -407,7 +407,7 @@ export class Coordinator extends DurableObject<Env> {
         }
       }
 
-      if (!chosenNode) break;
+      if (!chosenNode) continue;
 
       task.status = "processing";
       task.assignedNodeId = chosenNode;
