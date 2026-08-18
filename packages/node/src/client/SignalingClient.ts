@@ -31,6 +31,7 @@ class SignalingClient {
   private destroyed = false;
   private suspended = false;
   private visibilityHandler: (() => void) | null = null;
+  private inflightTasks = new Set<string>();
 
   constructor(
     private config: NodeConfig,
@@ -169,6 +170,12 @@ class SignalingClient {
           siteId: this.config.siteId,
           nodeId: this.nodeId,
           capabilities: this.config.capabilities ?? ['ai-inference', 'image-process'],
+          // Only defined on desktop Chrome; mobile WebViews report null so the
+          // orchestrator never routes heavy WASM workloads to weak devices.
+          deviceMemory:
+            typeof (navigator as Navigator & { deviceMemory?: number }).deviceMemory === 'number'
+              ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory
+              : null,
         }),
       });
       if (!response.ok) {
@@ -200,22 +207,30 @@ class SignalingClient {
   }
 
   private async handleTask(data: TaskMessage) {
-    const timeoutMs = data.timeoutMs ? data.timeoutMs + 30000 : undefined;
+    // A task is delivered at-least-once: if the coordinator restarts/redelivers
+    // a task this node is still working on, don't execute it a second time.
+    if (this.inflightTasks.has(data.taskId)) return;
+    this.inflightTasks.add(data.taskId);
     const startedAt = performance.now();
-    const result = await this.workerPool.run(
-      data.taskId,
-      data.workload,
-      data.payload,
-      timeoutMs,
-      (token: string) => {
-        this.send({ type: 'progress', taskId: data.taskId, token });
-      },
-      { maxCpuLoad: this.config.maxCpuLoad },
-    );
-    this.send({ type: 'result', taskId: data.taskId, payload: result });
-    log(
-      `task result sent taskId=${data.taskId} workload=${data.workload} durationMs=${Math.round(performance.now() - startedAt)}`,
-    );
+    try {
+      const timeoutMs = data.timeoutMs ? data.timeoutMs + 30000 : undefined;
+      const result = await this.workerPool.run(
+        data.taskId,
+        data.workload,
+        data.payload,
+        timeoutMs,
+        (token: string) => {
+          this.send({ type: 'progress', taskId: data.taskId, token });
+        },
+        { maxCpuLoad: this.config.maxCpuLoad },
+      );
+      this.send({ type: 'result', taskId: data.taskId, payload: result });
+      log(
+        `task result sent taskId=${data.taskId} workload=${data.workload} durationMs=${Math.round(performance.now() - startedAt)}`,
+      );
+    } finally {
+      this.inflightTasks.delete(data.taskId);
+    }
   }
 
   private setupVisibilityHandler() {

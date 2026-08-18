@@ -3,6 +3,10 @@ import { VectorStoreEngine } from '../vector-store/VectorStoreEngine';
 
 let engine: VectorStoreEngine | null = null;
 
+export const releaseCache = (): void => {
+  engine = null;
+};
+
 async function getEngine(): Promise<VectorStoreEngine> {
   if (!engine) {
     engine = new VectorStoreEngine();

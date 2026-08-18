@@ -15,6 +15,18 @@ const VALID_WORKLOADS: readonly string[] = [
   'vector-embed', 'vector-store', 'vector-query', 'nudenet'
 ]
 
+/** Heavy WebAssembly workloads should never be routed to low-memory nodes. */
+export function isHeavyWorkload(workload: string): boolean {
+  return (
+    workload === 'ai-inference' ||
+    workload === 'vector-embed' ||
+    workload === 'vector-query' ||
+    workload === 'nudenet' ||
+    workload === 'image-process' ||
+    workload === 'container'
+  )
+}
+
 const MIN_TIMEOUT_MS = 1000
 const MAX_TIMEOUT_MS = 3600000
 
@@ -61,7 +73,7 @@ function checkOrigin(c: any): boolean {
 // --- Node registration & signaling ---
 
 app.post('/nodes/register', async (c) => {
-  let body: { siteId?: string; nodeId?: string; capabilities?: string[] }
+  let body: { siteId?: string; nodeId?: string; capabilities?: string[]; deviceMemory?: number | null }
   try {
     body = await c.req.json()
   } catch {
@@ -83,15 +95,19 @@ app.post('/nodes/register', async (c) => {
     return c.json({ error: 'Node token secret is not configured' }, 503)
   }
 
+  // A `null`/undefined deviceMemory means a mobile WebView or unknown device.
+  const deviceMemory = typeof body.deviceMemory === 'number' ? body.deviceMemory : null
+
   const exp = Date.now() + NODE_TOKEN_TTL_MS
   const token = await createNodeToken(c.env.NODE_TOKEN_SECRET, {
     siteId: body.siteId,
     nodeId,
     capabilities,
+    deviceMemory,
     exp,
   })
 
-  return c.json({ token, nodeId, expiresAt: exp })
+  return c.json({ token, nodeId, expiresAt: exp, lowMemory: deviceMemory === null || deviceMemory < 4 })
 })
 
 app.get('/signal', async (c) => {
@@ -113,6 +129,7 @@ app.get('/signal', async (c) => {
   url.pathname = '/ws'
   url.searchParams.set('nodeId', payload.nodeId)
   url.searchParams.set('capabilities', payload.capabilities.join(','))
+  url.searchParams.set('lowMemory', String(payload.deviceMemory === null || payload.deviceMemory === undefined || payload.deviceMemory < 4))
 
   const stub = getCoordinator(c)
   return stub.fetch(new Request(url.toString(), {
