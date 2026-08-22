@@ -1,11 +1,14 @@
 import type { WorkloadType } from '@flaxia/sdk';
 import { CpuThrottle } from '../executor/throttle';
+import {
+  HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
+  hasEnoughWasmMemoryForHeavy,
+  probeMaxWasmMemoryBytes,
+} from '../executor/memoryProbe';
 
 let throttle: CpuThrottle | null = null;
 
 // Workloads that load large WebAssembly models / heavy compute into this worker.
-// These are rejected when the device does not report >= 4 GB of device memory so
-// that a low-memory or mobile WebView is never killed by a giant model load.
 const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set([
   'ai-inference',
   'vector-embed',
@@ -17,14 +20,19 @@ const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set([
 
 const IDLE_EVICT_MS = 60_000;
 
+// Measured at worker startup: the maximum WebAssembly linear memory this
+// runtime can actually commit. We reject heavy workloads (and, as defense in
+// depth, EVERY task) when the device cannot commit the memory a multi-GB model
+// needs — unlike navigator.deviceMemory, which mobile Chrome reports quantized
+// and cannot be trusted for gating.
+const WASM_MEMORY_BYTES = probeMaxWasmMemoryBytes();
+const CAPABLE = WASM_MEMORY_BYTES >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
+console.log(
+  `[flaxia-node:worker] startup memory probe wasmMemoryBytes=${WASM_MEMORY_BYTES} capable=${CAPABLE}`,
+);
+
 function hasEnoughMemoryForHeavyWorkload(): boolean {
-  const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
-  // `deviceMemory` is a Chromium feature: it IS reported on Android Chrome
-  // (quantized — e.g. a 3GB phone reports 4), so mobile must not be treated as
-  // "unknown". This is only a minimum bar: heavy WASM workloads always run
-  // single-threaded (see the workload modules) so they don't spawn a worker
-  // per core or OOM low-memory phones. Unknown or < 4GB => reject.
-  return typeof deviceMemory === 'number' && deviceMemory >= 4;
+  return hasEnoughWasmMemoryForHeavy();
 }
 
 // Releasers for lazily-loaded workload modules, so heavyweight model pipelines
@@ -96,9 +104,15 @@ self.onmessage = async (e: MessageEvent) => {
 
     console.log(`[flaxia-node:worker] task start id=${id} workload=${workload}`);
 
+    // Defense in depth: the orchestrator is told (via capabilities=[]) not to
+    // route any task to an incapable node, but if one still arrives, reject it
+    // here before any model is loaded so the device is never killed.
+    if (!CAPABLE) {
+      throw new Error(`node incapable: insufficient WASM memory (${WASM_MEMORY_BYTES} bytes < ${HEAVY_WORKLOAD_WASM_MEMORY_BYTES}); rejecting all tasks`);
+    }
+
     if (HEAVY_WORKLOADS.has(workload as WorkloadType) && !hasEnoughMemoryForHeavyWorkload()) {
-      const dm = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
-      throw new Error(`${workload}: insufficient device memory (deviceMemory=${dm ?? 'unknown'})`);
+      throw new Error(`${workload}: insufficient WASM memory (${WASM_MEMORY_BYTES} bytes < ${HEAVY_WORKLOAD_WASM_MEMORY_BYTES})`);
     }
 
     await throttle.waitForSlot();

@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initFlaxiaNode } from '../SignalingClient';
 
+// Deterministic capability probe so obtainToken() never actually tries to
+// allocate gigabytes of RAM in the test runner. This file simulates a capable
+// device (>= 2GB commit). See SignalingClient.incapable.test.ts for the
+// incapable-device case.
+vi.mock('../../executor/memoryProbe', () => ({
+  HEAVY_WORKLOAD_WASM_MEMORY_BYTES: 2 * 1024 ** 3,
+  probeMaxWasmMemoryBytes: () => 4 * 1024 ** 3,
+  hasEnoughWasmMemoryForHeavy: () => true,
+}));
+
 function mockFetchToken() {
   global.fetch = vi.fn().mockResolvedValue({
     ok: true,
@@ -74,6 +84,7 @@ describe('SignalingClient', () => {
       siteId: 'test-site',
       nodeId: expect.any(String),
       capabilities: ['ai-inference', 'image-process'],
+      wasmMemoryBytes: 4 * 1024 ** 3,
       deviceMemory: null, // jsdom / mobile WebViews do not expose navigator.deviceMemory
     });
   });

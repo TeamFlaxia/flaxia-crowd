@@ -7,6 +7,10 @@ import {
   safeRandomUUID,
 } from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
+import {
+  HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
+  probeMaxWasmMemoryBytes,
+} from '../executor/memoryProbe';
 
 import type { NodeConfig, WorkloadType } from '@flaxia/sdk';
 
@@ -173,6 +177,18 @@ class SignalingClient {
         } catch {}
       }
 
+      // Gate heavy WASM workloads on a real measured allocation probe, not on
+      // navigator.deviceMemory (which mobile Chrome reports quantized and is
+      // therefore unsafe). If the device cannot actually commit the memory a
+      // multi-GB model needs, advertise NO capabilities so the orchestrator
+      // routes every task elsewhere.
+      const wasmMemoryBytes = probeMaxWasmMemoryBytes();
+      const capable = wasmMemoryBytes >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
+      const capabilities = capable
+        ? (this.config.capabilities ?? ['ai-inference', 'image-process'])
+        : [];
+      log(`register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)}`);
+
       const base = this.config.orchestratorUrl.replace(/\/+$/, '');
       const response = await fetch(`${base}/crowd/nodes/register`, {
         method: 'POST',
@@ -180,7 +196,11 @@ class SignalingClient {
         body: JSON.stringify({
           siteId: this.config.siteId,
           nodeId: this.nodeId,
-          capabilities: this.config.capabilities ?? ['ai-inference', 'image-process'],
+          capabilities,
+          // Measured WASM memory the device could actually commit (bytes). The
+          // orchestrator uses this to avoid routing heavy workloads to devices
+          // that cannot run them.
+          wasmMemoryBytes: probeMaxWasmMemoryBytes(),
           // Only defined on desktop Chrome; mobile WebViews report null so the
           // orchestrator never routes heavy WASM workloads to weak devices.
           deviceMemory:
