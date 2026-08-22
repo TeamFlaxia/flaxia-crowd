@@ -2,6 +2,10 @@ import type { VectorEmbedPayload, VectorEmbedResult } from '@flaxia/sdk';
 
 let embeddingPipeline: any = null;
 
+export const releaseCache = (): void => {
+  embeddingPipeline = null;
+};
+
 export async function handleVectorEmbed(payload: VectorEmbedPayload): Promise<VectorEmbedResult> {
   const startTime = performance.now();
 

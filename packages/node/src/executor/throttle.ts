@@ -3,69 +3,60 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Estimates current CPU contention and throttles work accordingly.
+ * Keeps the Worker's average CPU usage within `maxLoad` without busy-waiting.
  *
- * Runs inside the compute Worker (where the actual workload executes) rather
- * than on the main thread, so the measurement reflects the thread that does
- * the work. Load is estimated with a calibrated busy-loop: a fixed-iteration
- * loop takes longer to finish when the system is busy, and the ratio to the
- * idle baseline is the estimated load.
- *
- * There is no direct API for CPU usage in the browser, so this is a heuristic
- * used to (a) avoid starting work while the machine is already loaded and
- * (b) space out task starts so average CPU stays near `maxLoad`.
+ * The previous implementation estimated load with a calibrated busy-loop
+ * (millions of empty iterations, sampled repeatedly). On slow mobile CPUs that
+ * busy-loop itself burned significant CPU and made `waitForSlot()` spin hard —
+ * i.e. the worker "ran away" while it was supposed to be throttled. Instead of
+ * measuring load by spinning, this version records how long each task actually
+ * ran (`markTaskComplete`) and compares the busy time against elapsed wall time
+ * over a rolling window. `waitForSlot()` simply sleeps (yielding the event loop)
+ * until the recent busy ratio drops back under `maxLoad`.
  */
+const WINDOW_MS = 30_000;
+const MAX_WAIT_SLOT_MS = 30_000;
+
 export class CpuThrottle {
-  private baselineMs: number | null = null;
-  private lastLoad = 0;
   private readonly maxLoad: number;
-  private readonly loopIterations: number;
+  private windowStart = performance.now();
+  private windowBusyMs = 0;
+  private lastLoad = 0;
 
-  constructor(maxLoad = 0.15, loopIterations = 2_000_000) {
+  constructor(maxLoad = 0.15) {
     this.maxLoad = Math.max(0.05, Math.min(0.3, maxLoad));
-    this.loopIterations = loopIterations;
-  }
-
-  private busyLoop(): number {
-    const iterations = this.loopIterations;
-    const start = performance.now();
-    let i = 0;
-    while (i < iterations) i++;
-    return performance.now() - start;
-  }
-
-  private sample(): number {
-    const values = [this.busyLoop(), this.busyLoop(), this.busyLoop()].sort((a, b) => a - b);
-    return values[1];
-  }
-
-  async calibrate(): Promise<void> {
-    this.busyLoop(); // warm-up
-    this.baselineMs = this.sample();
-    this.lastLoad = 0;
-  }
-
-  async getCurrentLoad(): Promise<number> {
-    if (this.baselineMs === null) {
-      await this.calibrate();
-      return 0;
-    }
-    const elapsed = this.sample();
-    const load = Math.min(1, Math.max(0, elapsed / this.baselineMs - 1));
-    this.lastLoad = load;
-    return load;
-  }
-
-  async shouldPause(): Promise<boolean> {
-    return (await this.getCurrentLoad()) > this.maxLoad;
   }
 
   /**
-   * Waits until the system is calm enough to run a task.
-   * Bounded by `maxWaitMs` so a persistently busy machine cannot stall
-   * the queue forever.
+   * Charge a completed task's wall-clock duration (in ms) against the CPU budget.
+   * Call this from the worker once a workload has finished (incl. errors/timeouts).
    */
-  async waitForSlot(maxWaitMs = 30000): Promise<void> {
+  markTaskComplete(durationMs: number): void {
+    const now = performance.now();
+    if (now - this.windowStart > WINDOW_MS) {
+      this.windowStart = now;
+      this.windowBusyMs = 0;
+    }
+    this.windowBusyMs += Math.max(0, durationMs);
+    this.lastLoad = this.estimate();
+  }
+
+  private estimate(): number {
+    const elapsed = performance.now() - this.windowStart;
+    if (elapsed <= 0) return 0;
+    return Math.min(1, Math.max(0, this.windowBusyMs / elapsed));
+  }
+
+  async shouldPause(): Promise<boolean> {
+    return this.estimate() > this.maxLoad;
+  }
+
+  /**
+   * Waits until the rolling busy ratio is back under `maxLoad`.
+   * Bounded by `maxWaitMs` so a sustained heavy device cannot stall the queue
+   * forever.
+   */
+  async waitForSlot(maxWaitMs = MAX_WAIT_SLOT_MS): Promise<void> {
     const start = performance.now();
     while (await this.shouldPause()) {
       if (performance.now() - start > maxWaitMs) break;

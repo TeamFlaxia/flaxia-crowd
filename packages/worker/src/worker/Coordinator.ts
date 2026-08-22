@@ -16,7 +16,19 @@ interface NodeRecord {
   connectedAt: number;
   lastPongAt: number;
   currentTaskId?: string;
+  /** True when the device is a mobile WebView / has < 4 GB RAM. */
+  lowMemory?: boolean;
 }
+
+/** Heavy WebAssembly workloads that can kill a low-memory device. */
+const HEAVY_WORKLOADS: ReadonlySet<string> = new Set([
+  "ai-inference",
+  "vector-embed",
+  "vector-query",
+  "nudenet",
+  "image-process",
+  "container",
+]);
 
 interface RateEntry {
   count: number;
@@ -72,11 +84,18 @@ export class Coordinator extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    // If the node reconnects while a task is still in flight, fail the orphaned task
-    // so it can be retried instead of sitting in `processing` until timeout.
+    // If the node reconnects while a task is still in flight, keep the task
+    // assigned to this node and deliver it on the new socket. Failing and
+    // requeueing here would redeliver the same task on every reconnect
+    // (mobile / tab-switch flapping) and consume retry budget, so a single
+    // task could be dispatched to the node many times in a short window.
     const existing = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    let resumeTask: TaskRecord | undefined;
     if (existing?.currentTaskId) {
-      await this.failTask(existing.currentTaskId, "Node reconnected before completing task");
+      const inFlight = await this.ctx.storage.get<TaskRecord>(`task:${existing.currentTaskId}`);
+      if (inFlight && inFlight.status === "processing" && inFlight.assignedNodeId === nodeId) {
+        resumeTask = inFlight;
+      }
     }
 
     this.ctx.acceptWebSocket(server, [nodeId]);
@@ -88,19 +107,31 @@ export class Coordinator extends DurableObject<Env> {
 
     const node: NodeRecord = {
       id: nodeId,
-      status: "idle",
+      status: resumeTask ? "busy" : "idle",
       capabilities,
       cpuLoad: existing?.cpuLoad ?? 0,
       connectedAt: existing?.connectedAt ?? Date.now(),
       lastPongAt: Date.now(),
+      currentTaskId: resumeTask?.id,
+      lowMemory: url.searchParams.get("lowMemory") === "true",
     };
 
     await this.ctx.storage.put(`node:${nodeId}`, node);
 
     const idleNodes = await this.getIdleNodes();
-    if (!idleNodes.includes(nodeId)) {
+    if (resumeTask) {
+      await this.ctx.storage.put("nodes:idle", idleNodes.filter(id => id !== nodeId));
+    } else if (!idleNodes.includes(nodeId)) {
       idleNodes.push(nodeId);
       await this.ctx.storage.put("nodes:idle", idleNodes);
+    }
+
+    // Continue the in-flight task on the new socket so the node can finish it
+    // instead of the coordinator requeueing a duplicate.
+    if (resumeTask) {
+      if (!(await this.deliverTask(resumeTask, server))) {
+        await this.failTask(resumeTask.id, "Failed to deliver task to node");
+      }
     }
 
     await this.tryAssignAll();
@@ -291,8 +322,11 @@ export class Coordinator extends DurableObject<Env> {
     }
 
     // Retry transient failures (timeout / disconnect) up to MAX_RETRIES times.
-    if (task.status === "processing" && task.retryCount < MAX_RETRIES) {
-      task.retryCount++;
+    // Keyed on retryCount (not status) so a task that was already requeued by
+    // an earlier failure keeps its remaining retries instead of being
+    // permanently failed by a second overlapping failure signal.
+    if (task.retryCount < MAX_RETRIES) {
+      if (task.status === "processing") task.retryCount++;
       task.status = "pending";
       task.assignedNodeId = undefined;
       task.assignedAt = undefined;
@@ -373,6 +407,25 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
+  private async deliverTask(task: TaskRecord, socket?: WebSocket): Promise<boolean> {
+    const targets = socket ? [socket] : this.ctx.getWebSockets(task.assignedNodeId || "");
+    let sent = false;
+    for (const sock of targets) {
+      try {
+        sock.send(JSON.stringify({
+          type: "task",
+          taskId: task.id,
+          workload: task.workload,
+          payload: task.payload,
+          timeoutMs: task.timeoutMs,
+        }));
+        sent = true;
+        break;
+      } catch {}
+    }
+    return sent;
+  }
+
   private async tryAssignAll() {
     const pendingIds = await this.getPending();
     if (pendingIds.length === 0) return;
@@ -394,6 +447,9 @@ export class Coordinator extends DurableObject<Env> {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (!node || node.status !== "idle") continue;
         if (!node.capabilities.includes(task.workload as WorkloadType)) continue;
+        // Never hand a heavy WASM workload to a low-memory / mobile node; the
+        // model load would spike memory and get the device's process killed.
+        if (node.lowMemory && HEAVY_WORKLOADS.has(task.workload)) continue;
         const sockets = this.ctx.getWebSockets(nodeId);
         if (sockets.length === 0) continue;
 
@@ -434,21 +490,7 @@ export class Coordinator extends DurableObject<Env> {
       remainingIdle = remainingIdle.filter(id => id !== chosenNode);
       await this.ctx.storage.put("nodes:idle", remainingIdle);
 
-      const sockets = this.ctx.getWebSockets(chosenNode);
-      let sent = false;
-      for (const sock of sockets) {
-        try {
-          sock.send(JSON.stringify({
-            type: "task",
-            taskId: task.id,
-            workload: task.workload,
-            payload: task.payload,
-            timeoutMs: task.timeoutMs,
-          }));
-          sent = true;
-          break;
-        } catch {}
-      }
+      const sent = await this.deliverTask(task);
 
       // If the send failed, immediately fail the task (with retry) instead of
       // leaving it stuck in `processing`.

@@ -169,6 +169,63 @@ describe('Coordinator', () => {
     });
   });
 
+  it('does NOT requeue a task when its node reconnects with the task still in flight', async () => {
+    stub = newStub();
+    const task = makeTask({ status: 'processing', assignedNodeId: 'node-1', assignedAt: Date.now() - 1000, retryCount: 0 });
+    const node: NodeRecord = {
+      id: 'node-1', status: 'busy', capabilities: ['ai-inference'],
+      cpuLoad: 0, connectedAt: Date.now(), lastPongAt: Date.now(), currentTaskId: task.id,
+    };
+    await seedProcessingTask(task, node);
+
+    const resp = await stub.fetch('http://internal/ws?nodeId=node-1&capabilities=ai-inference', {
+      headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
+    });
+    expect(resp.status).toBe(101);
+
+    const after = await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json()) as TaskRecord;
+    expect(after.status).toBe('processing');
+    expect(after.retryCount).toBe(0);
+    expect(after.assignedNodeId).toBe('node-1');
+
+    await withStorage(async (storage) => {
+      const pending = await storage.get<string[]>('queue:pending');
+      expect(pending).not.toContain(task.id);
+      const updated = await storage.get<NodeRecord>('node:node-1');
+      expect(updated?.currentTaskId).toBe(task.id);
+    });
+  });
+
+  it('does NOT hand heavy workloads to low-memory nodes', async () => {
+    stub = newStub();
+    const task = makeTask();
+
+    // A low-memory node advertises the heavy capability, but the coordinator
+    // must never route heavy WASM workloads to it.
+    await stub.fetch('http://internal/ws?nodeId=node-lm&capabilities=ai-inference&lowMemory=true', {
+      headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
+    });
+
+    const enq = await stub.fetch('http://internal/enqueue', {
+      method: 'POST',
+      body: JSON.stringify(task),
+    });
+    expect(enq.status).toBe(200);
+
+    let stored = await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json()) as TaskRecord;
+    expect(stored.status).toBe('pending');
+    expect(stored.assignedNodeId).toBeUndefined();
+
+    // A capable, non-low-memory node can still pick it up immediately.
+    await stub.fetch('http://internal/ws?nodeId=node-ok&capabilities=ai-inference', {
+      headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
+    });
+
+    stored = await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json()) as TaskRecord;
+    expect(stored.status).toBe('processing');
+    expect(stored.assignedNodeId).toBe('node-ok');
+  });
+
   it('rate limits unauthenticated websocket routes per IP in storage', async () => {
     stub = newStub();
     let got429 = false;

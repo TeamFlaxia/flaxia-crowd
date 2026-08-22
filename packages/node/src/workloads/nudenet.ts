@@ -203,3 +203,7 @@ export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetRes
     bitmap.close();
   }
 };
+
+export function releaseCache(): void {
+  sessionCache.clear();
+}

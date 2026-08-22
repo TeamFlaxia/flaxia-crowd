@@ -12,6 +12,16 @@ const SUPPORTED_TASKS = [
 ] as const;
 
 const pipelineCache = new Map<string, any>();
+const MAX_CACHED_PIPELINES = 2;
+
+/**
+ * Drops all cached model pipelines so the (potentially hundreds of MB of)
+ * transformers/onnxruntime memory can be garbage-collected. Called by the
+ * worker after an idle period so a node does not pin every model it ever saw.
+ */
+export const releaseCache = (): void => {
+  pipelineCache.clear();
+};
 
 const createBufferedTokenCallback = (
   onToken: (token: string) => void,
@@ -59,6 +69,11 @@ export const handleAiInference = async (
   const cacheKey = `${task}:${model}`;
   let generator = pipelineCache.get(cacheKey);
   if (!generator) {
+    // Bound the cache so a stream of distinct models cannot grow without limit.
+    if (pipelineCache.size >= MAX_CACHED_PIPELINES) {
+      const oldestKey = pipelineCache.keys().next().value as string;
+      pipelineCache.delete(oldestKey);
+    }
     const pipelineOpts: Record<string, unknown> = {
       dtype: options.dtype ?? 'q4f16',
       device: options.device,

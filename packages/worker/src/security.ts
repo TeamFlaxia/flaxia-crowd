@@ -59,6 +59,8 @@ export interface NodeTokenPayload {
   nodeId: string;
   capabilities: string[];
   exp: number;
+  /** Device RAM in GB as reported by the browser; `null`/missing on mobile WebViews. */
+  deviceMemory?: number | null;
 }
 
 export const NODE_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;

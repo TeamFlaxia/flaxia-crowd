@@ -70,6 +70,7 @@ describe('SignalingClient', () => {
       siteId: 'test-site',
       nodeId: expect.any(String),
       capabilities: ['ai-inference', 'image-process'],
+      deviceMemory: null, // jsdom / mobile WebViews do not expose navigator.deviceMemory
     });
   });
 
@@ -178,5 +179,47 @@ describe('SignalingClient', () => {
     await flush();
 
     expect(MockWebSocket.mock.calls.length).toBeGreaterThan(afterInitCount);
+  });
+
+  it('should not execute a task that is already in flight (duplicate delivery)', async () => {
+    const send = vi.fn();
+    let wsInstance: { close: () => void; send: typeof send; onmessage: ((e: MessageEvent) => void) | null; readyState?: number };
+    const MockWebSocket = vi.fn().mockImplementation(function () {
+      wsInstance = { close: vi.fn(), send, onmessage: null, readyState: 1 };
+      return wsInstance;
+    });
+    globalThis.WebSocket = MockWebSocket as any;
+    (globalThis.WebSocket as any).OPEN = 1;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    await flush();
+    await flush();
+
+    const onmessage = wsInstance!.onmessage as (e: MessageEvent) => void;
+    expect(typeof onmessage).toBe('function');
+
+    const task = {
+      type: 'task',
+      taskId: 'task-dup-1',
+      workload: 'ai-inference',
+      payload: { task: 'text-classification', model: 'm', input: 'hello' },
+    };
+    const event = { data: JSON.stringify(task) } as MessageEvent;
+
+    onmessage(event);
+    onmessage(event);
+    await flush();
+    await flush();
+
+    const taskMessages = send.mock.calls.map(([m]) => JSON.parse(m as string)).filter((m) => m.type !== 'pong');
+    expect(taskMessages).toHaveLength(1);
+    expect(taskMessages[0].taskId).toBe('task-dup-1');
   });
 });
