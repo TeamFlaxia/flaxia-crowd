@@ -49,6 +49,17 @@ const createBufferedTokenCallback = (
   };
 };
 
+// Always run single-threaded. Multithreaded wasm (only active when the page is
+// crossOriginIsolated, via SharedArrayBuffer) spawns one internal Web Worker
+// per CPU core, which OOMs / crashes low-memory mobile devices and balloons the
+// worker count. Heavy workloads are still executed — just on a single thread —
+// to stay safe on phones. Applied once at module load so the config is always
+// in effect regardless of which entry point runs first.
+if (env.backends?.onnx?.wasm) {
+  env.backends.onnx.wasm.numThreads = 1;
+  env.backends.onnx.wasm.proxy = false;
+}
+
 export const handleAiInference = async (
   payload: AiInferencePayload,
   onToken?: (token: string) => void,
@@ -57,13 +68,6 @@ export const handleAiInference = async (
 
   if (!SUPPORTED_TASKS.includes(task as any)) {
     throw new Error(`Invalid or unsupported task: ${task}. Supported tasks are: ${SUPPORTED_TASKS.join(', ')}`);
-  }
-
-  if (self.crossOriginIsolated) {
-    const numThreads = options.numThreads ?? navigator.hardwareConcurrency;
-    if (env.backends.onnx?.wasm) {
-      env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(numThreads, navigator.hardwareConcurrency || 4));
-    }
   }
 
   const cacheKey = `${task}:${model}`;

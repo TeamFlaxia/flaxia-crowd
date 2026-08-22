@@ -12,7 +12,13 @@ export async function handleVectorEmbed(payload: VectorEmbedPayload): Promise<Ve
   if (!embeddingPipeline) {
     const loadStartedAt = performance.now();
     console.log('[flaxia-node] vector-embed: loading pipeline model=onnx-community/Qwen3-Embedding-0.6B-ONNX device=wasm');
-    const { pipeline } = await import('@huggingface/transformers');
+    const { pipeline, env } = await import('@huggingface/transformers');
+    // Force single-threaded wasm (see ai-inference.ts for rationale): avoids
+    // spawning a worker per CPU core and OOMing low-memory mobile devices.
+    if (env?.backends?.onnx?.wasm) {
+      env.backends.onnx.wasm.numThreads = 1;
+      env.backends.onnx.wasm.proxy = false;
+    }
     try {
       embeddingPipeline = await pipeline(
         'feature-extraction',

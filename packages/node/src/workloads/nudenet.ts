@@ -34,9 +34,15 @@ const LABELS = [
 
 let ortConfigured = false;
 
-function configureOrt(): void {
+export function configureOrt(): void {
   if (ortConfigured) return;
   ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_WASM_VERSION}/dist/`;
+  // Force single-threaded wasm. Multithreaded mode (only active when the page
+  // is crossOriginIsolated, via SharedArrayBuffer) spawns one internal Web
+  // Worker per CPU core. On low-memory mobile devices this both OOMs / crashes
+  // the renderer and balloons the Web Worker count. Single-threaded is safe.
+  ort.env.wasm.numThreads = 1;
+  ort.env.wasm.proxy = false;
   ortConfigured = true;
 }
 

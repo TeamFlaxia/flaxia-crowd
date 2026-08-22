@@ -19,8 +19,11 @@ const IDLE_EVICT_MS = 60_000;
 
 function hasEnoughMemoryForHeavyWorkload(): boolean {
   const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
-  // `deviceMemory` is only defined on desktop Chrome; Android WebViews and mobile
-  // browsers leave it undefined. Unknown memory => do not run heavy workloads.
+  // `deviceMemory` is a Chromium feature: it IS reported on Android Chrome
+  // (quantized — e.g. a 3GB phone reports 4), so mobile must not be treated as
+  // "unknown". This is only a minimum bar: heavy WASM workloads always run
+  // single-threaded (see the workload modules) so they don't spawn a worker
+  // per core or OOM low-memory phones. Unknown or < 4GB => reject.
   return typeof deviceMemory === 'number' && deviceMemory >= 4;
 }
 

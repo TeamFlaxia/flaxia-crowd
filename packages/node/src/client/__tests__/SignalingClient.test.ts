@@ -20,6 +20,10 @@ describe('SignalingClient', () => {
     localStorage.clear();
     vi.restoreAllMocks();
     vi.useRealTimers();
+    // Reset node init idempotency flags and any leaked Worker global between tests.
+    delete (window as any).__flaxia_node_init_started;
+    delete (window as any).__flaxia_node_signal_client;
+    delete (globalThis as any).Worker;
   });
 
   afterEach(() => {
@@ -221,5 +225,73 @@ describe('SignalingClient', () => {
     const taskMessages = send.mock.calls.map(([m]) => JSON.parse(m as string)).filter((m) => m.type !== 'pong');
     expect(taskMessages).toHaveLength(1);
     expect(taskMessages[0].taskId).toBe('task-dup-1');
+  });
+
+  it('should not spawn multiple Web Workers when initialized repeatedly (mobile re-exec)', async () => {
+    const terminate = vi.fn();
+    let workerCtorCalls = 0;
+    class MockWorker {
+      constructor() {
+        workerCtorCalls++;
+      }
+      terminate = terminate;
+      postMessage = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    // Simulate the embed script re-executing (common on mobile Chrome).
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    await flush();
+    await flush();
+
+    // Idempotency guard prevents a second client/worker from ever being created.
+    expect(workerCtorCalls).toBe(1);
+  });
+
+  it('should terminate its Web Worker on disconnect', async () => {
+    const terminate = vi.fn();
+    class MockWorker {
+      terminate = terminate;
+      postMessage = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    await flush();
+    await flush();
+
+    const client = (window as any).__flaxia_node_signal_client as any;
+    client.disconnect();
+
+    expect(terminate).toHaveBeenCalled();
   });
 });

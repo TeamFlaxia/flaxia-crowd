@@ -6,6 +6,7 @@ const mockPipeline = vi.fn();
 
 vi.mock('@huggingface/transformers', () => {
   return {
+    env: { backends: { onnx: { wasm: {} } } },
     pipeline: (...args: any[]) => mockPipeline(...args),
     TextStreamer: class {
       constructor(

@@ -1,5 +1,11 @@
 import { ConsentUI } from '../consent/ConsentUI';
-import { hasConsent, saveConsent } from '../consent/storage';
+import {
+  hasConsent,
+  saveConsent,
+  safeLocalStorageGet,
+  safeLocalStorageSet,
+  safeRandomUUID,
+} from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
 
 import type { NodeConfig, WorkloadType } from '@flaxia/sdk';
@@ -126,6 +132,11 @@ class SignalingClient {
     this.removeVisibilityHandler();
     try { this.ws?.close(); } catch {}
     this.ws = null;
+    try { delete (window as any)[INIT_FLAG]; } catch {}
+    // Kill the Web Worker we own. Without this, a re-init (common on mobile
+    // Chrome where the embed script re-executes) leaves the previous worker
+    // running forever, and they accumulate into a huge worker swarm.
+    try { this.workerPool.terminate(); } catch {}
   }
 
   suspend() {
@@ -151,7 +162,7 @@ class SignalingClient {
 
   private async obtainToken(): Promise<NodeToken | null> {
     try {
-      const cachedRaw = localStorage.getItem(NODE_TOKEN_KEY);
+      const cachedRaw = safeLocalStorageGet(NODE_TOKEN_KEY);
       if (cachedRaw) {
         try {
           const cached = JSON.parse(cachedRaw) as NodeToken;
@@ -191,7 +202,7 @@ class SignalingClient {
 
       log(`node registered nodeId=${this.nodeId} expiresIn=${Math.round((data.expiresAt - Date.now()) / 1000)}s`);
       try {
-        localStorage.setItem(NODE_TOKEN_KEY, JSON.stringify(data));
+        safeLocalStorageSet(NODE_TOKEN_KEY, JSON.stringify(data));
       } catch {}
       return data;
     } catch (err) {
@@ -254,6 +265,7 @@ class SignalingClient {
 }
 
 const WINDOW_KEY = '__flaxia_node_signal_client';
+const INIT_FLAG = '__flaxia_node_init_started';
 
 const startNode = (config: NodeConfig) => {
   const prev: SignalingClient | undefined = (window as any)[WINDOW_KEY];
@@ -263,10 +275,10 @@ const startNode = (config: NodeConfig) => {
 
   const workerUrl = new URL('./worker.js', import.meta.url).href;
   const workerPool = new WorkerPool(workerUrl);
-  let nodeId = localStorage.getItem(NODE_ID_KEY);
+  let nodeId = safeLocalStorageGet(NODE_ID_KEY);
   if (!nodeId) {
-    nodeId = crypto.randomUUID();
-    localStorage.setItem(NODE_ID_KEY, nodeId);
+    nodeId = safeRandomUUID();
+    safeLocalStorageSet(NODE_ID_KEY, nodeId);
   }
 
   const client = new SignalingClient(config, workerPool, nodeId);
@@ -275,6 +287,13 @@ const startNode = (config: NodeConfig) => {
 };
 
 export const initFlaxiaNode = (config: NodeConfig) => {
+  // Idempotent: the embed script can be re-executed on mobile Chrome (background
+  // tab revival, SPA navigations, duplicate injection). Re-running must never
+  // spin up additional Web Workers / SignalClients. The flag is cleared on
+  // disconnect() so a torn-down node can be re-initialized if needed.
+  if ((window as any)[INIT_FLAG]) return;
+  (window as any)[INIT_FLAG] = true;
+
   if (hasConsent()) {
     startNode(config);
     return;
