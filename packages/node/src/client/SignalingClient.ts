@@ -1,7 +1,9 @@
 import { ConsentUI } from '../consent/ConsentUI';
 import {
   hasConsent,
+  hasDenial,
   saveConsent,
+  saveDenial,
   safeLocalStorageGet,
   safeLocalStorageSet,
   safeRandomUUID,
@@ -319,13 +321,25 @@ export const initFlaxiaNode = (config: NodeConfig) => {
     return;
   }
 
+  if (hasDenial()) {
+    return;
+  }
+
   const container = document.createElement('div');
   container.id = 'flaxia-consent-container';
   document.body.appendChild(container);
 
-  const ui = new ConsentUI(container, config.consent, () => {
-    saveConsent();
-    container.remove();
-    startNode(config);
-  });
+  const ui = new ConsentUI(
+    container,
+    config.consent,
+    () => {
+      saveConsent();
+      container.remove();
+      startNode(config);
+    },
+    () => {
+      saveDenial();
+      container.remove();
+    },
+  );
 };

@@ -1,5 +1,6 @@
 const STORAGE_KEY = 'flaxia_consent_granted';
 const STORAGE_EXPIRY_KEY = 'flaxia_consent_expiry';
+const DENIAL_KEY = 'flaxia_consent_denied';
 const CONSENT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30日
 
 // In-memory fallback used when `localStorage` is unavailable — e.g. privacy-
@@ -54,6 +55,14 @@ export const hasConsent = (): boolean => {
 export const saveConsent = (): void => {
   safeSet(STORAGE_KEY, 'true');
   safeSet(STORAGE_EXPIRY_KEY, String(Date.now() + CONSENT_TTL_MS));
+};
+
+export const hasDenial = (): boolean => {
+  return safeGet(DENIAL_KEY) === 'true';
+};
+
+export const saveDenial = (): void => {
+  safeSet(DENIAL_KEY, 'true');
 };
 
 export const safeLocalStorageGet = safeGet;
