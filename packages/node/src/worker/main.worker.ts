@@ -1,4 +1,5 @@
 import type { WorkloadType } from '@flaxia/sdk';
+import { HEAVY_WORKLOADS } from '@flaxia/sdk';
 import { CpuThrottle } from '../executor/throttle';
 import {
   HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
@@ -7,16 +8,6 @@ import {
 } from '../executor/memoryProbe';
 
 let throttle: CpuThrottle | null = null;
-
-// Workloads that load large WebAssembly models / heavy compute into this worker.
-const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set([
-  'ai-inference',
-  'vector-embed',
-  'vector-query',
-  'nudenet',
-  'image-process',
-  'container',
-]);
 
 const IDLE_EVICT_MS = 60_000;
 

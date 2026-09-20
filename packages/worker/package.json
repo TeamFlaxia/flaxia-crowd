@@ -10,12 +10,12 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@flaxia/sdk": "*",
     "hono": "^4.12.19"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.6.16",
     "@cloudflare/workers-types": "^4.20260531.1",
-    "@flaxia/sdk": "*",
     "vitest": "^2.1.8",
     "wrangler": "^3.113.0"
   }

@@ -84,8 +84,13 @@ flaxia-crowd/
 `@flaxia/worker` ・ `@flaxia/node` ・ `@flaxia/sdk` が共有する型
 （WorkloadType・TaskRecord等）は **`@flaxia/sdk`の`types.ts`を単一の真実の源泉**とする。
 
-workerとnodeは`@flaxia/sdk`をdevDependenciesに追加して型だけ参照する。
+workerとnodeは`@flaxia/sdk`を依存に追加して型だけ参照する。
 型定義を変更した場合は必ず3パッケージ同時に更新すること。
+
+型だけでなく、ワークロード一覧（`WORKLOAD_TYPES` / `ROUTABLE_WORKLOADS`）・重み判定
+（`HEAVY_WORKLOADS`）・Webhook契約（`parseCrowdWebhook` / `buildCallbackUrl`）といった
+**実行時の契約も`@flaxia/sdk`を単一の真実の源泉**とする。workerやnodeで同じ配列・判定を
+再定義してはならない。ホスト（Flaxia SNS 等）も同じヘルパーをimportする。
 
 ## 実装について
 - 必ず完了報告をするときはテストにパスしてなくてはならない

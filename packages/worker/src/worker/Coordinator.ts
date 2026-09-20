@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../index";
 import type { TaskRecord, WorkloadType } from "@flaxia/sdk";
+import { HEAVY_WORKLOADS } from "@flaxia/sdk";
 import { signPayload } from "../security";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
@@ -19,16 +20,6 @@ interface NodeRecord {
   /** True when the device is a mobile WebView / has < 4 GB RAM. */
   lowMemory?: boolean;
 }
-
-/** Heavy WebAssembly workloads that can kill a low-memory device. */
-const HEAVY_WORKLOADS: ReadonlySet<string> = new Set([
-  "ai-inference",
-  "vector-embed",
-  "vector-query",
-  "nudenet",
-  "image-process",
-  "container",
-]);
 
 interface RateEntry {
   count: number;

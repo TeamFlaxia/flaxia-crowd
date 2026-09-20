@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { Env } from '../index'
 import type { TaskRecord, WorkloadType } from '@flaxia/sdk'
+import { isRoutableWorkload } from '@flaxia/sdk'
 import {
   createNodeToken,
   NODE_TOKEN_TTL_MS,
@@ -10,22 +11,8 @@ import {
 } from '../security'
 import { DEFAULT_TIMEOUT_MS } from '../worker/Coordinator'
 
-const VALID_WORKLOADS: readonly string[] = [
-  'ai-inference', 'image-process', 'file-convert', 'container',
-  'vector-embed', 'vector-store', 'vector-query', 'nudenet'
-]
-
-/** Heavy WebAssembly workloads should never be routed to low-memory nodes. */
-export function isHeavyWorkload(workload: string): boolean {
-  return (
-    workload === 'ai-inference' ||
-    workload === 'vector-embed' ||
-    workload === 'vector-query' ||
-    workload === 'nudenet' ||
-    workload === 'image-process' ||
-    workload === 'container'
-  )
-}
+// Re-exported from @flaxia/sdk so hosts, worker and node share one definition.
+export { isHeavyWorkload } from '@flaxia/sdk'
 
 const MIN_TIMEOUT_MS = 1000
 const MAX_TIMEOUT_MS = 3600000
@@ -175,7 +162,7 @@ app.post('/tasks', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400)
   }
 
-  if (typeof body.workload !== 'string' || !VALID_WORKLOADS.includes(body.workload)) {
+  if (typeof body.workload !== 'string' || !isRoutableWorkload(body.workload)) {
     return c.json({ error: 'Invalid workload type' }, 400)
   }
   if (!body.payload) return c.json({ error: 'payload is required' }, 400)

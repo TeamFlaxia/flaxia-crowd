@@ -73,3 +73,36 @@ console.log(result)
 - `TaskPayload` — 全ペイロードのユニオン型
 - `TaskRecord` — 完全なタスクオブジェクト（状態・結果・エラー等）
 - `NodeConfig` — ノード設定（`@flaxia/node` が使用）
+
+## ランタイム契約
+
+型だけでなく、worker / node / ホストで共有すべき**実行時の契約**も `@flaxia/sdk` が単一の真実の源泉として提供します。各パッケージでワークロード一覧や重み判定を再定義しないでください。
+
+```typescript
+import {
+  WORKLOAD_TYPES,          // プロトコル上の全ワークロード
+  ROUTABLE_WORKLOADS,      // オーケストレーターが投入可能な実装済みワークロード
+  HEAVY_WORKLOADS,         // 低メモリノードに割り当ててはいけない重い処理
+  DEFAULT_WORKLOAD_TIMEOUT_MS,
+  isWorkloadType,
+  isRoutableWorkload,
+  isHeavyWorkload,
+  defaultTimeoutFor,
+  parseCrowdWebhook,
+  extractCallbackOutput,
+  buildCallbackUrl,
+  callbackTypeFromUrl,
+  resolveNsfwTags,
+} from '@flaxia/sdk'
+```
+
+| ヘルパー | 用途 |
+|---------|------|
+| `WORKLOAD_TYPES` / `isWorkloadType` | 信頼できない入力の検証 |
+| `ROUTABLE_WORKLOADS` / `isRoutableWorkload` | オーケストレーターの投入可否チェック |
+| `HEAVY_WORKLOADS` / `isHeavyWorkload` | 低メモリノードへのルーティング抑止 |
+| `buildCallbackUrl` / `callbackTypeFromUrl` | ホスト側 Webhook URL の生成・判別 |
+| `parseCrowdWebhook` / `extractCallbackOutput` | Webhook ボディの検証と結果抽出 |
+| `resolveNsfwTags` | NudeNet 検出結果からコンテンツタグへの変換 |
+
+`moe-inference` はプロトコル型として宣言済みですが、ノード実装が無いため `ROUTABLE_WORKLOADS` には含まれません。
