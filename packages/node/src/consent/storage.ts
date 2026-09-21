@@ -1,8 +1,9 @@
+import type { ConsentState } from '@flaxia/sdk';
+
 const STORAGE_KEY = 'flaxia_consent_granted';
 const STORAGE_EXPIRY_KEY = 'flaxia_consent_expiry';
 const DENIAL_KEY = 'flaxia_consent_denied';
 const CONSENT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30日
-
 // In-memory fallback used when `localStorage` is unavailable — e.g. privacy-
 // restricted contexts, blocked site-data, embedded webviews, or non-secure
 // contexts. Accessing `localStorage` can throw (SecurityError / QuotaExceeded)
@@ -52,7 +53,9 @@ export const hasConsent = (): boolean => {
   return true;
 };
 
+/** Persist consent. Clears any previous denial so the two never co-exist. */
 export const saveConsent = (): void => {
+  safeRemove(DENIAL_KEY);
   safeSet(STORAGE_KEY, 'true');
   safeSet(STORAGE_EXPIRY_KEY, String(Date.now() + CONSENT_TTL_MS));
 };
@@ -61,8 +64,28 @@ export const hasDenial = (): boolean => {
   return safeGet(DENIAL_KEY) === 'true';
 };
 
+/** Persist denial. Clears any previous consent/expiry so the two never co-exist. */
 export const saveDenial = (): void => {
+  safeRemove(STORAGE_KEY);
+  safeRemove(STORAGE_EXPIRY_KEY);
   safeSet(DENIAL_KEY, 'true');
+};
+
+/** Forget the consent decision entirely (granted + expiry + denial). */
+export const clearConsent = (): void => {
+  safeRemove(STORAGE_KEY);
+  safeRemove(STORAGE_EXPIRY_KEY);
+  safeRemove(DENIAL_KEY);
+};
+
+/**
+ * Resolve the persisted consent state. A stored grant wins over a stored
+ * denial, but the two are kept mutually exclusive by the save helpers.
+ */
+export const getConsentState = (): ConsentState => {
+  if (hasConsent()) return 'granted';
+  if (hasDenial()) return 'denied';
+  return 'unset';
 };
 
 export const safeLocalStorageGet = safeGet;

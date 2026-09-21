@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { hasConsent, saveConsent, hasDenial, saveDenial, safeLocalStorageGet } from '../storage';
+import {
+  clearConsent,
+  getConsentState,
+  hasConsent,
+  hasDenial,
+  safeLocalStorageGet,
+  saveConsent,
+  saveDenial,
+} from '../storage';
 
 describe('consent/storage', () => {
   beforeEach(() => {
@@ -52,5 +60,41 @@ describe('consent/storage', () => {
     } finally {
       Object.defineProperty(window, 'localStorage', { configurable: true, value: original });
     }
+  });
+
+  it('reports a single consent state for unset/granted/denied', () => {
+    expect(getConsentState()).toBe('unset');
+    saveConsent();
+    expect(getConsentState()).toBe('granted');
+    saveDenial();
+    expect(getConsentState()).toBe('denied');
+    clearConsent();
+    expect(getConsentState()).toBe('unset');
+  });
+
+  it('keeps grant and denial mutually exclusive in both directions', () => {
+    saveConsent();
+    expect(hasConsent()).toBe(true);
+    expect(hasDenial()).toBe(false);
+
+    saveDenial();
+    expect(hasConsent()).toBe(false);
+    expect(hasDenial()).toBe(true);
+    expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
+    expect(localStorage.getItem('flaxia_consent_expiry')).toBeNull();
+
+    saveConsent();
+    expect(hasConsent()).toBe(true);
+    expect(hasDenial()).toBe(false);
+    expect(localStorage.getItem('flaxia_consent_denied')).toBeNull();
+  });
+
+  it('clearConsent forgets every consent key', () => {
+    saveConsent();
+    clearConsent();
+    expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
+    expect(localStorage.getItem('flaxia_consent_expiry')).toBeNull();
+    expect(localStorage.getItem('flaxia_consent_denied')).toBeNull();
+    expect(getConsentState()).toBe('unset');
   });
 });

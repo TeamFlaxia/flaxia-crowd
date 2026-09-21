@@ -30,6 +30,7 @@ describe('SignalingClient (incapable device)', () => {
     vi.useRealTimers();
     delete (window as any).__flaxia_node_init_started;
     delete (window as any).__flaxia_node_signal_client;
+    delete (window as any).__flaxia_node_controller;
     delete (globalThis as any).Worker;
   });
 

@@ -33,6 +33,7 @@ describe('SignalingClient', () => {
     // Reset node init idempotency flags and any leaked Worker global between tests.
     delete (window as any).__flaxia_node_init_started;
     delete (window as any).__flaxia_node_signal_client;
+    delete (window as any).__flaxia_node_controller;
     delete (globalThis as any).Worker;
   });
 
@@ -198,7 +199,12 @@ describe('SignalingClient', () => {
 
   it('should not execute a task that is already in flight (duplicate delivery)', async () => {
     const send = vi.fn();
-    let wsInstance: { close: () => void; send: typeof send; onmessage: ((e: MessageEvent) => void) | null; readyState?: number };
+    let wsInstance: {
+      close: () => void;
+      send: typeof send;
+      onmessage: ((e: MessageEvent) => void) | null;
+      readyState?: number;
+    };
     const MockWebSocket = vi.fn().mockImplementation(function () {
       wsInstance = { close: vi.fn(), send, onmessage: null, readyState: 1 };
       return wsInstance;
@@ -304,5 +310,83 @@ describe('SignalingClient', () => {
     client.disconnect();
 
     expect(terminate).toHaveBeenCalled();
+  });
+
+  it('delegates consent to the host and never mounts the built-in UI', async () => {
+    class MockWorker {
+      terminate = vi.fn();
+      postMessage = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+
+    const onConsentRequired = vi.fn();
+    const controller = initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right', onConsentRequired },
+    });
+
+    expect(onConsentRequired).toHaveBeenCalledTimes(1);
+    expect(document.getElementById('flaxia-consent-container')).toBeNull();
+    expect(controller.isRunning()).toBe(false);
+    expect(controller.getConsentState()).toBe('unset');
+
+    const controls = onConsentRequired.mock.calls[0][0];
+    controls.accept();
+    await flush();
+    await flush();
+
+    expect(controller.isRunning()).toBe(true);
+    expect(controller.getConsentState()).toBe('granted');
+  });
+
+  it('revokes and re-grants consent from the controller (settings toggle)', async () => {
+    class MockWorker {
+      terminate = vi.fn();
+      postMessage = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+
+    const controller = initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: {
+        brandName: 'Test',
+        position: 'bottom-right',
+        onConsentRequired: ({ reject }) => reject(),
+      },
+    });
+
+    // Host rejected immediately -> denied, nothing running, no consent stored.
+    expect(controller.getConsentState()).toBe('denied');
+    expect(controller.isRunning()).toBe(false);
+    expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
+
+    // Settings toggles it back on.
+    controller.grant();
+    controller.start();
+    await flush();
+    await flush();
+    expect(controller.getConsentState()).toBe('granted');
+    expect(controller.isRunning()).toBe(true);
+    expect(localStorage.getItem('flaxia_consent_denied')).toBeNull();
+
+    // Settings toggles it off again.
+    controller.deny();
+    expect(controller.getConsentState()).toBe('denied');
+    expect(controller.isRunning()).toBe(false);
+    expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
   });
 });

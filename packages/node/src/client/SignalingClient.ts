@@ -1,20 +1,18 @@
 import { ConsentUI } from '../consent/ConsentUI';
 import {
-  hasConsent,
-  hasDenial,
+  clearConsent as clearPersistedConsent,
+  getConsentState,
   saveConsent,
   saveDenial,
   safeLocalStorageGet,
+  safeLocalStorageRemove,
   safeLocalStorageSet,
   safeRandomUUID,
 } from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
-import {
-  HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
-  probeMaxWasmMemoryBytes,
-} from '../executor/memoryProbe';
+import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
 
-import type { NodeConfig, WorkloadType } from '@flaxia/sdk';
+import type { ConsentState, FlaxiaNodeController, NodeConfig, WorkloadType } from '@flaxia/sdk';
 
 const log = (...args: unknown[]) => console.log('[flaxia-node]', ...args);
 const logError = (...args: unknown[]) => console.error('[flaxia-node]', ...args);
@@ -58,7 +56,9 @@ class SignalingClient {
     if (this.ws) {
       const old = this.ws;
       old.onclose = null;
-      try { old.close(); } catch {}
+      try {
+        old.close();
+      } catch {}
       this.ws = null;
     }
 
@@ -136,13 +136,19 @@ class SignalingClient {
     this.destroyed = true;
     this.suspended = false;
     this.removeVisibilityHandler();
-    try { this.ws?.close(); } catch {}
+    try {
+      this.ws?.close();
+    } catch {}
     this.ws = null;
-    try { delete (window as any)[INIT_FLAG]; } catch {}
+    try {
+      delete (window as any)[INIT_FLAG];
+    } catch {}
     // Kill the Web Worker we own. Without this, a re-init (common on mobile
     // Chrome where the embed script re-executes) leaves the previous worker
     // running forever, and they accumulate into a huge worker swarm.
-    try { this.workerPool.terminate(); } catch {}
+    try {
+      this.workerPool.terminate();
+    } catch {}
   }
 
   suspend() {
@@ -152,7 +158,9 @@ class SignalingClient {
     if (this.ws) {
       const old = this.ws;
       old.onclose = null;
-      try { old.close(); } catch {}
+      try {
+        old.close();
+      } catch {}
       this.ws = null;
     }
     this.workerPool.terminate();
@@ -173,7 +181,9 @@ class SignalingClient {
         try {
           const cached = JSON.parse(cachedRaw) as NodeToken;
           if (cached.token && cached.nodeId && cached.expiresAt > Date.now() + 60000) {
-            log(`token cached nodeId=${cached.nodeId} expiresIn=${Math.round((cached.expiresAt - Date.now()) / 1000)}s`);
+            log(
+              `token cached nodeId=${cached.nodeId} expiresIn=${Math.round((cached.expiresAt - Date.now()) / 1000)}s`,
+            );
             return cached;
           }
         } catch {}
@@ -186,10 +196,10 @@ class SignalingClient {
       // routes every task elsewhere.
       const wasmMemoryBytes = probeMaxWasmMemoryBytes();
       const capable = wasmMemoryBytes >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
-      const capabilities = capable
-        ? (this.config.capabilities ?? ['ai-inference', 'image-process'])
-        : [];
-      log(`register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)}`);
+      const capabilities = capable ? (this.config.capabilities ?? ['ai-inference', 'image-process']) : [];
+      log(
+        `register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)}`,
+      );
 
       const base = this.config.orchestratorUrl.replace(/\/+$/, '');
       const response = await fetch(`${base}/crowd/nodes/register`, {
@@ -288,6 +298,7 @@ class SignalingClient {
 
 const WINDOW_KEY = '__flaxia_node_signal_client';
 const INIT_FLAG = '__flaxia_node_init_started';
+const CONTROLLER_KEY = '__flaxia_node_controller';
 
 const startNode = (config: NodeConfig) => {
   const prev: SignalingClient | undefined = (window as any)[WINDOW_KEY];
@@ -308,38 +319,111 @@ const startNode = (config: NodeConfig) => {
   client.connect();
 };
 
-export const initFlaxiaNode = (config: NodeConfig) => {
-  // Idempotent: the embed script can be re-executed on mobile Chrome (background
-  // tab revival, SPA navigations, duplicate injection). Re-running must never
-  // spin up additional Web Workers / SignalClients. The flag is cleared on
-  // disconnect() so a torn-down node can be re-initialized if needed.
-  if ((window as any)[INIT_FLAG]) return;
-  (window as any)[INIT_FLAG] = true;
+/**
+ * Owns the node lifecycle and consent persistence. A single controller is
+ * cached on `window` so a host (e.g. a settings screen) can start/stop the
+ * node and flip consent without re-importing the bundle.
+ */
+class NodeController implements FlaxiaNodeController {
+  constructor(private config: NodeConfig) {}
 
-  if (hasConsent()) {
-    startNode(config);
-    return;
+  start(): void {
+    if (this.isRunning()) return;
+    startNode(this.config);
   }
 
-  if (hasDenial()) {
-    return;
+  stop(): void {
+    const client: SignalingClient | undefined = (window as any)[WINDOW_KEY];
+    if (client) {
+      client.disconnect();
+    }
+    // disconnect() leaves the handle in place for the old embed contract, so
+    // clear it here to make isRunning() truthful and allow a clean restart.
+    delete (window as any)[WINDOW_KEY];
+    delete (window as any)[INIT_FLAG];
+  }
+
+  isRunning(): boolean {
+    return Boolean((window as any)[WINDOW_KEY]);
+  }
+
+  getConsentState(): ConsentState {
+    return getConsentState();
+  }
+
+  grant(): void {
+    saveConsent();
+  }
+
+  deny(): void {
+    saveDenial();
+    this.stop();
+    // Drop the cached orchestrator token so a denied node does not silently
+    // resume with a stale identity.
+    safeLocalStorageRemove(NODE_TOKEN_KEY);
+  }
+
+  clearConsent(): void {
+    clearPersistedConsent();
+    this.stop();
+    safeLocalStorageRemove(NODE_TOKEN_KEY);
+  }
+}
+
+export const initFlaxiaNode = (config: NodeConfig): FlaxiaNodeController => {
+  // Idempotent: the embed script can be re-executed on mobile Chrome (background
+  // tab revival, SPA navigations, duplicate injection). Re-running must never
+  // spin up additional Web Workers / SignalClients, so the cached controller is
+  // returned as-is.
+  const existing: NodeController | undefined = (window as any)[CONTROLLER_KEY];
+  if (existing) return existing;
+
+  const controller = new NodeController(config);
+  (window as any)[CONTROLLER_KEY] = controller;
+  (window as any)[INIT_FLAG] = true;
+
+  const state = getConsentState();
+  if (state === 'granted') {
+    controller.start();
+    return controller;
+  }
+  if (state === 'denied') {
+    return controller;
+  }
+
+  // State is 'unset'. Delegate to the host when it provides its own UI,
+  // otherwise fall back to the built-in banner for third-party embeds.
+  if (config.consent.onConsentRequired) {
+    config.consent.onConsentRequired({
+      state,
+      accept: () => {
+        saveConsent();
+        controller.start();
+      },
+      reject: () => {
+        saveDenial();
+      },
+    });
+    return controller;
   }
 
   const container = document.createElement('div');
   container.id = 'flaxia-consent-container';
   document.body.appendChild(container);
 
-  const ui = new ConsentUI(
+  new ConsentUI(
     container,
     config.consent,
     () => {
       saveConsent();
       container.remove();
-      startNode(config);
+      controller.start();
     },
     () => {
       saveDenial();
       container.remove();
     },
   );
+
+  return controller;
 };

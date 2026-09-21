@@ -4,7 +4,16 @@
 
 export type TaskStatus = 'pending' | 'assigning' | 'processing' | 'done' | 'failed';
 
-export type WorkloadType = 'ai-inference' | 'image-process' | 'file-convert' | 'container' | 'vector-embed' | 'vector-store' | 'vector-query' | 'moe-inference' | 'nudenet';
+export type WorkloadType =
+  | 'ai-inference'
+  | 'image-process'
+  | 'file-convert'
+  | 'container'
+  | 'vector-embed'
+  | 'vector-store'
+  | 'vector-query'
+  | 'moe-inference'
+  | 'nudenet';
 
 // --- AI Inference ---
 
@@ -283,7 +292,16 @@ export interface NudeNetResult {
 
 // --- Core Task Types ---
 
-export type TaskPayload = AiInferencePayload | ImageProcessPayload | FileConvertPayload | ContainerPayload | VectorEmbedPayload | VectorStorePayload | VectorQueryPayload | MoEInferencePayload | NudeNetPayload;
+export type TaskPayload =
+  | AiInferencePayload
+  | ImageProcessPayload
+  | FileConvertPayload
+  | ContainerPayload
+  | VectorEmbedPayload
+  | VectorStorePayload
+  | VectorQueryPayload
+  | MoEInferencePayload
+  | NudeNetPayload;
 
 export interface TaskRecord {
   id: string;
@@ -314,14 +332,67 @@ export interface SubmitTaskResponse {
 
 // --- Node Types ---
 
+/**
+ * Persisted consent state for a browser node.
+ *
+ * - `granted`: the visitor opted in and the node may run.
+ * - `denied`: the visitor opted out; the node must stay off.
+ * - `unset`: no decision yet; a host or the built-in UI should ask.
+ */
+export type ConsentState = 'unset' | 'granted' | 'denied';
+
+/**
+ * Handed to a host that renders its own consent UI. The host calls
+ * {@link ConsentControls.accept} or {@link ConsentControls.reject} so the node
+ * bundle owns persistence and node lifecycle.
+ */
+export interface ConsentControls {
+  /** Consent state at the moment the host UI was requested. */
+  state: ConsentState;
+  /** Persist consent and start the node. */
+  accept(): void;
+  /** Persist denial and stop the node. */
+  reject(): void;
+}
+
+export interface ConsentConfig {
+  brandName: string;
+  position: 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left';
+  accentColor?: string;
+  /**
+   * Optional host-provided consent UI. When set, the built-in `ConsentUI` is
+   * never rendered: the node calls this only while the state is `unset`, and
+   * the host decides how (and whether) to prompt. Other hosts omit it and keep
+   * the built-in banner.
+   */
+  onConsentRequired?: (controls: ConsentControls) => void;
+}
+
+/**
+ * Control surface returned by {@link initFlaxiaNode}. Hosts use it to reflect
+ * and change consent from a settings screen without re-initialising the bundle.
+ */
+export interface FlaxiaNodeController {
+  /** Start the node (no-op when already running). */
+  start(): void;
+  /** Stop the node and release its Web Worker. */
+  stop(): void;
+  /** Whether the node currently has an active signaling client. */
+  isRunning(): boolean;
+  /** Read the persisted consent state (honours the consent TTL). */
+  getConsentState(): ConsentState;
+  /** Persist consent (clears any previous denial). */
+  grant(): void;
+  /** Persist denial and stop the node (clears any previous consent). */
+  deny(): void;
+  /** Forget the consent decision entirely (granted, denied and expiry). */
+  clearConsent(): void;
+}
+
 export interface NodeConfig {
   orchestratorUrl: string;
   siteId: string;
-  consent: {
-    brandName: string;
-    position: 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left';
-    accentColor?: string;
-  };
+  consent: ConsentConfig;
   maxCpuLoad?: number;
   capabilities?: WorkloadType[];
   moe?: MoENodeConfig;
