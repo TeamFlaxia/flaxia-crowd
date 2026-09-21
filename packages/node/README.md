@@ -84,6 +84,18 @@ controller.clearConsent()    // 同意・拒否・失効時刻をすべて消去
 同意は localStorage に保存され、**30日**で失効します。`grant` と `deny` は排他で、
 片方を保存するともう片方は消去されます。
 
+### 保存状態の読み取り（ノード初期化前）
+
+`getFlaxiaNodeConsentState()` はコントローラを作らず、ネットワークにも触れず、
+保存済みの同意状態だけを同期的に返します。設定画面をノード初期化前に描画する
+ホストはこれを使えます。
+
+```typescript
+import { getFlaxiaNodeConsentState } from '@flaxia/node'
+
+getFlaxiaNodeConsentState() // 'unset' | 'granted' | 'denied'
+```
+
 ## アーキテクチャ
 
 ```
