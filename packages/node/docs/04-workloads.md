@@ -8,6 +8,7 @@
 | `image-process` | OffscreenCanvas | 低 | 高 |
 | `container` | container2wasm | 中 | 中 |
 | `file-convert` | WASM (予定) | 高 | Phase 2 |
+| `swarm-inference` | WebGPU + レイヤー分割 (pooled) | 高 | Phase 2 |
 
 ---
 

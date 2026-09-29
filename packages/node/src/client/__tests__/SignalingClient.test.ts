@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initFlaxiaNode } from '../SignalingClient';
 
+// Swarm capability advertisement is driven by the WebGPU probe; mock it so
+// tests never touch a real adapter.
+const { probeWebGpuMock } = vi.hoisted(() => ({ probeWebGpuMock: vi.fn() }));
+vi.mock('../../executor/webgpuProbe', () => ({ probeWebGpu: probeWebGpuMock }));
+
 // Deterministic capability probe so obtainToken() never actually tries to
 // allocate gigabytes of RAM in the test runner. This file simulates a capable
 // device (>= 2GB commit). See SignalingClient.incapable.test.ts for the
@@ -29,6 +34,7 @@ describe('SignalingClient', () => {
     document.body.innerHTML = '';
     localStorage.clear();
     vi.restoreAllMocks();
+    probeWebGpuMock.mockClear();
     vi.useRealTimers();
     // Reset node init idempotency flags and any leaked Worker global between tests.
     delete (window as any).__flaxia_node_init_started;
@@ -88,6 +94,79 @@ describe('SignalingClient', () => {
       wasmMemoryBytes: 4 * 1024 ** 3,
       deviceMemory: null, // jsdom / mobile WebViews do not expose navigator.deviceMemory
     });
+  });
+
+  it('advertises swarm-inference with WebGPU details when the host opts in', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    probeWebGpuMock.mockResolvedValue({
+      webgpu: true,
+      gpuArchitecture: 'apple m1',
+      maxStorageBufferBindingSize: 134217728,
+    });
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['ai-inference', 'swarm-inference'],
+      allowModelDownload: true,
+    });
+    await flush();
+    await flush();
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.capabilities).toEqual(['ai-inference', 'swarm-inference']);
+    expect(body.swarm).toEqual({
+      webgpu: true,
+      gpuArchitecture: 'apple m1',
+      maxStorageBufferBindingSize: 134217728,
+    });
+  });
+
+  it('drops swarm-inference when the device has no WebGPU adapter', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    probeWebGpuMock.mockResolvedValue({ webgpu: false });
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['ai-inference', 'swarm-inference'],
+      allowModelDownload: true,
+    });
+    await flush();
+    await flush();
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.capabilities).toEqual(['ai-inference']);
+    expect(body.swarm).toBeUndefined();
+  });
+
+  it('never probes WebGPU without the model-download opt-in', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['ai-inference', 'swarm-inference'],
+    });
+    await flush();
+    await flush();
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.capabilities).toEqual(['ai-inference']);
+    expect(body.swarm).toBeUndefined();
+    expect(probeWebGpuMock).not.toHaveBeenCalled();
   });
 
   it('should create consent container with correct id', () => {

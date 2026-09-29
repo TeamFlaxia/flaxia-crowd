@@ -11,8 +11,9 @@ import {
 } from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
+import { probeWebGpu } from '../executor/webgpuProbe';
 
-import type { ConsentState, FlaxiaNodeController, NodeConfig, WorkloadType } from '@flaxia/sdk';
+import type { ConsentState, FlaxiaNodeController, NodeConfig, SwarmNodeCapabilities, WorkloadType } from '@flaxia/sdk';
 
 const log = (...args: unknown[]) => console.log('[flaxia-node]', ...args);
 const logError = (...args: unknown[]) => console.error('[flaxia-node]', ...args);
@@ -196,9 +197,25 @@ class SignalingClient {
       // routes every task elsewhere.
       const wasmMemoryBytes = probeMaxWasmMemoryBytes();
       const capable = wasmMemoryBytes >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
-      const capabilities = capable ? (this.config.capabilities ?? ['ai-inference', 'image-process']) : [];
+      const requested = this.config.capabilities ?? ['ai-inference', 'image-process'];
+      let capabilities = capable ? [...requested] : [];
+
+      // Swarm inference additionally needs WebGPU and an explicit opt-in to
+      // download multi-GB layer weights. Probe only when the host asked for it,
+      // and drop the capability when the device cannot actually serve it.
+      let swarm: SwarmNodeCapabilities | undefined;
+      if (capable && requested.includes('swarm-inference') && this.config.allowModelDownload === true) {
+        swarm = await probeWebGpu();
+        if (!swarm.webgpu) {
+          capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
+          swarm = undefined;
+        }
+      } else {
+        capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
+      }
+
       log(
-        `register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)}`,
+        `register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)} webgpu=${swarm?.webgpu ?? false}`,
       );
 
       const base = this.config.orchestratorUrl.replace(/\/+$/, '');
@@ -219,6 +236,7 @@ class SignalingClient {
             typeof (navigator as Navigator & { deviceMemory?: number }).deviceMemory === 'number'
               ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory
               : null,
+          swarm,
         }),
       });
       if (!response.ok) {
