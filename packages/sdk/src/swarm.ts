@@ -117,6 +117,12 @@ export function swarmNextHopIndex(chainLength: number, fromIndex: number): numbe
 export const SWARM_FRAME_MAGIC = 0x5357; // "SW"
 export const SWARM_FRAME_HEADER_BYTES = 16;
 const SWARM_FRAME_KIND_HIDDEN = 0;
+const SWARM_FRAME_KIND_STOP = 1;
+
+export const SWARM_FRAME_KIND = {
+  hidden: SWARM_FRAME_KIND_HIDDEN,
+  stop: SWARM_FRAME_KIND_STOP,
+} as const;
 
 export interface SwarmFrameHeader {
   /** Correlates a round trip; the host increments it per frame. */
@@ -139,6 +145,27 @@ export function encodeSwarmFrame(header: SwarmFrameHeader, payload: Uint8Array):
   dv.setUint16(14, 0, true);
   new Uint8Array(buffer, SWARM_FRAME_HEADER_BYTES).set(payload);
   return buffer;
+}
+
+/**
+ * An empty control frame that travels the chain once and tells every worker its
+ * session is over. The host sends it after the generation loop; each worker
+ * forwards it and stops. Carries no hidden state.
+ */
+export function encodeSwarmStopFrame(requestId = 0): ArrayBuffer {
+  const buffer = new ArrayBuffer(SWARM_FRAME_HEADER_BYTES);
+  const dv = new DataView(buffer);
+  dv.setUint16(0, SWARM_FRAME_MAGIC, true);
+  dv.setUint8(2, SWARM_FRAME_KIND_STOP);
+  dv.setUint8(3, 0);
+  dv.setUint32(4, requestId >>> 0, true);
+  return buffer;
+}
+
+export function isSwarmStopFrame(buffer: ArrayBuffer): boolean {
+  if (buffer.byteLength < SWARM_FRAME_HEADER_BYTES) return false;
+  const dv = new DataView(buffer);
+  return dv.getUint16(0, true) === SWARM_FRAME_MAGIC && dv.getUint8(2) === SWARM_FRAME_KIND_STOP;
 }
 
 export function decodeSwarmFrame(

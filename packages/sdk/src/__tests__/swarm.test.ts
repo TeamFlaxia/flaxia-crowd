@@ -7,6 +7,8 @@ import {
   swarmNextHopIndex,
   encodeSwarmFrame,
   decodeSwarmFrame,
+  encodeSwarmStopFrame,
+  isSwarmStopFrame,
   isSwarmInitMessage,
   isSwarmNodeMessage,
   SWARM_FRAME_MAGIC,
@@ -134,6 +136,16 @@ describe('swarm frame codec', () => {
     const buffer = encodeSwarmFrame({ requestId: 1, pos: 0, tokens: 1 }, new Uint8Array([9]));
     new DataView(buffer).setUint16(0, SWARM_FRAME_MAGIC + 1, true);
     expect(decodeSwarmFrame(buffer)).toBeNull();
+  });
+
+  it('distinguishes stop frames from hidden frames', () => {
+    const stop = encodeSwarmStopFrame(5);
+    expect(isSwarmStopFrame(stop)).toBe(true);
+    expect(decodeSwarmFrame(stop)).toBeNull();
+
+    const hidden = encodeSwarmFrame({ requestId: 1, pos: 0, tokens: 1 }, new Uint8Array([1]));
+    expect(isSwarmStopFrame(hidden)).toBe(false);
+    expect(isSwarmStopFrame(new ArrayBuffer(4))).toBe(false);
   });
 });
 
