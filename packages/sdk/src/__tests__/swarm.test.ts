@@ -11,6 +11,7 @@ import {
   isSwarmStopFrame,
   isSwarmInitMessage,
   isSwarmNodeMessage,
+  isValidSwarmChain,
   SWARM_FRAME_MAGIC,
   SWARM_FRAME_HEADER_BYTES,
 } from '../swarm';
@@ -157,11 +158,10 @@ describe('swarm message guards', () => {
         sessionId: 's',
         taskId: 't',
         model: 'm',
-        layers: 8,
-        index: 0,
-        chainLength: 2,
-        role: 'host',
-        slice: { start: 0, end: 4, hasEmbed: true, hasHead: true },
+        members: [
+          { nodeId: 'a', capacity: 4 },
+          { nodeId: 'b', capacity: 2 },
+        ],
       }),
     ).toBe(true);
   });
@@ -170,10 +170,10 @@ describe('swarm message guards', () => {
     expect(isSwarmInitMessage(null)).toBe(false);
     expect(isSwarmInitMessage({ type: 'swarm-init', sessionId: 's' })).toBe(false);
     expect(
-      isSwarmInitMessage({
-        type: 'swarm-init', sessionId: 's', taskId: 't', model: 'm', layers: 0, index: 0, chainLength: 1,
-        role: 'host', slice: { start: 0, end: 1, hasEmbed: true, hasHead: true },
-      }),
+      isSwarmInitMessage({ type: 'swarm-init', sessionId: 's', taskId: 't', model: 'm', members: [] }),
+    ).toBe(false);
+    expect(
+      isSwarmInitMessage({ type: 'swarm-init', sessionId: 's', taskId: 't', model: 'm', members: [{ nodeId: '' }] }),
     ).toBe(false);
   });
 
@@ -184,5 +184,36 @@ describe('swarm message guards', () => {
     expect(isSwarmNodeMessage({ type: 'swarm-error', sessionId: 's' })).toBe(false);
     expect(isSwarmNodeMessage({ type: 'nope', sessionId: 's' })).toBe(false);
     expect(isSwarmNodeMessage({ type: 'swarm-ready' })).toBe(false);
+  });
+});
+
+describe('isValidSwarmChain', () => {
+  const valid = [
+    { nodeId: 'a', role: 'host', slice: { start: 0, end: 6, hasEmbed: true, hasHead: true } },
+    { nodeId: 'b', role: 'worker', slice: { start: 6, end: 8, hasEmbed: false, hasHead: false } },
+  ];
+
+  it('accepts a contiguous chain that covers every layer', () => {
+    expect(isValidSwarmChain(valid)).toBe(true);
+  });
+
+  it('rejects gaps, overlaps and empty slices', () => {
+    // gap: second slice must start where the first ended
+    expect(isValidSwarmChain([valid[0], { ...valid[1], slice: { start: 7, end: 8, hasEmbed: false, hasHead: false } }])).toBe(false);
+    // overlap
+    expect(isValidSwarmChain([valid[0], { ...valid[1], slice: { start: 5, end: 8, hasEmbed: false, hasHead: false } }])).toBe(false);
+    // empty slice
+    expect(isValidSwarmChain([{ ...valid[0], slice: { start: 0, end: 0, hasEmbed: true, hasHead: true } }])).toBe(false);
+  });
+
+  it('requires the first entry to own the embedding and head', () => {
+    expect(isValidSwarmChain([{ ...valid[0], slice: { ...valid[0].slice, hasEmbed: false } }, valid[1]])).toBe(false);
+    expect(isValidSwarmChain([valid[0], { ...valid[1], role: 'host' }])).toBe(false);
+  });
+
+  it('rejects empty or malformed input', () => {
+    expect(isValidSwarmChain([])).toBe(false);
+    expect(isValidSwarmChain('nope')).toBe(false);
+    expect(isValidSwarmChain([{ nodeId: 'a' }])).toBe(false);
   });
 });

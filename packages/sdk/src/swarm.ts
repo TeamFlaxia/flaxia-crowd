@@ -189,18 +189,48 @@ export function decodeSwarmFrame(
 }
 
 // --- Coordinator <-> node control messages ---
+//
+// The coordinator brokers resources and relays frames; the host owns the plan.
+// Flow: coordinator -> swarm-init (host) -> swarm-plan (host) -> swarm-slice
+// (every node) -> swarm-ready (every node) -> swarm-start (host). The host then
+// generates and frames circulate; the coordinator only routes them.
+
+/** A chain member as offered to the host, with the capacity it can contribute. */
+export interface SwarmMember {
+  nodeId: string;
+  capacity: number;
+}
 
 export interface SwarmInitMessage {
   type: 'swarm-init';
   sessionId: string;
   taskId: string;
   model: string;
-  layers: number;
+  /** Ordered members (index 0 is the host) with capacities for the split. */
+  members: SwarmMember[];
+}
+
+/** The host's layer plan; the coordinator stores it and hands out slices. */
+export interface SwarmPlanMessage {
+  type: 'swarm-plan';
+  sessionId: string;
+  chain: SwarmChainNode[];
+}
+
+export interface SwarmSliceMessage {
+  type: 'swarm-slice';
+  sessionId: string;
   /** This node's chain position (0 = host). */
   index: number;
   chainLength: number;
   role: SwarmRole;
   slice: SwarmSlice;
+}
+
+/** Sent to the host once every member has loaded its slice. */
+export interface SwarmStartMessage {
+  type: 'swarm-start';
+  sessionId: string;
 }
 
 export interface SwarmReadyMessage {
@@ -228,6 +258,7 @@ export interface SwarmErrorMessage {
 
 export type SwarmNodeMessage =
   | SwarmReadyMessage
+  | SwarmPlanMessage
   | SwarmTokenMessage
   | SwarmDoneMessage
   | SwarmErrorMessage;
@@ -236,19 +267,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function isSlice(value: unknown): value is SwarmSlice {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.start === 'number' &&
+    typeof value.end === 'number' &&
+    typeof value.hasEmbed === 'boolean' &&
+    typeof value.hasHead === 'boolean'
+  );
+}
+
+function isMember(value: unknown): value is SwarmMember {
+  if (!isRecord(value)) return false;
+  return typeof value.nodeId === 'string' && value.nodeId.length > 0 && typeof value.capacity === 'number';
+}
+
 export function isSwarmInitMessage(value: unknown): value is SwarmInitMessage {
   if (!isRecord(value) || value.type !== 'swarm-init') return false;
   if (typeof value.sessionId !== 'string' || !value.sessionId) return false;
   if (typeof value.taskId !== 'string' || !value.taskId) return false;
   if (typeof value.model !== 'string') return false;
-  if (typeof value.layers !== 'number' || !Number.isInteger(value.layers) || value.layers < 1) return false;
-  if (typeof value.index !== 'number' || !Number.isInteger(value.index) || value.index < 0) return false;
-  if (typeof value.chainLength !== 'number' || !Number.isInteger(value.chainLength) || value.chainLength < 1) return false;
-  if (value.role !== 'host' && value.role !== 'worker') return false;
-  const slice = value.slice;
-  if (!isRecord(slice)) return false;
-  if (typeof slice.start !== 'number' || typeof slice.end !== 'number') return false;
-  if (typeof slice.hasEmbed !== 'boolean' || typeof slice.hasHead !== 'boolean') return false;
+  if (!Array.isArray(value.members) || value.members.length === 0) return false;
+  return value.members.every(isMember);
+}
+
+/**
+ * Validate a host-supplied plan before the coordinator stores it: the slices
+ * must be non-empty, contiguous, cover every layer exactly once, and the first
+ * entry must be the host that owns the embedding and head.
+ */
+export function isValidSwarmChain(chain: unknown): chain is SwarmChainNode[] {
+  if (!Array.isArray(chain) || chain.length === 0) return false;
+  let cursor = 0;
+  for (let i = 0; i < chain.length; i++) {
+    const node = chain[i];
+    if (!isRecord(node) || typeof node.nodeId !== 'string' || !node.nodeId) return false;
+    if (node.role !== (i === 0 ? 'host' : 'worker')) return false;
+    if (!isSlice(node.slice)) return false;
+    if (node.slice.start !== cursor) return false;
+    if (node.slice.end <= node.slice.start) return false;
+    if (node.slice.hasEmbed !== (i === 0)) return false;
+    if (node.slice.hasHead !== (i === 0)) return false;
+    cursor = node.slice.end;
+  }
   return true;
 }
 
@@ -259,6 +320,8 @@ export function isSwarmNodeMessage(value: unknown): value is SwarmNodeMessage {
     case 'swarm-ready':
     case 'swarm-done':
       return true;
+    case 'swarm-plan':
+      return isValidSwarmChain(value.chain);
     case 'swarm-token':
       return typeof value.token === 'string';
     case 'swarm-error':
