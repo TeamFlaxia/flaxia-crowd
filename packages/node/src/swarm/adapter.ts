@@ -1,3 +1,6 @@
+// Adapter over the Nehanth/pooled engine API (https://github.com/Nehanth/pooled),
+// MIT, Copyright (c) 2026 Nehanth Narendrula.
+// See vendor/pooled/VENDORED.md and vendor/pooled/LICENSE.
 import { probeWebGpu } from '../executor/webgpuProbe';
 
 /**

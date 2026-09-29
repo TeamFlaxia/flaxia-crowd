@@ -1,0 +1,6 @@
+# Pooled authors and collaborators
+Nehanth Narendrula <nehanthnarendrula@gmail.com> (maintainer)
+
+# Contributors
+Aaryan Manchanda (@aaryanmanchanda): per-hop telemetry on a real Mac and iPhone, and two bugs it found (PR #51)
+Sourabh Kumar (@Sourabh-Kumar04): host output visibility controls and device names (PR #48), and stop and re-deal work (PR #52)

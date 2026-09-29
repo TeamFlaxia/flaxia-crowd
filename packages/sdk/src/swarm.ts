@@ -1,3 +1,6 @@
+// Layer planning and the frame wire are derived from Nehanth/pooled
+// (https://github.com/Nehanth/pooled), MIT, Copyright (c) 2026 Nehanth Narendrula.
+// See vendor/pooled/VENDORED.md and vendor/pooled/LICENSE.
 import type { SwarmChainNode, SwarmRole, SwarmSessionPlan, SwarmSlice } from './types';
 
 /**

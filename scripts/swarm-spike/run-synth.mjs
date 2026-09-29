@@ -1,6 +1,10 @@
 // Phase 0 spike: run the vendored Pooled (SwarmLLM) engine on the synthetic
 // Qwen35 model, solo and split across two engines, on real WebGPU.
 //
+// Adapted from Nehanth/pooled tests/e2e/engine_synth.mjs
+// (https://github.com/Nehanth/pooled), MIT, Copyright (c) 2026 Nehanth Narendrula.
+// See vendor/pooled/VENDORED.md and vendor/pooled/LICENSE.
+//
 //   deno run --unstable-webgpu --allow-read scripts/swarm-spike/run-synth.mjs \
 //     [--tokens 24] [--layers 8] [--dim 256] [--split 4]
 //

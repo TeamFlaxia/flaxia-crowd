@@ -1,6 +1,10 @@
 // Phase 0 check: can a dedicated Web Worker (the production runtime) obtain
 // WebGPU *and* run the vendored Pooled engine slice end to end?
 //
+// The in-page flow and Chrome GPU flags follow Nehanth/pooled
+// (https://github.com/Nehanth/pooled), MIT, Copyright (c) 2026 Nehanth Narendrula.
+// See vendor/pooled/VENDORED.md and vendor/pooled/LICENSE.
+//
 //   node scripts/swarm-spike/check-webgpu-worker.mjs
 //   CHROME=/path/to/chrome node scripts/swarm-spike/check-webgpu-worker.mjs
 //

@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+title: "Pooled: peer-to-peer LLM inference in the browser"
+message: "If you use Pooled in your work, please cite it as below."
+type: software
+authors:
+  - family-names: Narendrula
+    given-names: Nehanth
+abstract: "Pooled runs one open language model across the devices in a room, in their browser tabs. Each device holds some of the model's layers and runs them with its own WebGPU kernels; hidden states pass between devices over WebRTC."
+repository-code: "https://github.com/Nehanth/pooled"
+url: "https://pooled.run"
+license: MIT
+version: 0.2.0
+date-released: 2026-09-07

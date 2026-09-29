@@ -10,6 +10,22 @@ the `swarm-inference` workload spike. Pooled is MIT-licensed; the upstream
 - Upstream: `https://github.com/Nehanth/pooled`
 - Commit: `d6491f3f0771f62abf695954fab1c0f8e6363bdb` (2026-09-28)
 - Vendored: `engine/` and `tests/e2e/synth.mjs` (renamed `synth/synth.mjs`)
+- Also kept: upstream `LICENSE`, `AUTHORS` and `CITATION.cff`
+- License: MIT, Copyright (c) 2026 Nehanth Narendrula
+
+## Derived files in this repository
+
+These are our own files that port or adapt Pooled code and carry the MIT
+attribution in their header:
+
+- `packages/sdk/src/swarm.ts` — layer planner ported from `room/plan.js`
+  (`planSplit`); frame kind/codec adapted from `room/transport.js`
+- `packages/node/src/swarm/session.ts` — host/worker loop adapted from the
+  chain protocol in `room.js` / `room/transport.js`
+- `packages/node/src/swarm/adapter.ts` — wraps the vendored `Qwen35Engine` API
+- `scripts/swarm-spike/run-synth.mjs` — adapted from `tests/e2e/engine_synth.mjs`
+- `scripts/swarm-spike/check-webgpu-worker.mjs` — Chrome GPU flags and in-page
+  flow adapted from the upstream e2e harness
 
 ## Local modifications
 
@@ -23,7 +39,7 @@ the `swarm-inference` workload spike. Pooled is MIT-licensed; the upstream
 git clone --depth 1 https://github.com/Nehanth/pooled.git /tmp/pooled
 cp -r /tmp/pooled/engine/. vendor/pooled/engine/
 cp /tmp/pooled/tests/e2e/synth.mjs vendor/pooled/synth/synth.mjs
-cp /tmp/pooled/LICENSE vendor/pooled/LICENSE
+cp /tmp/pooled/LICENSE /tmp/pooled/AUTHORS /tmp/pooled/CITATION.cff vendor/pooled/
 # re-apply the node: import patch, then update the commit above
 ```
 

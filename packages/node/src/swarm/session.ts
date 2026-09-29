@@ -1,3 +1,6 @@
+// Host/worker session loop derived from Nehanth/pooled
+// (https://github.com/Nehanth/pooled), MIT, Copyright (c) 2026 Nehanth Narendrula.
+// See vendor/pooled/VENDORED.md and vendor/pooled/LICENSE.
 import {
   decodeSwarmFrame,
   encodeSwarmFrame,
