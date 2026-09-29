@@ -8,6 +8,8 @@ export {
   tokenizerFromGGUF,
   f32ToF16,
   f16ToF32,
+  gpuUploadEntry,
+  streamEntryToGPU,
   GGML_EMBED,
 } from '../../../../vendor/pooled/engine/gguf.js';
 export { makeTokenizer, argmax } from '../../../../vendor/pooled/engine/engine.js';

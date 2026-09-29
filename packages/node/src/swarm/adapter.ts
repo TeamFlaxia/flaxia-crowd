@@ -57,6 +57,8 @@ export interface PooledTensorInfo {
 export interface PooledGguf {
   meta: Record<string, unknown>;
   tensors: Record<string, PooledTensorInfo>;
+  /** Set to stream Q4_0/Q8_0 matrices straight into GPU buffers. */
+  streamEntry?: (info: PooledTensorInfo) => Promise<unknown>;
 }
 
 export interface PooledTokenizer {
@@ -72,12 +74,23 @@ export interface PooledEngineModule {
     gguf: PooledGguf,
     bytesOf: (info: PooledTensorInfo) => Promise<Uint8Array>,
     options: { lo: number; hi: number; hasEmbed: boolean; hasHead: boolean; mtp?: boolean },
+    onProgress?: (bytes: number) => void,
+    onEntry?: (entry: unknown, name: string) => void,
   ): Promise<unknown>;
   tokenizerFromGGUF(meta: Record<string, unknown>): unknown;
   makeTokenizer(vocab: unknown): PooledTokenizer;
   argmax(logits: Float32Array): number;
   f32ToF16(value: number): number;
   f16ToF32(value: number): number;
+  /** Upload one converted entry with writeBuffer (large matrices cannot use mappedAtCreation). */
+  gpuUploadEntry(device: unknown, entry: unknown, keepCpu?: boolean): unknown;
+  /** Stream a Q4_0/Q8_0 tensor from a fetch Response straight into GPU buffers. */
+  streamEntryToGPU(
+    device: unknown,
+    info: PooledTensorInfo,
+    openRange: (info: PooledTensorInfo) => Promise<Response>,
+    options?: { staging?: number },
+  ): Promise<unknown>;
   GGML_EMBED: string;
 }
 

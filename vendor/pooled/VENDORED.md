@@ -75,3 +75,11 @@ the module worker got a WebGPU adapter/device (`google`/`swiftshader`,
 Deno token stream. This confirms the production runtime (Web Worker) can host
 the engine; SwiftShader is CPU emulation, so absolute speed is not meaningful.
 
+`scripts/swarm-spike/run-real.mjs` runs a real GGUF (default Qwen3.5-2B Q4_0),
+served over local HTTP Range and streamed tensor-by-tensor into GPU buffers the
+way the production runtime loads — solo vs a 2-way layer split. Verified against
+the real header on 2026-09-29 (Qwen3.5-2B: `qwen35`, 24 layers, tied embeddings,
+no MTP). Note: Deno's WebGPU backend on this box reports a spurious
+out-of-memory while streaming a 2B model, so the full run must be completed in a
+real browser; the engine itself is validated by the two harnesses above.
+

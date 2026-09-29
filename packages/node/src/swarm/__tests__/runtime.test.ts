@@ -8,6 +8,7 @@ afterEach(() => {
 
 describe('resolveModelUrl', () => {
   it('maps a known model id to its GGUF url', () => {
+    expect(resolveModelUrl('qwen3.5-2b')).toContain('Qwen3.5-2B');
     expect(resolveModelUrl('qwen3.8-27b')).toContain('Qwen3.8-27B');
     expect(resolveModelUrl('qwen3.6-35b-moe')).toContain('Qwen3.6-35B');
   });

@@ -28,6 +28,10 @@ import type { SwarmSemantics } from './session';
 
 /** GGUF sources for the models the swarm engine can split. */
 const SWARM_GGUF_URLS: Record<string, string> = {
+  // Qwen3.5 / 3.8 are Gated-DeltaNet hybrids ("qwen35" in GGUF), handled by
+  // Qwen35Engine — not DenseEngine.
+  'qwen3.5-2b':
+    'https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf',
   'qwen3.8-27b':
     'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_0.gguf',
   'qwen3.6-35b-moe':
@@ -97,6 +101,41 @@ export async function rangeFetch(url: string, lo: number, hi: number): Promise<U
     } catch {}
   }
   return bytes;
+}
+
+/** Range-fetch a tensor as a streaming Response (for GPU-side streaming loads). */
+async function rangeFetchResponse(url: string, lo: number, hi: number): Promise<Response> {
+  const length = hi - lo + 1;
+  const cache = await getWeightCache();
+  const key = cacheKey(url, lo, hi);
+
+  if (cache) {
+    try {
+      const hit = await cache.match(key);
+      if (hit) {
+        const bytes = new Uint8Array(await hit.arrayBuffer());
+        if (bytes.byteLength === length) return new Response(bytes, { status: 200 });
+        await cache.delete(key).catch(() => {});
+      }
+    } catch {}
+  }
+
+  const response = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } });
+  if (response.status !== 206) throw new Error('model host refused range requests');
+  if (cache) {
+    response
+      .clone()
+      .arrayBuffer()
+      .then((buffer) => {
+        if (buffer.byteLength !== length) return;
+        return cache.put(
+          key,
+          new Response(buffer, { status: 200, headers: { 'content-type': 'application/octet-stream' } }),
+        );
+      })
+      .catch(() => {});
+  }
+  return response;
 }
 
 /** Fetch as much of the file as it takes to parse the GGUF header + tokenizer. */
@@ -216,13 +255,31 @@ export function createSwarmRuntime(): SwarmRuntime {
       const tokenizer = mod.makeTokenizer(mod.tokenizerFromGGUF(gguf.meta));
       const bytesOf = (info: PooledTensorInfo) =>
         rangeFetch(url, info.byteOffset, info.byteOffset + info.byteLength - 1);
-      const weights = await mod.qwen35Weights(gguf, bytesOf, {
-        lo: slice.start,
-        hi: slice.end,
-        hasEmbed: slice.hasEmbed,
-        hasHead: slice.hasHead,
-        mtp: slice.hasHead,
-      });
+
+      // Large Q4_0/Q8_0 matrices are streamed straight into GPU buffers, and the
+      // rest are uploaded with writeBuffer: a mappedAtCreation copy of the ~254 MB
+      // tied embedding is what a naive load cannot allocate.
+      gguf.streamEntry = (info) =>
+        mod.streamEntryToGPU(
+          device,
+          info,
+          (i) => rangeFetchResponse(url, i.byteOffset, i.byteOffset + i.byteLength - 1),
+          { staging: 4 * 1024 * 1024 },
+        );
+      const weights = await mod.qwen35Weights(
+        gguf,
+        bytesOf,
+        {
+          lo: slice.start,
+          hi: slice.end,
+          hasEmbed: slice.hasEmbed,
+          hasHead: slice.hasHead,
+          mtp: slice.hasHead,
+        },
+        undefined,
+        // Keep the embedding on the CPU: the host does per-token row lookups.
+        (entry, name) => mod.gpuUploadEntry(device, entry, name === mod.GGML_EMBED),
+      );
 
       const vocabSize = gguf.tensors[mod.GGML_EMBED]?.shape[0] ?? 0;
       const engine = await mod.Qwen35Engine.create({
