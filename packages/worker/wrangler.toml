@@ -3,7 +3,7 @@ main = "src/index.ts"
 compatibility_date = "2024-04-03"
 
 [vars]
-API_KEYS = "fc_live_textanalyzer_example_key,fc_live_darkshark_example_key,fc_live_flaxia_dev_key"
+API_KEYS = "fc_live_textanalyzer_example_key,fc_live_flaxia_dev_key"
 CORS_ORIGINS = "http://localhost:5173,http://localhost:5174,http://localhost:8787,https://flaxia.app"
 RATE_LIMIT_MAX = "100"
 MAX_PAYLOAD_SIZE = "1048576"

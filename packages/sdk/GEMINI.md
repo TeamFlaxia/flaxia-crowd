@@ -2,7 +2,7 @@
 
 ## このパッケージの目的
 
-個人開発者が Flaxia Crowd・DarkShark にタスクを投げるための**依頼者向けSDK**。
+個人開発者が Flaxia Crowd にタスクを投げるための**依頼者向けSDK**。
 型定義の単一の真実の源泉（`@flaxia/worker`・`@flaxia/node`はここの型を参照する）。
 
 ## 技術スタック

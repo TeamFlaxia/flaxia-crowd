@@ -5,12 +5,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace=@flaxia/sdk && npm run build --workspace=@flaxia/node && npm run build --workspace=@flaxia/darkshark && npm run build --workspace=@flaxia/text-analyzer && npm run build --workspace=@flaxia/worker",
+    "build": "npm run build --workspace=@flaxia/sdk && npm run build --workspace=@flaxia/node && npm run build --workspace=@flaxia/text-analyzer && npm run build --workspace=@flaxia/worker",
     "test": "npm run build --workspace=@flaxia/sdk && npm test --workspaces --if-present",
     "deploy:worker": "npm run deploy --workspace=packages/worker",
     "dev:worker": "npm run dev --workspace=packages/worker",
     "dev:node": "npm run dev --workspace=packages/node",
-    "dev:darkshark": "npm run dev --workspace=packages/darkshark",
     "dev:text-analyzer": "npm run dev --workspace=packages/text-analyzer",
     "dev:translation": "npm run dev --workspace=packages/translation"
   },
