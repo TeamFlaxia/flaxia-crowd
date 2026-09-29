@@ -90,8 +90,9 @@ npm run spike:real-worker
 Verified on 2026-09-29 with Chrome 148 headless
 (`--use-angle=vulkan --enable-features=Vulkan --ignore-gpu-blocklist` →
 NVIDIA Pascal): Qwen3.5-2B Q4_0 loaded through the streaming loader in a module
-worker and both solo and the 2-way split produced the same coherent tokens
-(`" Paris.\nA. True\nB. False\n\n thinking"` for a raw completion prompt), with no
-GPU errors. Deno's WebGPU backend on the same box reports a spurious
-out-of-memory for the 2B model, so use the Chrome harness for real weights.
+worker and both solo and the 2-way split produced identical, coherent output.
+For the chat prompt "Where is The capital of France" the answer begins
+`"The capital of France is **Paris**.\n\nLocated in the Île-de-F…"`, with no GPU
+errors. Deno's WebGPU backend on the same box reports a spurious out-of-memory
+for the 2B model, so use the Chrome harness for real weights.
 

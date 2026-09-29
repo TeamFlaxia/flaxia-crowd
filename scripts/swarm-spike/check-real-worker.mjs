@@ -85,7 +85,11 @@ try {
   const chat = (text) => [V['<|im_start|>'], ...tok.encode('user\\n' + text), V['<|im_end|>'], ...tok.encode('\\n'),
     V['<|im_start|>'], ...tok.encode('assistant\\n'), V['<think>'], ...tok.encode('\\n\\n'), V['</think>'], ...tok.encode('\\n\\n')];
   const eos = new Set([V['<|im_end|>'], V['<|endoftext|>']]);
-  const prompt = ${process.env.PROMPT ? `tok.encode(${JSON.stringify(process.env.PROMPT)})` : `chat('What is the capital of France? Answer in one sentence.')`};
+  const prompt = ${process.env.CHAT_PROMPT
+    ? `chat(${JSON.stringify(process.env.CHAT_PROMPT)})`
+    : process.env.PROMPT
+      ? `tok.encode(${JSON.stringify(process.env.PROMPT)})`
+      : `chat('What is the capital of France? Answer in one sentence.')`};
 
   report({ stage: 'solo-load' });
   const solo = await mk(0, L, true);
