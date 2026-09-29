@@ -206,8 +206,13 @@ export interface SwarmInitMessage {
   sessionId: string;
   taskId: string;
   model: string;
+  /** Task timeout in ms, so the host's worker knows its own deadline. */
+  timeoutMs: number;
   /** Ordered members (index 0 is the host) with capacities for the split. */
   members: SwarmMember[];
+  /** The generation request (the host owns generation). */
+  prompt: string | string[];
+  maxNewTokens?: number;
 }
 
 /** The host's layer plan; the coordinator stores it and hands out slices. */
@@ -220,6 +225,9 @@ export interface SwarmPlanMessage {
 export interface SwarmSliceMessage {
   type: 'swarm-slice';
   sessionId: string;
+  taskId: string;
+  /** Task timeout in ms, so the worker knows its own deadline. */
+  timeoutMs: number;
   /** This node's chain position (0 = host). */
   index: number;
   chainLength: number;
@@ -231,6 +239,7 @@ export interface SwarmSliceMessage {
 export interface SwarmStartMessage {
   type: 'swarm-start';
   sessionId: string;
+  taskId: string;
 }
 
 export interface SwarmReadyMessage {
