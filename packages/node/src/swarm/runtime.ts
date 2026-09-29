@@ -158,7 +158,8 @@ export function buildSemantics(mod: PooledEngineModule, tok: PooledTokenizer): S
   const vocab = tok.vocab;
   const imStart = vocab['<|im_start|>'];
   const imEnd = vocab['<|im_end|>'];
-  const thinkOpen = vocab[' thinking'];
+  // The GGUF special tokens are "<think>" / "</think>" (no leading space).
+  const thinkOpen = vocab['<think>'];
   const thinkClose = vocab['</think>'];
 
   const chat = (text: string): number[] =>

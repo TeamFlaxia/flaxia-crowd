@@ -47,7 +47,7 @@ describe('buildSemantics', () => {
     vocab: {
       '<|im_start|>': 0,
       '<|im_end|>': 1,
-      ' thinking': 2,
+      '<think>': 2,
       '</think>': 3,
       '<|endoftext|>': 4,
     },
@@ -78,6 +78,11 @@ describe('buildSemantics', () => {
     expect(ids[0]).toBe(0); // <|im_start|>
     expect(ids).toContain(1); // <|im_end|>
     expect(ids).toContain(10);
+    // the thinking block must open before it closes (the tokens are "<think>" / "</think>")
+    const open = ids.indexOf(2);
+    const close = ids.indexOf(3);
+    expect(open).toBeGreaterThan(-1);
+    expect(close).toBeGreaterThan(open);
     expect(Array.from(semantics.eosIds!)).toEqual([1, 4]);
     expect(semantics.decodeTokens!([5, 6])).toBe('5|6');
     expect(semantics.argmax(Float32Array.from([0, 3, 1]))).toBe(1);
