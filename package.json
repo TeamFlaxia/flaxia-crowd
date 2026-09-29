@@ -14,6 +14,7 @@
     "dev:translation": "npm run dev --workspace=packages/translation",
     "spike:swarm": "deno run --unstable-webgpu --allow-read scripts/swarm-spike/run-synth.mjs",
     "spike:swarm-real": "deno run --unstable-webgpu --allow-read --allow-write --allow-net scripts/swarm-spike/run-real.mjs",
+    "spike:real-worker": "node scripts/swarm-spike/check-real-worker.mjs",
     "spike:webgpu-worker": "node scripts/swarm-spike/check-webgpu-worker.mjs"
   },
   "devDependencies": {

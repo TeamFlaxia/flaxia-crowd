@@ -77,9 +77,21 @@ the engine; SwiftShader is CPU emulation, so absolute speed is not meaningful.
 
 `scripts/swarm-spike/run-real.mjs` runs a real GGUF (default Qwen3.5-2B Q4_0),
 served over local HTTP Range and streamed tensor-by-tensor into GPU buffers the
-way the production runtime loads — solo vs a 2-way layer split. Verified against
-the real header on 2026-09-29 (Qwen3.5-2B: `qwen35`, 24 layers, tied embeddings,
-no MTP). Note: Deno's WebGPU backend on this box reports a spurious
-out-of-memory while streaming a 2B model, so the full run must be completed in a
-real browser; the engine itself is validated by the two harnesses above.
+way the production runtime loads — solo vs a 2-way layer split.
+
+`scripts/swarm-spike/check-real-worker.mjs` does the same inside a dedicated
+module worker in headless Chrome, on the real GPU:
+
+```bash
+npm run spike:real-worker
+# PROMPT="The capital of France is" TOKENS=12 CHROME_GPU=real npm run spike:real-worker
+```
+
+Verified on 2026-09-29 with Chrome 148 headless
+(`--use-angle=vulkan --enable-features=Vulkan --ignore-gpu-blocklist` →
+NVIDIA Pascal): Qwen3.5-2B Q4_0 loaded through the streaming loader in a module
+worker and both solo and the 2-way split produced the same coherent tokens
+(`" Paris.\nA. True\nB. False\n\n thinking"` for a raw completion prompt), with no
+GPU errors. Deno's WebGPU backend on the same box reports a spurious
+out-of-memory for the 2B model, so use the Chrome harness for real weights.
 

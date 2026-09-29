@@ -69,41 +69,17 @@ function cacheKey(url: string, lo: number, hi: number): string {
 
 /** Range-fetch bytes, caching complete entries so a second start skips the network. */
 export async function rangeFetch(url: string, lo: number, hi: number): Promise<Uint8Array> {
-  const length = hi - lo + 1;
-  const cache = await getWeightCache();
-  const key = cacheKey(url, lo, hi);
-
-  if (cache) {
-    try {
-      const hit = await cache.match(key);
-      if (hit) {
-        const bytes = new Uint8Array(await hit.arrayBuffer());
-        if (bytes.byteLength === length) return bytes;
-        await cache.delete(key).catch(() => {});
-      }
-    } catch {}
-  }
-
-  const response = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } });
-  if (response.status !== 206) throw new Error('model host refused range requests');
+  const response = await rangeFetchResponse(url, lo, hi);
   const bytes = new Uint8Array(await response.arrayBuffer());
+  const length = hi - lo + 1;
   if (bytes.byteLength !== length) throw new Error(`short range ${bytes.byteLength}/${length}`);
-
-  if (cache) {
-    try {
-      await cache.put(
-        key,
-        new Response(bytes.slice().buffer, {
-          status: 200,
-          headers: { 'content-type': 'application/octet-stream' },
-        }),
-      );
-    } catch {}
-  }
   return bytes;
 }
 
-/** Range-fetch a tensor as a streaming Response (for GPU-side streaming loads). */
+/**
+ * Range-fetch a tensor as a streaming Response (for GPU-side streaming loads).
+ * Retries transient network failures, which matter on long mobile loads.
+ */
 async function rangeFetchResponse(url: string, lo: number, hi: number): Promise<Response> {
   const length = hi - lo + 1;
   const cache = await getWeightCache();
@@ -120,22 +96,34 @@ async function rangeFetchResponse(url: string, lo: number, hi: number): Promise<
     } catch {}
   }
 
-  const response = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } });
-  if (response.status !== 206) throw new Error('model host refused range requests');
-  if (cache) {
-    response
-      .clone()
-      .arrayBuffer()
-      .then((buffer) => {
-        if (buffer.byteLength !== length) return;
-        return cache.put(
-          key,
-          new Response(buffer, { status: 200, headers: { 'content-type': 'application/octet-stream' } }),
-        );
-      })
-      .catch(() => {});
+  let last: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const response = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } });
+      if (response.status !== 206) {
+        last = new Error(`model host refused range requests (${response.status})`);
+      } else {
+        if (cache) {
+          response
+            .clone()
+            .arrayBuffer()
+            .then((buffer) => {
+              if (buffer.byteLength !== length) return;
+              return cache.put(
+                key,
+                new Response(buffer, { status: 200, headers: { 'content-type': 'application/octet-stream' } }),
+              );
+            })
+            .catch(() => {});
+        }
+        return response;
+      }
+    } catch (err) {
+      last = err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
   }
-  return response;
+  throw new Error(`range fetch ${lo}-${hi} failed: ${last instanceof Error ? last.message : String(last)}`);
 }
 
 /** Fetch as much of the file as it takes to parse the GGUF header + tokenizer. */
