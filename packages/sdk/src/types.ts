@@ -199,6 +199,34 @@ export interface SwarmInferenceResult {
   tokensPerSecond?: number;
 }
 
+/** A node's role in a swarm session: the host drives generation, workers run a slice. */
+export type SwarmRole = 'host' | 'worker';
+
+/** One node's contiguous transformer layer slice. `end` is exclusive. */
+export interface SwarmSlice {
+  start: number;
+  end: number;
+  hasEmbed: boolean;
+  hasHead: boolean;
+}
+
+export interface SwarmChainNode {
+  nodeId: string;
+  role: SwarmRole;
+  slice: SwarmSlice;
+}
+
+/** The layer placement and ordered node chain for one swarm inference session. */
+export interface SwarmSessionPlan {
+  sessionId: string;
+  taskId: string;
+  model: string;
+  /** Total number of trunk layers in the model. */
+  layers: number;
+  /** Ordered chain; index 0 is the host and owns the generation loop. */
+  chain: SwarmChainNode[];
+}
+
 // --- Image Processing ---
 
 export interface ImageProcessPayload {
@@ -372,6 +400,8 @@ export interface TaskRecord {
   retryCount: number;
   timeoutMs: number;
   callbackUrl?: string;
+  /** Set for `swarm-inference` tasks once the coordinator has assembled a chain. */
+  swarmSession?: SwarmSessionPlan;
   result?: unknown;
   error?: string;
 }
