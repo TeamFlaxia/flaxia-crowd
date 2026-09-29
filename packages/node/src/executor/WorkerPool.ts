@@ -11,6 +11,13 @@ interface ActiveTask {
   removeListener: () => void;
 }
 
+/** A task waiting for the worker, with the handle needed to settle or drop it. */
+interface QueuedTask {
+  id: string;
+  job: () => void;
+  reject: (error: Error) => void;
+}
+
 /** Swarm tasks exchange control messages and binary frames mid-task. */
 export interface SwarmCallbacks {
   onFrame?: (frame: ArrayBuffer) => void;
@@ -32,7 +39,7 @@ export class WorkerPool {
   private worker: Worker | null = null;
   private defaultTimeoutMs: number;
   private workerUrl: string;
-  private queue: Array<() => void> = [];
+  private queue: QueuedTask[] = [];
   private active: ActiveTask | null = null;
   /** Control messages that arrived for a task that has not started yet. */
   private pendingControls: Array<{ taskId: string; message: unknown }> = [];
@@ -76,7 +83,7 @@ export class WorkerPool {
         job();
       } else {
         log(`task queued id=${id} workload=${workload} (active task running)`);
-        this.queue.push(job);
+        this.queue.push({ id, job, reject });
       }
     });
   }
@@ -217,6 +224,33 @@ export class WorkerPool {
     return this.postToActive({ type: 'swarm-frame', frame }, [frame]);
   }
 
+  /**
+   * The coordinator settled this task elsewhere (timeout, a peer failed, the
+   * plan was rejected): stop it.
+   *
+   * A queued task is dropped before it ever starts. A running task is asked to
+   * stop and the slot is released only when the worker itself reports done or
+   * error, so two tasks can never end up in the same worker.
+   */
+  abort(id: string, reason: string): boolean {
+    const queued = this.queue.findIndex((task) => task.id === id);
+    if (queued >= 0) {
+      const [dropped] = this.queue.splice(queued, 1);
+      this.pendingControls = this.pendingControls.filter((c) => c.taskId !== id);
+      log(`task aborted before start id=${id} reason=${reason}`);
+      dropped.reject(new Error(reason));
+      return true;
+    }
+    if (this.active?.id !== id || !this.worker) return false;
+    try {
+      this.worker.postMessage({ id, type: 'abort', reason });
+      log(`task abort sent id=${id} reason=${reason}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private handleWorkerError(err: Error) {
     log(`worker error error=${err.message}`);
     const active = this.active;
@@ -231,7 +265,7 @@ export class WorkerPool {
 
   private dequeue() {
     const next = this.queue.shift();
-    if (next) next();
+    if (next) next.job();
   }
 
   private cleanupWorker() {
@@ -243,8 +277,12 @@ export class WorkerPool {
   }
 
   terminate() {
+    // Settle queued promises too: a dropped closure would leave its caller
+    // awaiting a task that will never run.
+    const queued = this.queue;
     this.queue = [];
     this.pendingControls = [];
+    for (const task of queued) task.reject(new Error('TERMINATED'));
     if (this.active) {
       clearTimeout(this.active.timer);
       this.active.reject(new Error('TERMINATED'));

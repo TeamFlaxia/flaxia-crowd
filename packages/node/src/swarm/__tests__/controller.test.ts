@@ -139,6 +139,38 @@ describe('SwarmController host', () => {
     expect(error).toHaveBeenCalledWith('no metadata');
     expect(done).not.toHaveBeenCalled();
   });
+
+  it('settles on abort and disposes the engine instead of waiting out the session', async () => {
+    const chain: SwarmChainNode[] = [
+      { nodeId: 'h', role: 'host', slice: { start: 0, end: 8, hasEmbed: true, hasHead: true } },
+    ];
+    const engine = hostEngine();
+    const runtime = makeRuntime(engine, chain);
+    const init: SwarmInitMessage = {
+      type: 'swarm-init', sessionId: 's', taskId: 't', model: 'm', timeoutMs: 60000,
+      members: [{ nodeId: 'h', capacity: 4 }], prompt: 'hi', maxNewTokens: 3,
+    };
+    const { controller, controls, error, done } = makeOptions(init, runtime);
+    await controller.start();
+    await controller.handleControl({
+      type: 'swarm-slice', sessionId: 's', taskId: 't', model: 'm', timeoutMs: 60000,
+      index: 0, chainLength: 1, role: 'host',
+      slice: { start: 0, end: 8, hasEmbed: true, hasHead: true },
+    });
+    expect(controls[1]).toMatchObject({ type: 'swarm-ready', sessionId: 's' });
+
+    // The coordinator settled the task elsewhere (a peer failed, or it timed
+    // out); the session must end now, not on its own schedule.
+    controller.abort('coordinator settled the task');
+    expect(error).toHaveBeenCalledWith('coordinator settled the task');
+    expect(done).not.toHaveBeenCalled();
+    expect(engine.dispose).toHaveBeenCalled();
+
+    // A start that was already in flight cannot resurrect the session.
+    await controller.handleControl({ type: 'swarm-start', sessionId: 's', taskId: 't' });
+    expect(done).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('SwarmController worker', () => {

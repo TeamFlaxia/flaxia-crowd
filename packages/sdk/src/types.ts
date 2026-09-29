@@ -419,6 +419,21 @@ export interface SubmitTaskResponse {
   createdAt: number;
 }
 
+/**
+ * Coordinator -> node: the task is already settled (it timed out, a peer
+ * failed, the plan was rejected), so stop working on it.
+ *
+ * Without this a node still running a session holds a slot the scheduler counts
+ * as busy for the rest of the task timeout. The receiver must not report the
+ * abort back: the coordinator may already have requeued the task for a retry,
+ * and an error echo would race that attempt.
+ */
+export interface AbortMessage {
+  type: 'abort';
+  taskId: string;
+  error: string;
+}
+
 // --- Node Types ---
 
 /**

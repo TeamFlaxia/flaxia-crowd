@@ -43,6 +43,8 @@ class SignalingClient {
   private suspended = false;
   private visibilityHandler: (() => void) | null = null;
   private inflightTasks = new Set<string>();
+  /** Tasks the coordinator told us to stop; their failure must not be echoed back. */
+  private abortedTasks = new Set<string>();
 
   constructor(
     private config: NodeConfig,
@@ -111,6 +113,10 @@ class SignalingClient {
           await this.handleTask(msg);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
+          if (this.abortedTasks.delete(msg.taskId)) {
+            log(`task stopped on coordinator abort taskId=${msg.taskId} error=${message}`);
+            return;
+          }
           logError(`task failed taskId=${msg.taskId} workload=${msg.workload} error=${message}`);
           this.send({
             type: 'error',
@@ -143,6 +149,10 @@ class SignalingClient {
         if (taskId && this.inflightTasks.has(taskId)) this.workerPool.sendControl(data);
         return;
       }
+      if (data.type === 'abort') {
+        this.handleAbort(data);
+        return;
+      }
     };
 
     ws.onclose = () => {
@@ -153,6 +163,21 @@ class SignalingClient {
       log(`signal disconnected; scheduling reconnect attempt=${this.reconnectAttempts + 1}`);
       this.scheduleReconnect();
     };
+  }
+
+  /**
+   * The coordinator settled this task (timeout, a peer failed, the plan was
+   * rejected): stop it now instead of waiting out our own task timeout. The
+   * failure is not reported back — the coordinator may already have requeued
+   * the task for a retry, and an error echo would race that attempt.
+   */
+  private handleAbort(data: Record<string, unknown>) {
+    const taskId = String(data.taskId ?? '');
+    if (!taskId || !this.inflightTasks.has(taskId)) return;
+    const error =
+      typeof data.error === 'string' && data.error ? data.error : 'aborted by the coordinator';
+    if (this.workerPool.abort(taskId, error)) this.abortedTasks.add(taskId);
+    log(`task abort received taskId=${taskId} error=${error}`);
   }
 
   private scheduleReconnect() {
@@ -337,8 +362,12 @@ class SignalingClient {
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logError(`swarm failed taskId=${taskId} error=${message}`);
-      this.send({ type: 'error', taskId, error: message });
+      if (this.abortedTasks.delete(taskId)) {
+        log(`swarm stopped on coordinator abort taskId=${taskId} error=${message}`);
+      } else {
+        logError(`swarm failed taskId=${taskId} error=${message}`);
+        this.send({ type: 'error', taskId, error: message });
+      }
     } finally {
       this.inflightTasks.delete(taskId);
     }

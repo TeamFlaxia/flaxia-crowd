@@ -520,6 +520,19 @@ export class Coordinator extends DurableObject<Env> {
     task.swarmSession = undefined;
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+    // The session ends here either way, so every node still working on it must
+    // be told: without a stop signal a member whose peer failed sits idle until
+    // the task timeout, holding a slot the scheduler is still counting as busy.
+    // The receiver does not echo an error back (see AbortMessage), so a task
+    // requeued for retry below cannot be knocked over by its own members.
+    const running = swarm
+      ? swarm.members.map(member => member.nodeId)
+      : task.assignedNodeId
+        ? [task.assignedNodeId]
+        : [];
+    for (const nodeId of running) {
+      this.sendToNode(nodeId, { type: "abort", taskId, error });
+    }
     if (swarm) {
       await this.releaseSwarmMembers(taskId);
     } else if (task.assignedNodeId && release) {
@@ -673,9 +686,6 @@ export class Coordinator extends DurableObject<Env> {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (!node || node.status !== "idle") continue;
         if (!node.capabilities.includes(task.workload as WorkloadType)) continue;
-        // Swarm inference requires a WebGPU adapter on the node; without one the
-        // engine cannot run its layer slice.
-        if (task.workload === "swarm-inference" && !node.webgpu) continue;
         // Never hand a heavy WASM workload to a low-memory / mobile node; the
         // model load would spike memory and get the device's process killed.
         if (node.lowMemory && HEAVY_WORKLOADS.has(task.workload)) continue;

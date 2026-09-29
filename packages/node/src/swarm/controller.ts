@@ -107,6 +107,15 @@ export class SwarmController {
     this.frameHandler?.(frame);
   }
 
+  /**
+   * Stop the session because the coordinator settled the task elsewhere. Exactly
+   * like a failure this disposes the engine, so the GPU buffers and device do
+   * not stay resident on a device the scheduler has already moved on from.
+   */
+  abort(reason: string): void {
+    this.fail(new Error(reason));
+  }
+
   private link(): SwarmFrameLink {
     return {
       send: (frame) => this.options.sendFrame(frame),

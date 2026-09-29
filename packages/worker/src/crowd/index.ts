@@ -74,6 +74,56 @@ export function parseWarmModels(value: unknown): WarmModelRange[] | undefined {
   return ranges.length > 0 ? ranges : undefined
 }
 
+/**
+ * Validate a `swarm-inference` payload at the API boundary.
+ *
+ * The scheduler tolerates unusable `swarm` options by falling back to defaults,
+ * but silently reinterpreting a request means the client never learns its
+ * options were dropped. Rejecting at submit time keeps a bad payload out of the
+ * queue entirely. Returns an error message, or null when the payload is valid.
+ */
+export function validateSwarmPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return 'payload must be an object'
+  }
+  const body = payload as Record<string, unknown>
+
+  if (body.maxNewTokens !== undefined && body.maxNewTokens !== null) {
+    const maxNewTokens = body.maxNewTokens
+    if (typeof maxNewTokens !== 'number' || !Number.isInteger(maxNewTokens) || maxNewTokens < 1) {
+      return 'payload.maxNewTokens must be a positive integer'
+    }
+  }
+
+  if (body.swarm === undefined || body.swarm === null) return null
+  if (typeof body.swarm !== 'object' || Array.isArray(body.swarm)) {
+    return 'payload.swarm must be an object'
+  }
+  const swarm = body.swarm as Record<string, unknown>
+
+  const asCount = (key: 'minNodes' | 'maxNodes'): string | null => {
+    const value = swarm[key]
+    if (value === undefined || value === null) return null
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+      return `payload.swarm.${key} must be an integer >= 1`
+    }
+    return null
+  }
+  const minError = asCount('minNodes')
+  if (minError) return minError
+  const maxError = asCount('maxNodes')
+  if (maxError) return maxError
+
+  const { minNodes, maxNodes } = swarm as { minNodes?: number; maxNodes?: number }
+  if (minNodes !== undefined && maxNodes !== undefined && maxNodes < minNodes) {
+    return 'payload.swarm.maxNodes must be >= payload.swarm.minNodes'
+  }
+  if (swarm.preferWarm !== undefined && swarm.preferWarm !== null && typeof swarm.preferWarm !== 'boolean') {
+    return 'payload.swarm.preferWarm must be a boolean'
+  }
+  return null
+}
+
 const app = new Hono<{ Bindings: Env }>()
 
 function getCoordinator(c: any) {
@@ -95,6 +145,7 @@ app.post('/nodes/register', async (c) => {
     nodeId?: string
     capabilities?: string[]
     deviceMemory?: number | null
+    wasmMemoryBytes?: number
     swarm?: unknown
     warmModels?: unknown
   }
@@ -152,7 +203,7 @@ app.get('/signal', async (c) => {
     return c.text('Origin not allowed', 403)
   }
 
-  const token = c.req.query('token')
+  const token = c.req.query('token') ?? null
   const payload = await verifyNodeToken(c.env.NODE_TOKEN_SECRET, token)
   if (!payload) {
     return c.text('Invalid or expired token', 401)
@@ -228,6 +279,11 @@ app.post('/tasks', async (c) => {
   }
   if (!body.payload) return c.json({ error: 'payload is required' }, 400)
 
+  if (body.workload === 'swarm-inference') {
+    const swarmError = validateSwarmPayload(body.payload)
+    if (swarmError) return c.json({ error: swarmError }, 400)
+  }
+
   let timeoutMs = body.timeoutMs
   if (timeoutMs === undefined || timeoutMs === null) {
     timeoutMs = defaultTimeoutFor(body.workload as WorkloadType)
@@ -245,7 +301,7 @@ app.post('/tasks', async (c) => {
     if (typeof body.callbackUrl !== 'string') {
       return c.json({ error: 'callbackUrl must be a string' }, 400)
     }
-    callbackUrl = validateCallbackUrl(body.callbackUrl)
+    callbackUrl = validateCallbackUrl(body.callbackUrl) ?? undefined
     if (!callbackUrl) {
       return c.json({ error: 'callbackUrl is not allowed (HTTPS required, internal addresses blocked)' }, 400)
     }

@@ -143,4 +143,57 @@ describe('WorkerPool', () => {
     expect(messages).toEqual([{ type: 'swarm-ready', sessionId: 's' }]);
     expect(frames).toHaveLength(1);
   });
+
+  it('drops a queued task when the coordinator aborts it', async () => {
+    const postMessage = vi.fn();
+    class MockWorker {
+      postMessage = postMessage;
+      terminate = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+
+    pool = new WorkerPool(undefined, 5000);
+    // Task 1 never reports back, so task 2 sits in the queue behind it.
+    void pool.run('1', 'ai-inference', {}).catch(() => {});
+    const queued = pool.run('2', 'image-process', {});
+
+    expect(pool.abort('2', 'peer failed')).toBe(true);
+    await expect(queued).rejects.toThrow('peer failed');
+    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ id: '2' }));
+    expect(pool.abort('never-queued', 'peer failed')).toBe(false);
+  });
+
+  it('keeps the worker slot until an aborted task reports back', async () => {
+    let handler: Function;
+    const postMessage = vi.fn();
+    class MockWorker {
+      postMessage = postMessage;
+      terminate = vi.fn();
+      addEventListener = vi.fn((_event: string, h: Function) => {
+        handler = h;
+      });
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+
+    pool = new WorkerPool(undefined, 5000);
+    const active = pool.run('1', 'ai-inference', {});
+
+    expect(pool.abort('1', 'peer failed')).toBe(true);
+    expect(postMessage).toHaveBeenCalledWith({ id: '1', type: 'abort', reason: 'peer failed' });
+
+    // The slot is still held: releasing it here would let task 2 run in the
+    // same worker as task 1.
+    const queued = pool.run('2', 'image-process', {});
+    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ id: '2' }));
+
+    // The worker's own report settles task 1 and only then starts task 2.
+    handler!({ data: { id: '1', type: 'error', error: 'peer failed' } });
+    await expect(active).rejects.toThrow('peer failed');
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: '2', workload: 'image-process' }));
+
+    void queued.catch(() => {});
+  });
 });

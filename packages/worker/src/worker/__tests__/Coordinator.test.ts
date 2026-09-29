@@ -59,7 +59,7 @@ describe('Coordinator', () => {
     });
     expect(resp.status).toBe(200);
 
-    const stored = await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json());
+    const stored = await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json()) as TaskRecord;
     expect(stored.id).toBe(task.id);
     expect(stored.status).toBe('pending');
     expect(stored.workload).toBe('ai-inference');
@@ -104,7 +104,7 @@ describe('Coordinator', () => {
     await runInDurableObject(stub, async (instance) => {
       (instance as any).pendingCache = null;
       (instance as any).processingCache = null;
-      await instance.alarm();
+      await (instance as any).alarm();
     });
 
     const updated = await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json()) as TaskRecord;
@@ -114,11 +114,35 @@ describe('Coordinator', () => {
 
     await withStorage(async (storage) => {
       const released = await storage.get<NodeRecord>('node:node-1');
-      expect(released.status).toBe('idle');
-      expect(released.currentTaskId).toBeUndefined();
+      expect(released!.status).toBe('idle');
+      expect(released!.currentTaskId).toBeUndefined();
       const idle = await storage.get<string[]>('nodes:idle');
       expect(idle).toContain('node-1');
     });
+  });
+
+  it('tells the assigned node to stop when a processing task times out', async () => {
+    stub = newStub();
+    const task = makeTask({ status: 'processing', assignedNodeId: 'node-1', assignedAt: Date.now() - 120000 });
+    const node: NodeRecord = {
+      id: 'node-1', status: 'busy', capabilities: ['ai-inference'],
+      cpuLoad: 0, connectedAt: Date.now(), lastPongAt: Date.now(), currentTaskId: task.id,
+    };
+    await seedProcessingTask(task, node);
+    const connected = await connectNode('node-1', 'capabilities=ai-inference');
+
+    await runInDurableObject(stub, async (instance) => {
+      (instance as any).pendingCache = null;
+      (instance as any).processingCache = null;
+      await (instance as any).alarm();
+    });
+
+    // The node is still running this task; without a stop signal it would hold
+    // the slot until its own timeout fired, long after the coordinator requeued
+    // the task for someone else.
+    const aborts = jsonFrames(connected).filter((f) => f.type === 'abort');
+    expect(aborts).toHaveLength(1);
+    expect(aborts[0]).toMatchObject({ taskId: task.id, error: 'Task timed out' });
   });
 
   it('fails a task permanently once MAX_RETRIES is reached', async () => {
@@ -133,7 +157,7 @@ describe('Coordinator', () => {
     await runInDurableObject(stub, async (instance) => {
       (instance as any).pendingCache = null;
       (instance as any).processingCache = null;
-      await instance.alarm();
+      await (instance as any).alarm();
     });
 
     const updated = await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json()) as TaskRecord;
@@ -159,7 +183,7 @@ describe('Coordinator', () => {
     await runInDurableObject(stub, async (instance) => {
       (instance as any).pendingCache = null;
       (instance as any).processingCache = null;
-      await instance.alarm();
+      await (instance as any).alarm();
     });
 
     const failed = await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json()) as TaskRecord;
@@ -246,7 +270,7 @@ describe('Coordinator', () => {
     await runInDurableObject(stub, async (instance) => {
       (instance as any).pendingCache = null;
       (instance as any).processingCache = null;
-      await instance.alarm();
+      await (instance as any).alarm();
     });
 
     let stored = await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json()) as TaskRecord;
@@ -520,5 +544,25 @@ describe('Coordinator swarm sessions', () => {
       expect(b.status).toBe('idle');
       expect(await storage.get(`swarm:${task.id}`)).toBeUndefined();
     });
+  });
+
+  it('stops every member when one of them fails', async () => {
+    const { task, n1, n2 } = await setup();
+    n1.socket.send(JSON.stringify({ type: 'error', taskId: task.id, error: 'member blew up' }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Every member is still running the session; the failing one already
+    // stopped, the others would otherwise sit here until the task timeout.
+    for (const node of [n1, n2]) {
+      const aborts = jsonFrames(node).filter((f) => f.type === 'abort');
+      expect(aborts.length).toBeGreaterThan(0);
+      expect(aborts[0]).toMatchObject({ taskId: task.id, error: 'member blew up' });
+    }
+
+    // The failure is transient: the task burns one retry and is reassigned
+    // straight away (both members are idle again), rather than failing.
+    const stored = await stub.fetch(`http://internal/task/${task.id}`).then((r) => r.json() as Promise<TaskRecord>);
+    expect(stored.retryCount).toBe(1);
+    expect(['pending', 'processing']).toContain(stored.status);
   });
 });
