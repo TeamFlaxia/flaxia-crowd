@@ -324,6 +324,7 @@ export class Coordinator extends DurableObject<Env> {
         type: "swarm-slice",
         sessionId: swarm.sessionId,
         taskId,
+        model: (task.payload as SwarmInferencePayload)?.model ?? "",
         timeoutMs: task.timeoutMs,
         index: i,
         chainLength: chain.length,

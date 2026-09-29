@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import type { Env } from '../index'
 import type { SwarmNodeCapabilities, TaskRecord, WarmModelRange, WorkloadType } from '@flaxia/sdk'
-import { isRoutableWorkload } from '@flaxia/sdk'
+import { isRoutableWorkload, defaultTimeoutFor } from '@flaxia/sdk'
 import {
   createNodeToken,
   NODE_TOKEN_TTL_MS,
@@ -9,7 +9,6 @@ import {
   validateCallbackUrl,
   safeEqual,
 } from '../security'
-import { DEFAULT_TIMEOUT_MS } from '../worker/Coordinator'
 
 // Re-exported from @flaxia/sdk so hosts, worker and node share one definition.
 export { isHeavyWorkload } from '@flaxia/sdk'
@@ -231,7 +230,7 @@ app.post('/tasks', async (c) => {
 
   let timeoutMs = body.timeoutMs
   if (timeoutMs === undefined || timeoutMs === null) {
-    timeoutMs = DEFAULT_TIMEOUT_MS
+    timeoutMs = defaultTimeoutFor(body.workload as WorkloadType)
   } else if (
     typeof timeoutMs !== 'number' ||
     !Number.isFinite(timeoutMs) ||
