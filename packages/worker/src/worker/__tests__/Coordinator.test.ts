@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
-import type { TaskRecord } from '@flaxia/sdk';
+import type { SwarmChainNode, TaskRecord } from '@flaxia/sdk';
 import { MAX_RETRIES } from '../Coordinator';
 import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
 
@@ -289,6 +289,26 @@ describe('Coordinator', () => {
     });
   });
 
+  it('delivers a task frame to a connected node socket', async () => {
+    stub = newStub();
+    const resp = await stub.fetch('http://internal/ws?nodeId=n1&capabilities=ai-inference', {
+      headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
+    });
+    expect(resp.status).toBe(101);
+    const socket = (resp as unknown as { webSocket?: WebSocket }).webSocket;
+    expect(socket).toBeTruthy();
+    socket!.accept();
+    const messages: string[] = [];
+    socket!.addEventListener('message', (e: MessageEvent) => messages.push(String(e.data)));
+
+    const task = makeTask();
+    await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const frames = messages.map((m) => JSON.parse(m));
+    expect(frames.some((f) => f.type === 'task' && f.taskId === task.id)).toBe(true);
+  });
+
   it('rate limits unauthenticated websocket routes per IP in storage', async () => {
     stub = newStub();
     let got429 = false;
@@ -358,6 +378,147 @@ describe('node capability parsing', () => {
       expect(parseWarmModels([])).toBeUndefined();
       expect(parseWarmModels('nope')).toBeUndefined();
       expect(parseWarmModels([{ modelId: 'bad' }])).toBeUndefined();
+    });
+  });
+});
+
+interface SwarmSocket {
+  socket: WebSocket;
+  frames: Array<string | ArrayBuffer>;
+}
+
+async function connectNode(nodeId: string, query: string): Promise<SwarmSocket> {
+  const resp = await stub.fetch(`http://internal/ws?nodeId=${nodeId}&${query}`, {
+    headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
+  });
+  expect(resp.status).toBe(101);
+  const socket = (resp as unknown as { webSocket?: WebSocket }).webSocket!;
+  socket.accept();
+  const frames: Array<string | ArrayBuffer> = [];
+  socket.addEventListener('message', (e: MessageEvent) => frames.push(e.data as string | ArrayBuffer));
+  return { socket, frames };
+}
+
+function jsonFrames(node: SwarmSocket): any[] {
+  return node.frames.filter((f): f is string => typeof f === 'string').map((f) => JSON.parse(f));
+}
+
+function swarmChainFor(init: any): SwarmChainNode[] {
+  const members = init.members as Array<{ nodeId: string }>;
+  const half = 6;
+  return members.map((m, i) => ({
+    nodeId: m.nodeId,
+    role: i === 0 ? 'host' : 'worker',
+    slice:
+      i === 0
+        ? { start: 0, end: half, hasEmbed: true, hasHead: true }
+        : { start: half, end: 8, hasEmbed: false, hasHead: false },
+  }));
+}
+
+describe('Coordinator swarm sessions', () => {
+  async function setup() {
+    stub = newStub();
+    const n1 = await connectNode('n1', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
+    const n2 = await connectNode('n2', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
+    const n3 = await connectNode('n3', 'capabilities=swarm-inference');
+
+    const task = makeTask({ workload: 'swarm-inference', payload: { model: 'qwen3-1.7b', prompt: 'hi' } });
+    await withStorage(async (storage) => {
+      await storage.put(`task:${task.id}`, task);
+      await storage.put('queue:pending', [task.id]);
+      await storage.put('queue:processing', []);
+      await storage.put('nodes:idle', ['n1', 'n2', 'n3']);
+    });
+    await runInDurableObject(stub, async (instance) => {
+      (instance as any).pendingCache = null;
+      (instance as any).processingCache = null;
+      await (instance as any).tryAssignAll();
+    });
+    return { task, n1, n2, n3 };
+  }
+
+  it('reserves WebGPU nodes for the chain and sends swarm-init to the strongest (host)', async () => {
+    const { task, n1, n2, n3 } = await setup();
+
+    const stored = await stub.fetch(`http://internal/task/${task.id}`).then((r) => r.json() as Promise<TaskRecord>);
+    expect(stored.status).toBe('processing');
+    // n2 has the most capacity, so it becomes the host.
+    expect(stored.assignedNodeId).toBe('n2');
+
+    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init');
+    expect(init).toBeTruthy();
+    expect(init.taskId).toBe(task.id);
+    expect(init.members.map((m: any) => m.nodeId)).toEqual(['n2', 'n1']);
+    // The non-WebGPU node is not a member, and only the host is asked to plan.
+    expect(jsonFrames(n1).some((f) => f.type === 'swarm-init')).toBe(false);
+    expect(jsonFrames(n3).some((f) => f.type === 'swarm-init')).toBe(false);
+  });
+
+  it('hands out slices from the host plan and starts the host when all are ready', async () => {
+    const { task, n1, n2 } = await setup();
+    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
+    const chain = swarmChainFor(init);
+
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain }));
+    await new Promise((r) => setTimeout(r, 30));
+
+    const hostSlice = jsonFrames(n2).find((f) => f.type === 'swarm-slice');
+    const workerSlice = jsonFrames(n1).find((f) => f.type === 'swarm-slice');
+    expect(hostSlice).toMatchObject({ index: 0, chainLength: 2, role: 'host', slice: { start: 0, end: 6 } });
+    expect(workerSlice).toMatchObject({ index: 1, chainLength: 2, role: 'worker', slice: { start: 6, end: 8 } });
+
+    // The plan is persisted on the task for frame routing.
+    const stored = await stub.fetch(`http://internal/task/${task.id}`).then((r) => r.json() as Promise<TaskRecord>);
+    expect(stored.swarmSession?.layers).toBe(8);
+    expect(stored.swarmSession?.chain.map((c) => c.nodeId)).toEqual(['n2', 'n1']);
+
+    expect(jsonFrames(n2).some((f) => f.type === 'swarm-start')).toBe(false);
+    n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(jsonFrames(n2).some((f) => f.type === 'swarm-start')).toBe(false);
+    n2.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(jsonFrames(n2).some((f) => f.type === 'swarm-start')).toBe(true);
+  });
+
+  it('relays a binary hidden frame to the next hop', async () => {
+    const { n1, n2 } = await setup();
+    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Host (n2, index 0) sends a hidden frame; it should reach n1 (index 1).
+    n2.socket.send(new ArrayBuffer(16));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(n1.frames.some((f) => typeof f !== 'string' && (f as ArrayBuffer).byteLength === 16)).toBe(true);
+  });
+
+  it('accepts only the host result and releases every member', async () => {
+    const { task, n1, n2 } = await setup();
+    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    await new Promise((r) => setTimeout(r, 30));
+
+    // A worker's result is ignored.
+    n1.socket.send(JSON.stringify({ type: 'result', taskId: task.id, payload: { output: 'wrong' } }));
+    await new Promise((r) => setTimeout(r, 20));
+    let stored = await stub.fetch(`http://internal/task/${task.id}`).then((r) => r.json() as Promise<TaskRecord>);
+    expect(stored.status).toBe('processing');
+
+    // The host completes the task.
+    n2.socket.send(JSON.stringify({ type: 'result', taskId: task.id, payload: { output: 'ok', tokens: [1] } }));
+    await new Promise((r) => setTimeout(r, 20));
+    stored = await stub.fetch(`http://internal/task/${task.id}`).then((r) => r.json() as Promise<TaskRecord>);
+    expect(stored.status).toBe('done');
+    expect(stored.result).toEqual({ output: 'ok', tokens: [1] });
+
+    await withStorage(async (storage) => {
+      const a = await storage.get<any>('node:n1');
+      const b = await storage.get<any>('node:n2');
+      expect(a.status).toBe('idle');
+      expect(b.status).toBe('idle');
+      expect(await storage.get(`swarm:${task.id}`)).toBeUndefined();
     });
   });
 });

@@ -63,6 +63,8 @@ export interface NodeTokenPayload {
   exp: number;
   /** Device RAM in GB as reported by the browser; `null`/missing on mobile WebViews. */
   deviceMemory?: number | null;
+  /** Measured WASM memory the device can commit, used as swarm split capacity. */
+  wasmMemoryBytes?: number;
   /** WebGPU capabilities probed by the node, for swarm inference routing. */
   swarm?: SwarmNodeCapabilities;
   /** Warm model layer ranges the node can serve without downloading. */

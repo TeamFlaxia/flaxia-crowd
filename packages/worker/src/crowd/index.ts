@@ -122,6 +122,9 @@ app.post('/nodes/register', async (c) => {
 
   // A `null`/undefined deviceMemory means a mobile WebView or unknown device.
   const deviceMemory = typeof body.deviceMemory === 'number' ? body.deviceMemory : null
+  const wasmMemoryBytes = typeof body.wasmMemoryBytes === 'number' && Number.isFinite(body.wasmMemoryBytes)
+    ? body.wasmMemoryBytes
+    : undefined
 
   const swarm = parseSwarmCapabilities(body.swarm)
   const warmModels = parseWarmModels(body.warmModels)
@@ -132,6 +135,7 @@ app.post('/nodes/register', async (c) => {
     nodeId,
     capabilities,
     deviceMemory,
+    wasmMemoryBytes,
     swarm,
     warmModels,
     exp,
@@ -160,6 +164,9 @@ app.get('/signal', async (c) => {
   url.searchParams.set('nodeId', payload.nodeId)
   url.searchParams.set('capabilities', payload.capabilities.join(','))
   url.searchParams.set('lowMemory', String(payload.deviceMemory === null || payload.deviceMemory === undefined || payload.deviceMemory < 4))
+  if (typeof payload.wasmMemoryBytes === 'number') {
+    url.searchParams.set('wasm', String(payload.wasmMemoryBytes))
+  }
   if (payload.swarm?.webgpu) {
     url.searchParams.set('webgpu', 'true')
     if (payload.swarm.gpuArchitecture) url.searchParams.set('gpu', payload.swarm.gpuArchitecture)
