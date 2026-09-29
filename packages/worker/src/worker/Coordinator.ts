@@ -323,6 +323,8 @@ export class Coordinator extends DurableObject<Env> {
       this.sendToNode(chain[i].nodeId, {
         type: "swarm-slice",
         sessionId: swarm.sessionId,
+        taskId,
+        timeoutMs: task.timeoutMs,
         index: i,
         chainLength: chain.length,
         role: chain[i].role,
@@ -344,7 +346,7 @@ export class Coordinator extends DurableObject<Env> {
     if (swarm.ready.length >= swarm.members.length) {
       swarm.started = true;
       await this.ctx.storage.put(`swarm:${taskId}`, swarm);
-      this.sendToNode(swarm.hostNodeId, { type: "swarm-start", sessionId: swarm.sessionId });
+      this.sendToNode(swarm.hostNodeId, { type: "swarm-start", sessionId: swarm.sessionId, taskId });
     } else {
       await this.ctx.storage.put(`swarm:${taskId}`, swarm);
     }
@@ -758,7 +760,10 @@ export class Coordinator extends DurableObject<Env> {
       sessionId,
       taskId,
       model: payload?.model ?? "",
+      timeoutMs: task.timeoutMs,
       members,
+      prompt: payload?.prompt ?? "",
+      maxNewTokens: payload?.maxNewTokens,
     };
     this.sendToNode(host.id, init);
 
