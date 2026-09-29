@@ -118,7 +118,9 @@ describe('SwarmController host', () => {
     await controller.handleControl({ type: 'swarm-start', sessionId: 's', taskId: 't' });
     expect(tokens).toEqual(['6', '7', '8']);
     expect(done).toHaveBeenCalledTimes(1);
-    expect(done.mock.calls[0][0]).toMatchObject({ output: '6,7,8', tokens: [6, 7, 8] });
+    // M4 (quality review): `SwarmInferenceResult.tokens` is `string[]`, not the
+    // raw ids the sampler produced.
+    expect(done.mock.calls[0][0]).toMatchObject({ output: '6,7,8', tokens: ['6', '7', '8'] });
   });
 
   it('reports a runtime failure through onError', async () => {

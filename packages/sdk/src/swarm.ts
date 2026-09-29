@@ -194,6 +194,9 @@ export function decodeSwarmFrame(
 // Flow: coordinator -> swarm-init (host) -> swarm-plan (host) -> swarm-slice
 // (every node) -> swarm-ready (every node) -> swarm-start (host). The host then
 // generates and frames circulate; the coordinator only routes them.
+//
+// A plan the coordinator rejects comes back the other way as swarm-error so the
+// session settles immediately instead of waiting for the task timeout.
 
 /** A chain member as offered to the host, with the capacity it can contribute. */
 export interface SwarmMember {
@@ -264,6 +267,8 @@ export interface SwarmDoneMessage {
 export interface SwarmErrorMessage {
   type: 'swarm-error';
   sessionId: string;
+  /** Task the session belongs to, so the receiver can settle that task only. */
+  taskId: string;
   error: string;
 }
 
@@ -336,7 +341,7 @@ export function isSwarmNodeMessage(value: unknown): value is SwarmNodeMessage {
     case 'swarm-token':
       return typeof value.token === 'string';
     case 'swarm-error':
-      return typeof value.error === 'string';
+      return typeof value.taskId === 'string' && value.taskId.length > 0 && typeof value.error === 'string';
     default:
       return false;
   }

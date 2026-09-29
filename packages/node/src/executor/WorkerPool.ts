@@ -34,6 +34,9 @@ export class WorkerPool {
   private workerUrl: string;
   private queue: Array<() => void> = [];
   private active: ActiveTask | null = null;
+  /** Control messages that arrived for a task that has not started yet. */
+  private pendingControls: Array<{ taskId: string; message: unknown }> = [];
+  private static readonly MAX_PENDING_CONTROLS = 64;
   private _lastCpuLoad = 0;
 
   constructor(workerUrl?: string, timeoutMs = 300000) {
@@ -110,6 +113,8 @@ export class WorkerPool {
         active.removeListener();
       }
       this.active = null;
+      // Whatever was still queued for this task can never be delivered.
+      this.pendingControls = this.pendingControls.filter((c) => c.taskId !== id);
       fn();
       this.dequeue();
     };
@@ -163,9 +168,18 @@ export class WorkerPool {
 
     try {
       worker.postMessage({ id, workload, payload, timeoutMs: timeout, config });
+      this.flushControls();
     } catch (err) {
       settle(() => reject(err instanceof Error ? err : new Error(String(err))));
     }
+  }
+
+  /** Hand over the control messages that were waiting for this task to start. */
+  private flushControls() {
+    if (this.pendingControls.length === 0) return;
+    const mine = this.pendingControls.filter((c) => c.taskId === this.active?.id);
+    this.pendingControls = this.pendingControls.filter((c) => c.taskId !== this.active?.id);
+    for (const c of mine) this.postToActive({ type: 'swarm-control', message: c.message });
   }
 
   /**
@@ -182,7 +196,20 @@ export class WorkerPool {
     }
   }
 
+  /**
+   * Deliver a swarm control message to the task it names. A message that
+   * arrives while that task is still queued is held until it starts; posting it
+   * into whichever task happens to be running would hand it to the wrong
+   * session (and drop the intended one).
+   */
   sendControl(message: unknown): boolean {
+    const taskId = (message as { taskId?: unknown } | null)?.taskId;
+    if (typeof taskId === 'string' && taskId !== this.active?.id) {
+      if (!this.worker) return false;
+      this.pendingControls.push({ taskId, message });
+      if (this.pendingControls.length > WorkerPool.MAX_PENDING_CONTROLS) this.pendingControls.shift();
+      return false;
+    }
     return this.postToActive({ type: 'swarm-control', message });
   }
 
@@ -217,6 +244,7 @@ export class WorkerPool {
 
   terminate() {
     this.queue = [];
+    this.pendingControls = [];
     if (this.active) {
       clearTimeout(this.active.timer);
       this.active.reject(new Error('TERMINATED'));

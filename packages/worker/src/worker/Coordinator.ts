@@ -287,20 +287,46 @@ export class Coordinator extends DurableObject<Env> {
     this.sendToNode(next.nodeId, null, frame);
   }
 
+  /**
+   * A plan the coordinator cannot accept must be reported back: silently
+   * dropping it leaves every member `busy` and the session wedged until the
+   * task timeout. Tell the host (which is running the session) and fail the
+   * task so its members are released and the failure reaches the caller.
+   */
+  private async rejectSwarmPlan(taskId: string, sessionId: string, nodeId: string, reason: string) {
+    this.sendToNode(nodeId, { type: "swarm-error", sessionId, taskId, error: reason });
+    // The plan is derived from the model metadata, so the same host would
+    // produce the same broken chain again: fail for good rather than burning
+    // retries (and leave no window for a retry to start a second session).
+    await this.failTask(taskId, reason, undefined, true, true);
+    await this.tryAssignAll();
+  }
+
   private async handleSwarmPlan(nodeId: string, data: Record<string, unknown>) {
     const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     const taskId = node?.currentTaskId;
     if (!taskId) return;
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
-    if (!swarm || swarm.hostNodeId !== nodeId || swarm.plan) return;
+    if (!swarm) return;
+    if (swarm.hostNodeId !== nodeId) {
+      await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan was sent by a node that is not the host");
+      return;
+    }
+    if (swarm.plan) return;
 
     const chain = data.chain as SwarmChainNode[] | undefined;
-    if (!isValidSwarmChain(chain)) return;
+    if (!isValidSwarmChain(chain)) {
+      await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan is not a valid contiguous layer chain");
+      return;
+    }
 
     // The host is authoritative for placement, but every member must appear.
     const plannedIds = new Set(chain.map((c) => c.nodeId));
-    if (plannedIds.size !== swarm.members.length || !swarm.members.every((m) => plannedIds.has(m.nodeId))) return;
+    if (plannedIds.size !== swarm.members.length || !swarm.members.every((m) => plannedIds.has(m.nodeId))) {
+      await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan does not cover every member");
+      return;
+    }
 
     const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
     if (!task) return;
@@ -450,6 +476,9 @@ export class Coordinator extends DurableObject<Env> {
     task.status = "done";
     task.result = result;
     task.completedAt = Date.now();
+    // The session is over: drop the chain so `relaySwarmFrame` cannot keep
+    // routing on it (and a retry never inherits a previous attempt's plan).
+    task.swarmSession = undefined;
     await this.ctx.storage.put(`task:${taskId}`, task);
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
@@ -476,10 +505,19 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
-  private async failTask(taskId: string, error: string, expectedNodeId?: string, release = true) {
+  /**
+   * Fail a task. Transient failures (timeout, disconnect) are retried up to
+   * MAX_RETRIES; `permanent` is for protocol violations that would fail the same
+   * way on every attempt, so they are reported to the caller immediately.
+   */
+  private async failTask(taskId: string, error: string, expectedNodeId?: string, release = true, permanent = false) {
     const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
     if (!task || (task.status !== "pending" && task.status !== "processing")) return;
     if (expectedNodeId && task.assignedNodeId && task.assignedNodeId !== expectedNodeId) return;
+
+    // The session ends here either way (retry or failure): a stale chain must
+    // not survive to route a later attempt's frames.
+    task.swarmSession = undefined;
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
     if (swarm) {
@@ -492,7 +530,7 @@ export class Coordinator extends DurableObject<Env> {
     // Keyed on retryCount (not status) so a task that was already requeued by
     // an earlier failure keeps its remaining retries instead of being
     // permanently failed by a second overlapping failure signal.
-    if (task.retryCount < MAX_RETRIES) {
+    if (!permanent && task.retryCount < MAX_RETRIES) {
       if (task.status === "processing") task.retryCount++;
       task.status = "pending";
       task.assignedNodeId = undefined;
@@ -699,8 +737,16 @@ export class Coordinator extends DurableObject<Env> {
   private async tryAssignSwarm(taskId: string, task: TaskRecord, idle: string[]): Promise<string[] | null> {
     const payload = task.payload as SwarmInferencePayload;
     const opts = payload?.swarm ?? {};
-    const minNodes = Math.max(1, Math.floor(opts.minNodes ?? DEFAULT_MIN_SWARM_NODES));
-    const maxNodes = Math.max(minNodes, Math.floor(opts.maxNodes ?? DEFAULT_MAX_SWARM_NODES));
+    // `payload` is unvalidated API input: `Math.floor("abc")` is NaN, and NaN
+    // silently defeats both the availability check and `slice(0, ...)`. Anything
+    // that is not a usable count falls back to the default instead of wedging
+    // the scheduler (or the task) on a bad payload.
+    const asCount = (value: unknown, fallback: number): number => {
+      const n = typeof value === "number" ? value : Number(value);
+      return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
+    };
+    const minNodes = asCount(opts.minNodes, DEFAULT_MIN_SWARM_NODES);
+    const maxNodes = Math.max(minNodes, asCount(opts.maxNodes, DEFAULT_MAX_SWARM_NODES));
 
     const eligible: NodeRecord[] = [];
     for (const nodeId of idle) {
@@ -714,14 +760,24 @@ export class Coordinator extends DurableObject<Env> {
     }
     if (eligible.length < minNodes) return null;
 
-    // Strongest devices first: index 0 becomes the host (embedding, head, sampling).
+    // Warm first, then strongest devices: a node that already holds the model's
+    // byte ranges skips the range download entirely, which dominates the load
+    // time on crowd links. `preferWarm` defaults to true; the capacity ordering
+    // still decides the host within each group (index 0 runs embedding, head,
+    // sampling).
+    const preferWarm = opts.preferWarm !== false;
+    const wantedModel = typeof payload?.model === "string" ? payload.model : "";
+    const isWarm = (n: NodeRecord) =>
+      !!n.warmModels?.some((m) => m.modelId === wantedModel);
     eligible.sort(
       (a, b) =>
+        (preferWarm ? Number(isWarm(b)) - Number(isWarm(a)) : 0) ||
         (b.wasmMemoryBytes ?? b.maxStorageBufferBindingSize ?? 0) -
           (a.wasmMemoryBytes ?? a.maxStorageBufferBindingSize ?? 0) ||
         a.connectedAt - b.connectedAt,
     );
     const chosen = eligible.slice(0, Math.min(maxNodes, eligible.length));
+    if (chosen.length === 0) return null;
     const host = chosen[0];
     const sessionId = crypto.randomUUID();
     const members = chosen.map((n) => ({

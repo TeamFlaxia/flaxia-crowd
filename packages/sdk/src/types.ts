@@ -180,12 +180,16 @@ export interface SwarmInferencePayload {
 
 /** One node's role in a completed swarm session, surfaced in the result. */
 export interface SwarmInferenceNodeInfo {
-  /** Assigned contiguous transformer layer range [start, end], inclusive. */
+  /** Assigned contiguous transformer layer range `[start, end)` (end exclusive, as in {@link SwarmSlice}). */
   layers: [number, number];
   /** Whether this node ran the host duties (tokenizer, embed, LM head, sampling). */
   host: boolean;
-  /** Whether the node served its layer range from a warm cache. */
-  warm: boolean;
+  /**
+   * Whether the node served its layer range from a warm cache. Only set for a
+   * node that can observe its own cache (the reporter); the other members'
+   * warmth is not part of the protocol, so it is omitted rather than guessed.
+   */
+  warm?: boolean;
   /** Per-node load duration in milliseconds, when reported. */
   loadMs?: number;
 }

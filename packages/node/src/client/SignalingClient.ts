@@ -136,6 +136,13 @@ class SignalingClient {
         this.workerPool.sendControl(data);
         return;
       }
+      if (data.type === 'swarm-error') {
+        // The coordinator rejected the session: fail it locally too, so this
+        // node releases its slot instead of waiting out the task timeout.
+        const taskId = String(data.taskId ?? '');
+        if (taskId && this.inflightTasks.has(taskId)) this.workerPool.sendControl(data);
+        return;
+      }
     };
 
     ws.onclose = () => {

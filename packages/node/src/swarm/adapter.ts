@@ -12,6 +12,8 @@ import { probeWebGpu } from '../executor/webgpuProbe';
 export interface SwarmEngineAdapter {
   readonly dim: number;
   readonly nc: number;
+  /** KV cache length of this slice; the session may not exceed it. */
+  readonly maxSeq?: number;
   reset(): void;
   /** Embed a single token into a hidden state (host slices only). */
   embedRun(token: number, pos: number): Promise<Float32Array>;
@@ -39,6 +41,7 @@ export interface PooledEngineSliceConfig {
 export interface RawPooledEngine {
   dims: { dim: number };
   NC: number;
+  maxSeq?: number;
   reset(): void;
   embedRun(token: number, pos: number): Promise<Float32Array>;
   runHidden(hidden: Float32Array, pos: number): Promise<Float32Array>;
@@ -138,8 +141,16 @@ export async function loadPooledEngineModule(
   return mod as PooledEngineModule;
 }
 
-/** Wrap a raw Pooled engine slice in the stable adapter surface. */
-export function wrapPooledEngine(engine: RawPooledEngine): SwarmEngineAdapter {
+/**
+ * Wrap a raw Pooled engine slice in the stable adapter surface.
+ *
+ * `dispose()` releases the slice's own buffers *and* the GPU device it was
+ * created on: the runtime requests a fresh device per session, so leaving it
+ * alive would keep the whole model resident in the GPU on a worker that is
+ * reused for the next task. Calling it twice is a no-op.
+ */
+export function wrapPooledEngine(engine: RawPooledEngine, device?: unknown): SwarmEngineAdapter {
+  let disposed = false;
   return {
     get dim() {
       return engine.dims.dim;
@@ -147,11 +158,23 @@ export function wrapPooledEngine(engine: RawPooledEngine): SwarmEngineAdapter {
     get nc() {
       return engine.NC;
     },
+    get maxSeq() {
+      return engine.maxSeq;
+    },
     reset: () => engine.reset(),
     embedRun: (token, pos) => engine.embedRun(token, pos),
     runHidden: (hidden, pos) => engine.runHidden(hidden, pos),
     headFromHidden: (hidden) => engine.headFromHidden(hidden),
     setHidden: (hidden) => engine.setHidden(hidden),
-    dispose: () => engine.dispose?.(),
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      try {
+        engine.dispose?.();
+      } catch {}
+      try {
+        (device as { destroy?: () => void } | undefined)?.destroy?.();
+      } catch {}
+    },
   };
 }

@@ -13,8 +13,11 @@ describe('resolveModelUrl', () => {
     expect(resolveModelUrl('qwen3.6-35b-moe')).toContain('Qwen3.6-35B');
   });
 
-  it('accepts an explicit https url', () => {
-    expect(resolveModelUrl('https://example.com/model.gguf')).toBe('https://example.com/model.gguf');
+  // H3 (quality review): `model` is task payload, i.e. unvalidated user input.
+  // Passing it straight through lets any API caller make every opted-in node
+  // range-fetch an arbitrary host. Only the registry may be resolved.
+  it('rejects an arbitrary https url', () => {
+    expect(() => resolveModelUrl('https://evil.example/model.gguf')).toThrow(/swarm model|not allowed|registry/i);
   });
 
   it('rejects an unknown model id', () => {

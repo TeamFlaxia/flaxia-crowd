@@ -1,7 +1,7 @@
-import type { SwarmInitMessage, SwarmSliceMessage, SwarmStartMessage } from '@flaxia/sdk';
+import type { SwarmErrorMessage, SwarmInitMessage, SwarmSliceMessage, SwarmStartMessage } from '@flaxia/sdk';
 
 /** Swarm control messages the coordinator sends to a node. */
-export type SwarmControlMessage = SwarmInitMessage | SwarmSliceMessage | SwarmStartMessage;
+export type SwarmControlMessage = SwarmInitMessage | SwarmSliceMessage | SwarmStartMessage | SwarmErrorMessage;
 
 /** Messages from the main thread into the swarm worker. */
 export type SwarmWorkerInbound =
@@ -16,7 +16,7 @@ export type SwarmWorkerOutbound =
 export function isSwarmControlMessage(value: unknown): value is SwarmControlMessage {
   if (!value || typeof value !== 'object') return false;
   const type = (value as { type?: unknown }).type;
-  return type === 'swarm-init' || type === 'swarm-slice' || type === 'swarm-start';
+  return type === 'swarm-init' || type === 'swarm-slice' || type === 'swarm-start' || type === 'swarm-error';
 }
 
 export function isSwarmFrameMessage(value: unknown): value is { id: string; type: 'swarm-frame'; frame: ArrayBuffer } {

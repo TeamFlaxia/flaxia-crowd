@@ -14,7 +14,7 @@ import {
   type PooledTokenizer,
 } from './adapter';
 import type { SwarmRuntime } from './controller';
-import type { SwarmSemantics } from './session';
+import { SESSION_MAX_SEQ, type SwarmSemantics } from './session';
 
 /**
  * Production model access for swarm slices.
@@ -41,18 +41,27 @@ const SWARM_GGUF_URLS: Record<string, string> = {
 const CACHE_NAME = 'flaxia-swarm-weights-v1';
 const HEADER_START_BYTES = 12 * 1024 * 1024;
 const HEADER_MAX_BYTES = 256 * 1024 * 1024;
-// Enough context for chat prompts; KV memory grows with this on the attention
-// layers the node holds, so keep it modest for crowd devices.
-const SESSION_MAX_SEQ = 4096;
 
+/**
+ * Resolve a task payload's `model` to the GGUF it loads.
+ *
+ * The payload is unvalidated API input: it must only ever match the registry
+ * above, never a caller-supplied URL, or every opted-in node could be made to
+ * range-fetch an arbitrary host of the submitter's choosing.
+ */
 export function resolveModelUrl(model: string): string {
   const url = SWARM_GGUF_URLS[model];
   if (url) return url;
-  if (/^https:\/\//.test(model)) return model;
   throw new SwarmEngineUnavailableError(`unknown swarm model: ${model}`);
 }
 
 let weightCache: Cache | false | null = null;
+
+// Range-fetch accounting for `load()`, so a node can report whether its slice
+// came out of the weight cache. A node runs one swarm session at a time (the
+// worker pool serialises tasks), so these module-level counters never overlap.
+let rangeCacheHits = 0;
+let rangeCacheMisses = 0;
 async function getWeightCache(): Promise<Cache | false> {
   if (weightCache !== null) return weightCache;
   try {
@@ -90,7 +99,10 @@ async function rangeFetchResponse(url: string, lo: number, hi: number): Promise<
       const hit = await cache.match(key);
       if (hit) {
         const bytes = new Uint8Array(await hit.arrayBuffer());
-        if (bytes.byteLength === length) return new Response(bytes, { status: 200 });
+        if (bytes.byteLength === length) {
+          rangeCacheHits++;
+          return new Response(bytes, { status: 200 });
+        }
         await cache.delete(key).catch(() => {});
       }
     } catch {}
@@ -103,6 +115,7 @@ async function rangeFetchResponse(url: string, lo: number, hi: number): Promise<
       if (response.status !== 206) {
         last = new Error(`model host refused range requests (${response.status})`);
       } else {
+        rangeCacheMisses++;
         if (cache) {
           response
             .clone()
@@ -238,6 +251,8 @@ export function createSwarmRuntime(): SwarmRuntime {
     },
 
     async load(slice: SwarmSlice, model: string) {
+      rangeCacheHits = 0;
+      rangeCacheMisses = 0;
       const { mod, url, gguf } = await resolve(model);
 
       const device = await requestDevice();
@@ -283,7 +298,8 @@ export function createSwarmRuntime(): SwarmRuntime {
         weights,
       });
 
-      return { engine: wrapPooledEngine(engine), semantics: buildSemantics(mod, tokenizer) };
+      const warm = rangeCacheHits > 0 && rangeCacheMisses === 0;
+      return { engine: wrapPooledEngine(engine, device), semantics: buildSemantics(mod, tokenizer), warm };
     },
   };
 }
