@@ -11,7 +11,9 @@
     "dev:worker": "npm run dev --workspace=packages/worker",
     "dev:node": "npm run dev --workspace=packages/node",
     "dev:text-analyzer": "npm run dev --workspace=packages/text-analyzer",
-    "dev:translation": "npm run dev --workspace=packages/translation"
+    "dev:translation": "npm run dev --workspace=packages/translation",
+    "spike:swarm": "deno run --unstable-webgpu --allow-read scripts/swarm-spike/run-synth.mjs",
+    "spike:webgpu-worker": "node scripts/swarm-spike/check-webgpu-worker.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.0",
