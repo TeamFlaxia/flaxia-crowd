@@ -38,10 +38,10 @@ describe('workloads', () => {
 
   it('only treats implemented workloads as routable', () => {
     expect(ROUTABLE_WORKLOADS).not.toContain('moe-inference');
-    expect(ROUTABLE_WORKLOADS).not.toContain('swarm-inference');
+    expect(ROUTABLE_WORKLOADS).toContain('swarm-inference');
     expect(isRoutableWorkload('nudenet')).toBe(true);
     expect(isRoutableWorkload('moe-inference')).toBe(false);
-    expect(isRoutableWorkload('swarm-inference')).toBe(false);
+    expect(isRoutableWorkload('swarm-inference')).toBe(true);
   });
 
   it('classifies heavy workloads', () => {

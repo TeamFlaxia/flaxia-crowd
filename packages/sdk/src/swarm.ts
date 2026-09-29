@@ -226,6 +226,8 @@ export interface SwarmSliceMessage {
   type: 'swarm-slice';
   sessionId: string;
   taskId: string;
+  /** Model id, so a worker can resolve and load its layer slice. */
+  model: string;
   /** Task timeout in ms, so the worker knows its own deadline. */
   timeoutMs: number;
   /** This node's chain position (0 = host). */
