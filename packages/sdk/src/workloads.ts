@@ -15,13 +15,14 @@ export const WORKLOAD_TYPES = [
   'vector-query',
   'moe-inference',
   'nudenet',
+  'swarm-inference',
 ] as const satisfies readonly WorkloadType[];
 
 /**
  * Workloads that are implemented end-to-end (node executor + orchestrator
  * routing) and therefore safe for the orchestrator to enqueue. `moe-inference`
- * is declared in the protocol but has no node implementation yet, so it is
- * deliberately excluded.
+ * and `swarm-inference` are declared in the protocol but have no node
+ * implementation yet, so they are deliberately excluded.
  */
 export const ROUTABLE_WORKLOADS = [
   'ai-inference',
@@ -38,6 +39,7 @@ export const ROUTABLE_WORKLOADS = [
  * Heavy WebAssembly workloads that can exhaust memory on constrained devices.
  * The orchestrator must not route these to low-memory nodes, and nodes gate
  * them behind a real `WebAssembly.Memory` probe before advertising support.
+ * `swarm-inference` is included because a node may hold GBs of layer weights.
  */
 export const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set<WorkloadType>([
   'ai-inference',
@@ -46,6 +48,7 @@ export const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set<WorkloadType>(
   'vector-embed',
   'vector-query',
   'nudenet',
+  'swarm-inference',
 ]);
 
 /** Default per-workload task timeout in milliseconds. */
@@ -59,6 +62,9 @@ export const DEFAULT_WORKLOAD_TIMEOUT_MS: Readonly<Record<WorkloadType, number>>
   'vector-query': 60_000,
   'moe-inference': 600_000,
   nudenet: 120_000,
+  // Swarm jobs include a cold-download/load phase before generation, so they
+  // need far more headroom than single-node inference.
+  'swarm-inference': 1_800_000,
 };
 
 /** Narrowing guard for untrusted input (HTTP bodies, postMessage, storage). */
