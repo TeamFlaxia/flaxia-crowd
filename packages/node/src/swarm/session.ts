@@ -30,6 +30,12 @@ export interface SwarmSemantics {
   /** Unpack a frame payload back to a hidden state. */
   unpackHidden(payload: Uint8Array): Float32Array;
   argmax(logits: Float32Array): number;
+  /** Tokenize the prompt (host only). */
+  encodePrompt?(text: string | string[]): number[];
+  /** Detokenize generated ids (host only). */
+  decodeTokens?(ids: number[]): string;
+  /** Stop as soon as this id is sampled (host only). */
+  eosIds?: Set<number>;
 }
 
 export interface SwarmHostOptions {

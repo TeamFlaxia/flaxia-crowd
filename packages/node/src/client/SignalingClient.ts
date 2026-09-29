@@ -77,6 +77,7 @@ class SignalingClient {
     wsUrl.searchParams.set('token', token.token);
 
     const ws = new WebSocket(wsUrl.toString());
+    ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
     ws.onopen = () => {
@@ -85,6 +86,13 @@ class SignalingClient {
     };
 
     ws.onmessage = async (event) => {
+      // Binary frames are swarm hidden states; hand them to the running worker
+      // without decoding.
+      if (typeof event.data !== 'string') {
+        this.workerPool.sendFrame(event.data as ArrayBuffer);
+        return;
+      }
+
       let data: Record<string, unknown>;
       try {
         data = JSON.parse(event.data as string);
@@ -110,6 +118,23 @@ class SignalingClient {
             error: message,
           });
         }
+        return;
+      }
+      if (data.type === 'swarm-init' || data.type === 'swarm-slice') {
+        const taskId = String(data.taskId ?? '');
+        if (!taskId) return;
+        // The host starts on swarm-init and a worker on its first swarm-slice;
+        // a host's later slice just reaches the already-running worker.
+        if (this.inflightTasks.has(taskId)) {
+          this.workerPool.sendControl(data);
+          return;
+        }
+        void this.startSwarm(taskId, data);
+        return;
+      }
+      if (data.type === 'swarm-start') {
+        this.workerPool.sendControl(data);
+        return;
       }
     };
 
@@ -264,6 +289,51 @@ class SignalingClient {
   private send(message: Record<string, unknown>) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+    }
+  }
+
+  private sendBinary(frame: ArrayBuffer) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(frame);
+    }
+  }
+
+  /**
+   * Start a swarm session in the worker. The first control message is the task
+   * payload; later control messages and binary frames are forwarded into the
+   * running worker. The host's final result completes the task.
+   */
+  private async startSwarm(taskId: string, initial: Record<string, unknown>) {
+    if (this.inflightTasks.has(taskId)) return;
+    this.inflightTasks.add(taskId);
+    const startedAt = performance.now();
+    const timeoutMs = typeof initial.timeoutMs === 'number' ? initial.timeoutMs + 30000 : undefined;
+
+    try {
+      const result = await this.workerPool.run(
+        taskId,
+        'swarm-inference',
+        initial,
+        timeoutMs,
+        (token: string) => {
+          this.send({ type: 'progress', taskId, token });
+        },
+        { maxCpuLoad: this.config.maxCpuLoad },
+        {
+          onFrame: (frame) => this.sendBinary(frame),
+          onMessage: (message) => this.send(message as Record<string, unknown>),
+        },
+      );
+      this.send({ type: 'result', taskId, payload: result });
+      log(
+        `swarm result sent taskId=${taskId} durationMs=${Math.round(performance.now() - startedAt)}`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logError(`swarm failed taskId=${taskId} error=${message}`);
+      this.send({ type: 'error', taskId, error: message });
+    } finally {
+      this.inflightTasks.delete(taskId);
     }
   }
 

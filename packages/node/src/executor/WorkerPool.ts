@@ -11,6 +11,12 @@ interface ActiveTask {
   removeListener: () => void;
 }
 
+/** Swarm tasks exchange control messages and binary frames mid-task. */
+export interface SwarmCallbacks {
+  onFrame?: (frame: ArrayBuffer) => void;
+  onMessage?: (message: unknown) => void;
+}
+
 /**
  * Executes tasks against a single Web Worker.
  *
@@ -55,13 +61,14 @@ export class WorkerPool {
     timeoutMs?: number,
     onToken?: (token: string) => void,
     config?: { maxCpuLoad?: number },
+    swarm?: SwarmCallbacks,
   ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.worker) {
         reject(new Error('Worker not available'));
         return;
       }
-      const job = () => this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject);
+      const job = () => this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, swarm);
       if (!this.active) {
         job();
       } else {
@@ -80,6 +87,7 @@ export class WorkerPool {
     config: { maxCpuLoad?: number } | undefined,
     resolve: (value: unknown) => void,
     reject: (error: Error) => void,
+    swarm?: SwarmCallbacks,
   ) {
     const worker = this.worker;
     if (!worker) {
@@ -120,6 +128,14 @@ export class WorkerPool {
         }
         return;
       }
+      if (type === 'swarm-frame') {
+        swarm?.onFrame?.(event.data.frame as ArrayBuffer);
+        return;
+      }
+      if (type === 'swarm-message') {
+        swarm?.onMessage?.(event.data.message);
+        return;
+      }
       if (type === 'done') {
         log(`task done id=${id} workload=${workload} durationMs=${Math.round(performance.now() - startedAt)}`);
         settle(() => resolve(result));
@@ -150,6 +166,28 @@ export class WorkerPool {
     } catch (err) {
       settle(() => reject(err instanceof Error ? err : new Error(String(err))));
     }
+  }
+
+  /**
+   * Post a message to the active task's worker. Used by the signaling client to
+   * push swarm control messages and hidden-state frames into a running session.
+   */
+  private postToActive(payload: Record<string, unknown>, transfer?: Transferable[]): boolean {
+    if (!this.worker || !this.active) return false;
+    try {
+      this.worker.postMessage({ id: this.active.id, ...payload }, transfer ?? []);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  sendControl(message: unknown): boolean {
+    return this.postToActive({ type: 'swarm-control', message });
+  }
+
+  sendFrame(frame: ArrayBuffer): boolean {
+    return this.postToActive({ type: 'swarm-frame', frame }, [frame]);
   }
 
   private handleWorkerError(err: Error) {

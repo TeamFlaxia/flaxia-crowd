@@ -1,4 +1,4 @@
-import type { WorkloadType } from '@flaxia/sdk';
+import type { WorkloadType, SwarmInitMessage, SwarmSliceMessage } from '@flaxia/sdk';
 import { HEAVY_WORKLOADS } from '@flaxia/sdk';
 import { CpuThrottle } from '../executor/throttle';
 import {
@@ -6,8 +6,15 @@ import {
   hasEnoughWasmMemoryForHeavy,
   probeMaxWasmMemoryBytes,
 } from '../executor/memoryProbe';
+import { SwarmController } from '../swarm/controller';
+import { createSwarmRuntime } from '../swarm/runtime';
+import type { SwarmControlMessage } from '../swarm/messages';
 
 let throttle: CpuThrottle | null = null;
+
+// The active swarm session, if any. One task at a time, so a single slot is
+// enough; control messages and frames from the main thread route here.
+let activeSwarm: SwarmController | null = null;
 
 const IDLE_EVICT_MS = 60_000;
 
@@ -84,8 +91,42 @@ async function runWorkload(
   }
 }
 
+/** Start a swarm session and resolve when it finishes or fails. */
+function startSwarmTask(id: string, initial: SwarmInitMessage | SwarmSliceMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const controller = new SwarmController({
+      initial,
+      runtime: createSwarmRuntime(),
+      sendControl: (message) => (self as any).postMessage({ id, type: 'swarm-message', message }),
+      sendFrame: (frame) => (self as any).postMessage({ id, type: 'swarm-frame', frame }, [frame]),
+      emitToken: (token) => (self as any).postMessage({ id, type: 'token', token }),
+      onDone: (result) => {
+        if (activeSwarm === controller) activeSwarm = null;
+        resolve(result);
+      },
+      onError: (error) => {
+        if (activeSwarm === controller) activeSwarm = null;
+        reject(new Error(error));
+      },
+    });
+    activeSwarm = controller;
+    void controller.start();
+  });
+}
+
 self.onmessage = async (e: MessageEvent) => {
-  const { id, workload, payload, config } = e.data;
+  const data = e.data;
+
+  if (data?.type === 'swarm-control') {
+    void activeSwarm?.handleControl(data.message as SwarmControlMessage);
+    return;
+  }
+  if (data?.type === 'swarm-frame') {
+    activeSwarm?.handleFrame(data.frame as ArrayBuffer);
+    return;
+  }
+
+  const { id, workload, payload, config } = data;
   const taskStartedAt = performance.now();
 
   try {
@@ -121,7 +162,9 @@ self.onmessage = async (e: MessageEvent) => {
       const emitToken = (token: string) => {
         self.postMessage({ id, type: 'token', token });
       };
-      const result = await runWorkload(workload as WorkloadType, payload, emitToken);
+      const result = workload === 'swarm-inference'
+        ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage)
+        : await runWorkload(workload as WorkloadType, payload, emitToken);
 
       self.postMessage({ id, type: 'done', result });
       console.log(
