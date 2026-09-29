@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env } from '../index'
-import type { TaskRecord, WorkloadType } from '@flaxia/sdk'
+import type { SwarmNodeCapabilities, TaskRecord, WarmModelRange, WorkloadType } from '@flaxia/sdk'
 import { isRoutableWorkload } from '@flaxia/sdk'
 import {
   createNodeToken,
@@ -44,6 +44,37 @@ function validatePayloadSize(env: Env, body: string): boolean {
   return new TextEncoder().encode(body).byteLength <= max
 }
 
+/** Validate a node's advertised WebGPU capabilities; returns undefined when absent/invalid. */
+export function parseSwarmCapabilities(value: unknown): SwarmNodeCapabilities | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.webgpu !== 'boolean') return undefined
+  const swarm: SwarmNodeCapabilities = { webgpu: record.webgpu }
+  if (typeof record.gpuArchitecture === 'string') swarm.gpuArchitecture = record.gpuArchitecture
+  if (typeof record.maxStorageBufferBindingSize === 'number' && Number.isFinite(record.maxStorageBufferBindingSize)) {
+    swarm.maxStorageBufferBindingSize = record.maxStorageBufferBindingSize
+  }
+  return swarm
+}
+
+/** Validate a node's warm model layer ranges; drops malformed entries. */
+export function parseWarmModels(value: unknown): WarmModelRange[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const ranges: WarmModelRange[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    const layers = record.layers
+    if (typeof record.modelId !== 'string' || !record.modelId) continue
+    if (!Array.isArray(layers) || layers.length !== 2) continue
+    const [start, end] = layers
+    if (typeof start !== 'number' || typeof end !== 'number') continue
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) continue
+    ranges.push({ modelId: record.modelId, layers: [start, end] })
+  }
+  return ranges.length > 0 ? ranges : undefined
+}
+
 const app = new Hono<{ Bindings: Env }>()
 
 function getCoordinator(c: any) {
@@ -60,7 +91,14 @@ function checkOrigin(c: any): boolean {
 // --- Node registration & signaling ---
 
 app.post('/nodes/register', async (c) => {
-  let body: { siteId?: string; nodeId?: string; capabilities?: string[]; deviceMemory?: number | null }
+  let body: {
+    siteId?: string
+    nodeId?: string
+    capabilities?: string[]
+    deviceMemory?: number | null
+    swarm?: unknown
+    warmModels?: unknown
+  }
   try {
     body = await c.req.json()
   } catch {
@@ -85,12 +123,17 @@ app.post('/nodes/register', async (c) => {
   // A `null`/undefined deviceMemory means a mobile WebView or unknown device.
   const deviceMemory = typeof body.deviceMemory === 'number' ? body.deviceMemory : null
 
+  const swarm = parseSwarmCapabilities(body.swarm)
+  const warmModels = parseWarmModels(body.warmModels)
+
   const exp = Date.now() + NODE_TOKEN_TTL_MS
   const token = await createNodeToken(c.env.NODE_TOKEN_SECRET, {
     siteId: body.siteId,
     nodeId,
     capabilities,
     deviceMemory,
+    swarm,
+    warmModels,
     exp,
   })
 
@@ -117,6 +160,18 @@ app.get('/signal', async (c) => {
   url.searchParams.set('nodeId', payload.nodeId)
   url.searchParams.set('capabilities', payload.capabilities.join(','))
   url.searchParams.set('lowMemory', String(payload.deviceMemory === null || payload.deviceMemory === undefined || payload.deviceMemory < 4))
+  if (payload.swarm?.webgpu) {
+    url.searchParams.set('webgpu', 'true')
+    if (payload.swarm.gpuArchitecture) url.searchParams.set('gpu', payload.swarm.gpuArchitecture)
+    if (payload.swarm.maxStorageBufferBindingSize !== undefined) {
+      url.searchParams.set('maxBuffer', String(payload.swarm.maxStorageBufferBindingSize))
+    }
+  }
+  if (payload.warmModels?.length) {
+    try {
+      url.searchParams.set('warmModels', JSON.stringify(payload.warmModels))
+    } catch {}
+  }
 
   const stub = getCoordinator(c)
   return stub.fetch(new Request(url.toString(), {

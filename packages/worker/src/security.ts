@@ -1,3 +1,5 @@
+import type { SwarmNodeCapabilities, WarmModelRange } from '@flaxia/sdk';
+
 const encoder = new TextEncoder();
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -61,6 +63,10 @@ export interface NodeTokenPayload {
   exp: number;
   /** Device RAM in GB as reported by the browser; `null`/missing on mobile WebViews. */
   deviceMemory?: number | null;
+  /** WebGPU capabilities probed by the node, for swarm inference routing. */
+  swarm?: SwarmNodeCapabilities;
+  /** Warm model layer ranges the node can serve without downloading. */
+  warmModels?: WarmModelRange[];
 }
 
 export const NODE_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;

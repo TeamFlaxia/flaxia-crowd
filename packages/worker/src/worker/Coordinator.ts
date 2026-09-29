@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../index";
-import type { TaskRecord, WorkloadType } from "@flaxia/sdk";
+import type { TaskRecord, WarmModelRange, WorkloadType } from "@flaxia/sdk";
 import { HEAVY_WORKLOADS } from "@flaxia/sdk";
 import { signPayload } from "../security";
 
@@ -19,6 +19,12 @@ interface NodeRecord {
   currentTaskId?: string;
   /** True when the device is a mobile WebView / has < 4 GB RAM. */
   lowMemory?: boolean;
+  /** WebGPU adapter is available; required for `swarm-inference`. */
+  webgpu?: boolean;
+  gpuArchitecture?: string;
+  maxStorageBufferBindingSize?: number;
+  /** Model layer spans already cached on the node. */
+  warmModels?: WarmModelRange[];
 }
 
 interface RateEntry {
@@ -71,6 +77,20 @@ export class Coordinator extends DurableObject<Env> {
     const nodeId = url.searchParams.get("nodeId");
     if (!nodeId) return new Response("nodeId is required", { status: 400 });
     const capabilities = (url.searchParams.get("capabilities") || "").split(",").filter(Boolean) as WorkloadType[];
+    const webgpu = url.searchParams.get("webgpu") === "true";
+    const gpuArchitecture = url.searchParams.get("gpu") || undefined;
+    const maxBufferRaw = url.searchParams.get("maxBuffer");
+    const maxStorageBufferBindingSize = maxBufferRaw !== null && Number.isFinite(Number(maxBufferRaw))
+      ? Number(maxBufferRaw)
+      : undefined;
+    let warmModels: WarmModelRange[] | undefined;
+    const warmRaw = url.searchParams.get("warmModels");
+    if (warmRaw) {
+      try {
+        const parsed = JSON.parse(warmRaw);
+        if (Array.isArray(parsed) && parsed.length > 0) warmModels = parsed as WarmModelRange[];
+      } catch {}
+    }
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
@@ -105,6 +125,10 @@ export class Coordinator extends DurableObject<Env> {
       lastPongAt: Date.now(),
       currentTaskId: resumeTask?.id,
       lowMemory: url.searchParams.get("lowMemory") === "true",
+      webgpu,
+      gpuArchitecture,
+      maxStorageBufferBindingSize,
+      warmModels,
     };
 
     await this.ctx.storage.put(`node:${nodeId}`, node);
@@ -438,6 +462,9 @@ export class Coordinator extends DurableObject<Env> {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (!node || node.status !== "idle") continue;
         if (!node.capabilities.includes(task.workload as WorkloadType)) continue;
+        // Swarm inference requires a WebGPU adapter on the node; without one the
+        // engine cannot run its layer slice.
+        if (task.workload === "swarm-inference" && !node.webgpu) continue;
         // Never hand a heavy WASM workload to a low-memory / mobile node; the
         // model load would spike memory and get the device's process killed.
         if (node.lowMemory && HEAVY_WORKLOADS.has(task.workload)) continue;
