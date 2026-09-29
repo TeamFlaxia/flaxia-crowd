@@ -7,6 +7,7 @@ export default defineConfig({
       entry: {
         index: resolve(__dirname, 'src/index.ts'),
         worker: resolve(__dirname, 'src/worker/main.worker.ts'),
+        'swarm-engine': resolve(__dirname, 'src/swarm/engine-entry.js'),
       },
       formats: ['es'],
     },

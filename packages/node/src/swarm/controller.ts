@@ -9,8 +9,8 @@ import type { SwarmControlMessage } from './messages';
  * injected so the controller is testable without a GPU or a model server.
  */
 export interface SwarmRuntime {
-  plan(members: SwarmMember[]): Promise<SwarmChainNode[]>;
-  load(slice: SwarmSlice): Promise<{ engine: SwarmEngineAdapter; semantics: SwarmSemantics }>;
+  plan(members: SwarmMember[], model: string): Promise<SwarmChainNode[]>;
+  load(slice: SwarmSlice, model: string): Promise<{ engine: SwarmEngineAdapter; semantics: SwarmSemantics }>;
 }
 
 export interface SwarmControllerOptions {
@@ -37,6 +37,7 @@ export class SwarmController {
   private engine: SwarmEngineAdapter | null = null;
   private semantics: SwarmSemantics | null = null;
   private sessionId = '';
+  private model = '';
   private chainLength = 1;
   private prompt: string | string[] = '';
   private maxNewTokens = 128;
@@ -51,10 +52,11 @@ export class SwarmController {
     try {
       if (initial.type === 'swarm-init') {
         this.sessionId = initial.sessionId;
+        this.model = initial.model;
         this.chainLength = initial.members.length;
         this.prompt = initial.prompt;
         if (initial.maxNewTokens !== undefined) this.maxNewTokens = initial.maxNewTokens;
-        const chain = await this.options.runtime.plan(initial.members);
+        const chain = await this.options.runtime.plan(initial.members, initial.model);
         this.options.sendControl({ type: 'swarm-plan', sessionId: initial.sessionId, chain });
         return;
       }
@@ -92,9 +94,10 @@ export class SwarmController {
   private async loadSlice(message: SwarmSliceMessage): Promise<void> {
     if (this.sliceLoaded) return;
     this.sessionId = message.sessionId;
+    this.model = message.model;
     this.chainLength = message.chainLength;
 
-    const { engine, semantics } = await this.options.runtime.load(message.slice);
+    const { engine, semantics } = await this.options.runtime.load(message.slice, message.model);
     this.engine = engine;
     this.semantics = semantics;
     this.sliceLoaded = true;

@@ -47,8 +47,38 @@ export interface RawPooledEngine {
   dispose?(): void;
 }
 
+export interface PooledTensorInfo {
+  shape: number[];
+  byteOffset: number;
+  byteLength: number;
+  ggmlType: number;
+}
+
+export interface PooledGguf {
+  meta: Record<string, unknown>;
+  tensors: Record<string, PooledTensorInfo>;
+}
+
+export interface PooledTokenizer {
+  vocab: Record<string, number>;
+  encode(text: string): number[];
+  decode(ids: number[]): string;
+}
+
 export interface PooledEngineModule {
   Qwen35Engine: { create(config: PooledEngineSliceConfig): Promise<RawPooledEngine> };
+  parseGGUFHeader(buffer: ArrayBuffer, options?: { skipTokenizer?: boolean }): PooledGguf;
+  qwen35Weights(
+    gguf: PooledGguf,
+    bytesOf: (info: PooledTensorInfo) => Promise<Uint8Array>,
+    options: { lo: number; hi: number; hasEmbed: boolean; hasHead: boolean; mtp?: boolean },
+  ): Promise<unknown>;
+  tokenizerFromGGUF(meta: Record<string, unknown>): unknown;
+  makeTokenizer(vocab: unknown): PooledTokenizer;
+  argmax(logits: Float32Array): number;
+  f32ToF16(value: number): number;
+  f16ToF32(value: number): number;
+  GGML_EMBED: string;
 }
 
 export type EngineModuleImporter = (url: string) => Promise<unknown>;
