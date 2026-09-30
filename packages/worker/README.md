@@ -149,9 +149,11 @@ npm run test
 | Durable Object | `TASK_QUEUE` (TaskQueue), `NODE_MANAGER` (NodeManager) |
 | 互換性日付 | 2024-04-03 |
 
-必要に応じて `wrangler secret put` で環境変数を設定してください:
+認証情報は `wrangler.toml` に書かず、Cloudflare Secrets で設定してください:
 
 ```bash
-npx wrangler secret put CROWD_API_SECRET
-npx wrangler secret put CROWD_HMAC_SECRET
+npx wrangler secret put API_KEYS
+npx wrangler secret put NODE_TOKEN_SECRET
 ```
+
+`API_KEYS` はカンマ区切りで複数キーを受け付けるため、`new,old` → `new` の2段階で無停止ローテーションできます。公開されたキーは必ず失効させ、ブラウザ向けの `VITE_*` 環境変数には秘密を入れないでください。
