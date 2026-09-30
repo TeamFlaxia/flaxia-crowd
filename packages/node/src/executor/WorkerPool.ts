@@ -209,8 +209,8 @@ export class WorkerPool {
    * into whichever task happens to be running would hand it to the wrong
    * session (and drop the intended one).
    */
-  sendControl(message: unknown): boolean {
-    const taskId = (message as { taskId?: unknown } | null)?.taskId;
+  sendControl(message: unknown, executionId?: string): boolean {
+    const taskId = executionId ?? (message as { taskId?: unknown } | null)?.taskId;
     if (typeof taskId === 'string' && taskId !== this.active?.id) {
       if (!this.worker) return false;
       this.pendingControls.push({ taskId, message });

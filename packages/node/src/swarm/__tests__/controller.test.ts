@@ -97,10 +97,14 @@ describe('SwarmController host', () => {
       prompt: 'hi',
       maxNewTokens: 3,
     };
-    const { controller, controls, tokens, done } = makeOptions(init, runtime);
+    const { controller, controls, tokens, done, error } = makeOptions(init, runtime);
 
     await controller.start();
     expect(controls[0]).toMatchObject({ type: 'swarm-plan', sessionId: 's', chain });
+
+    await controller.handleControl({ type: 'swarm-start', sessionId: 'old', taskId: 't' });
+    await controller.handleControl({ type: 'swarm-error', sessionId: 'old', taskId: 't', error: 'late failure' });
+    expect(error).not.toHaveBeenCalled();
 
     await controller.handleControl({
       type: 'swarm-slice',

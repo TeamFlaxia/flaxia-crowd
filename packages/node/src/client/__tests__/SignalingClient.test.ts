@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initFlaxiaNode } from '../SignalingClient';
+import { encodeSwarmEnvelope } from '@flaxia/sdk';
 
 // Swarm capability advertisement is driven by the WebGPU probe; mock it so
 // tests never touch a real adapter.
@@ -572,5 +573,34 @@ describe('SignalingClient', () => {
     expect(sent()).toContainEqual(
       expect.objectContaining({ type: 'error', taskId: 'task-err-1', error: 'boom' }),
     );
+  });
+
+  it('queues a fresh session behind an abort and ignores the retired attempt', async () => {
+    const { coordinator, postMessage, workerReports, onmessage, sent } = await bootNode();
+    const initial = { type: 'swarm-init', taskId: 'swarm-task', sessionId: 'old', model: 'm', members: [] };
+    coordinator(initial);
+    coordinator({ type: 'abort', taskId: 'swarm-task', sessionId: 'old', error: 'reconnect' });
+    coordinator({ ...initial, sessionId: 'new' });
+    expect(postMessage.mock.calls.filter(([m]) => m.workload)).toHaveLength(1);
+    expect(postMessage).toHaveBeenCalledWith({ id: 'old', type: 'abort', reason: 'reconnect' });
+
+    workerReports('old', 'error', 'reconnect');
+    await flush();
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 'new', workload: 'swarm-inference' }));
+    expect(sent().some(m => m.type === 'error')).toBe(false);
+    postMessage.mockClear();
+    coordinator({ type: 'swarm-start', taskId: 'swarm-task', sessionId: 'old' });
+    coordinator({ type: 'abort', taskId: 'swarm-task', sessionId: 'old', error: 'late' });
+    coordinator({ ...initial, type: 'swarm-slice' });
+    onmessage({ data: encodeSwarmEnvelope('old', new ArrayBuffer(16)) } as MessageEvent);
+    expect(postMessage).not.toHaveBeenCalled();
+
+    coordinator({ type: 'swarm-start', taskId: 'swarm-task', sessionId: 'new' });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'new', type: 'swarm-control', message: expect.objectContaining({ sessionId: 'new', taskId: 'swarm-task' }),
+    }), []);
+    workerReports('new', 'done', '');
+    await flush();
+    expect(sent()).toContainEqual(expect.objectContaining({ type: 'result', taskId: 'swarm-task', sessionId: 'new' }));
   });
 });

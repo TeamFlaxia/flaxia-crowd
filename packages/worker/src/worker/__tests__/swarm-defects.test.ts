@@ -267,7 +267,7 @@ describe('M9: swarmSession must not outlive the session', () => {
     n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
     n2.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
     await sleep(30);
-    n2.socket.send(JSON.stringify({ type: 'result', taskId: task.id, payload: { output: 'ok' } }));
+    n2.socket.send(JSON.stringify({ type: 'result', taskId: task.id, sessionId: init.sessionId, payload: { output: 'ok' } }));
     await sleep(30);
 
     const stored = await getTask(task.id);

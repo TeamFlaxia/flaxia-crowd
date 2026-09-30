@@ -87,6 +87,7 @@ export class SwarmController {
 
   async handleControl(message: SwarmControlMessage): Promise<void> {
     if (this.settled) return;
+    if (message.sessionId !== this.sessionId) return;
     try {
       if (message.type === 'swarm-slice') {
         await this.loadSlice(message);

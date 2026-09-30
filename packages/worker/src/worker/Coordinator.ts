@@ -14,6 +14,7 @@ import {
   isValidSwarmChain,
   swarmChainIndex,
   swarmNextHopIndex,
+  decodeSwarmEnvelope,
 } from "@flaxia/sdk";
 import { signPayload } from "../security";
 
@@ -125,17 +126,24 @@ export class Coordinator extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    // If the node reconnects while a task is still in flight, keep the task
+    // If the node reconnects while a single-node task is still in flight, keep the task
     // assigned to this node and deliver it on the new socket. Failing and
     // requeueing here would redeliver the same task on every reconnect
     // (mobile / tab-switch flapping) and consume retry budget, so a single
     // task could be dispatched to the node many times in a short window.
     const existing = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     let resumeTask: TaskRecord | undefined;
+    let restartSwarmTaskId: string | undefined;
     if (existing?.currentTaskId) {
       const inFlight = await this.ctx.storage.get<TaskRecord>(`task:${existing.currentTaskId}`);
-      if (inFlight && inFlight.status === "processing" && inFlight.assignedNodeId === nodeId) {
-        resumeTask = inFlight;
+      if (inFlight && inFlight.status === "processing") {
+        const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${inFlight.id}`);
+        if (swarm?.members.some(member => member.nodeId === nodeId)) {
+          restartSwarmTaskId = inFlight.id;
+          resumeTask = inFlight;
+        } else if (inFlight.assignedNodeId === nodeId) {
+          resumeTask = inFlight;
+        }
       }
     }
 
@@ -174,7 +182,11 @@ export class Coordinator extends DurableObject<Env> {
 
     // Continue the in-flight task on the new socket so the node can finish it
     // instead of the coordinator requeueing a duplicate.
-    if (resumeTask) {
+    if (restartSwarmTaskId) {
+      // A reconnect may have lost frames or worker state. Abort the entire
+      // attempt on the replacement socket before issuing a fresh session.
+      await this.failTask(restartSwarmTaskId, "Swarm member reconnected");
+    } else if (resumeTask) {
       if (!(await this.deliverTask(resumeTask, server))) {
         await this.failTask(resumeTask.id, "Failed to deliver task to node");
       }
@@ -223,19 +235,22 @@ export class Coordinator extends DurableObject<Env> {
       }
 
       if (data.type === "swarm-ready") {
-        await this.handleSwarmReady(nodeId);
+        await this.handleSwarmReady(nodeId, data.sessionId);
         return;
       }
 
       if (data.type === "result" || data.type === "error") {
         const isError = data.type === "error";
         const taskId = typeof data.taskId === "string" ? data.taskId : "";
+        const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+        if (data.sessionId !== undefined && !swarm) return;
+        if (swarm && (data.sessionId !== swarm.sessionId ||
+          !swarm.members.some(member => member.nodeId === nodeId))) return;
 
         if (isError) {
           const error = typeof data.error === "string" ? data.error : "Node error";
           // A swarm member may fail at any position, so do not gate the failure
           // on the (host) assignedNodeId.
-          const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
           await this.failTask(taskId, error, swarm ? undefined : nodeId);
         } else {
           // Worker results are ignored: completeTask only accepts the node that
@@ -250,6 +265,8 @@ export class Coordinator extends DurableObject<Env> {
       if (data.type === "progress") {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (!node || node.currentTaskId !== data.taskId) return;
+        const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${node.currentTaskId}`);
+        if (swarm && (data.sessionId !== swarm.sessionId || swarm.hostNodeId !== nodeId)) return;
         if (typeof data.token !== "string") return;
 
         const subs = this.ctx.getWebSockets(`client:${data.taskId}`);
@@ -279,6 +296,8 @@ export class Coordinator extends DurableObject<Env> {
     const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
     const plan = task?.swarmSession;
     if (!plan) return;
+    const envelope = decodeSwarmEnvelope(frame);
+    if (!envelope || envelope.sessionId !== plan.sessionId) return;
 
     const index = swarmChainIndex(plan, nodeId);
     if (index < 0) return;
@@ -309,6 +328,7 @@ export class Coordinator extends DurableObject<Env> {
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
     if (!swarm) return;
+    if (data.sessionId !== swarm.sessionId) return;
     if (swarm.hostNodeId !== nodeId) {
       await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan was sent by a node that is not the host");
       return;
@@ -360,13 +380,14 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
-  private async handleSwarmReady(nodeId: string) {
+  private async handleSwarmReady(nodeId: string, sessionId: unknown) {
     const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     const taskId = node?.currentTaskId;
     if (!taskId) return;
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
     if (!swarm || !swarm.plan || swarm.started) return;
+    if (sessionId !== swarm.sessionId) return;
     if (!swarm.members.some((m) => m.nodeId === nodeId)) return;
 
     if (!swarm.ready.includes(nodeId)) swarm.ready.push(nodeId);
@@ -531,7 +552,7 @@ export class Coordinator extends DurableObject<Env> {
         ? [task.assignedNodeId]
         : [];
     for (const nodeId of running) {
-      this.sendToNode(nodeId, { type: "abort", taskId, error });
+      this.sendToNode(nodeId, { type: "abort", taskId, sessionId: swarm?.sessionId, error });
     }
     if (swarm) {
       await this.releaseSwarmMembers(taskId);

@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 import type { SwarmChainNode, TaskRecord } from '@flaxia/sdk';
+import { encodeSwarmEnvelope } from '@flaxia/sdk';
 import { MAX_RETRIES } from '../Coordinator';
 import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
 
@@ -513,9 +514,9 @@ describe('Coordinator swarm sessions', () => {
     await new Promise((r) => setTimeout(r, 30));
 
     // Host (n2, index 0) sends a hidden frame; it should reach n1 (index 1).
-    n2.socket.send(new ArrayBuffer(16));
+    n2.socket.send(encodeSwarmEnvelope(init.sessionId, new ArrayBuffer(16)));
     await new Promise((r) => setTimeout(r, 30));
-    expect(n1.frames.some((f) => typeof f !== 'string' && (f as ArrayBuffer).byteLength === 16)).toBe(true);
+    expect(n1.frames.some((f) => typeof f !== 'string' && (f as ArrayBuffer).byteLength === 56)).toBe(true);
   });
 
   it('accepts only the host result and releases every member', async () => {
@@ -525,13 +526,13 @@ describe('Coordinator swarm sessions', () => {
     await new Promise((r) => setTimeout(r, 30));
 
     // A worker's result is ignored.
-    n1.socket.send(JSON.stringify({ type: 'result', taskId: task.id, payload: { output: 'wrong' } }));
+    n1.socket.send(JSON.stringify({ type: 'result', taskId: task.id, sessionId: init.sessionId, payload: { output: 'wrong' } }));
     await new Promise((r) => setTimeout(r, 20));
     let stored = await stub.fetch(`http://internal/task/${task.id}`).then((r) => r.json() as Promise<TaskRecord>);
     expect(stored.status).toBe('processing');
 
     // The host completes the task.
-    n2.socket.send(JSON.stringify({ type: 'result', taskId: task.id, payload: { output: 'ok', tokens: [1] } }));
+    n2.socket.send(JSON.stringify({ type: 'result', taskId: task.id, sessionId: init.sessionId, payload: { output: 'ok', tokens: [1] } }));
     await new Promise((r) => setTimeout(r, 20));
     stored = await stub.fetch(`http://internal/task/${task.id}`).then((r) => r.json() as Promise<TaskRecord>);
     expect(stored.status).toBe('done');
@@ -548,7 +549,8 @@ describe('Coordinator swarm sessions', () => {
 
   it('stops every member when one of them fails', async () => {
     const { task, n1, n2 } = await setup();
-    n1.socket.send(JSON.stringify({ type: 'error', taskId: task.id, error: 'member blew up' }));
+    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
+    n1.socket.send(JSON.stringify({ type: 'error', taskId: task.id, sessionId: init.sessionId, error: 'member blew up' }));
     await new Promise((r) => setTimeout(r, 50));
 
     // Every member is still running the session; the failing one already
@@ -564,5 +566,60 @@ describe('Coordinator swarm sessions', () => {
     const stored = await stub.fetch(`http://internal/task/${task.id}`).then((r) => r.json() as Promise<TaskRecord>);
     expect(stored.retryCount).toBe(1);
     expect(['pending', 'processing']).toContain(stored.status);
+  });
+
+  it.each(['n1', 'n2'])('restarts the whole swarm when %s reconnects', async (nodeId) => {
+    const { task, n1, n2 } = await setup();
+    const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    await new Promise(r => setTimeout(r, 20));
+    const replacement = await connectNode(nodeId,
+      `capabilities=swarm-inference&webgpu=true&wasm=${nodeId === 'n2' ? 8000000000 : 4000000000}`);
+    await new Promise(r => setTimeout(r, 30));
+    const host = nodeId === 'n2' ? replacement : n2;
+    const worker = nodeId === 'n1' ? replacement : n1;
+    const inits = jsonFrames(host).filter(f => f.type === 'swarm-init');
+    const next = inits[inits.length - 1];
+    expect(next.sessionId).not.toBe(init.sessionId);
+    for (const member of [host, worker]) {
+      expect(jsonFrames(member)).toContainEqual(expect.objectContaining({
+        type: 'abort', taskId: task.id, sessionId: init.sessionId,
+      }));
+      expect(jsonFrames(member).some(f => f.type === 'task')).toBe(false);
+    }
+    await withStorage(async storage => {
+      for (const id of ['n1', 'n2']) {
+        expect(await storage.get(`node:${id}`)).toMatchObject({ status: 'busy', currentTaskId: task.id });
+      }
+    });
+    expect(await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json())).toMatchObject({
+      status: 'processing', retryCount: 1,
+    });
+  });
+
+  it('ignores stale attempts and errors from non-members', async () => {
+    const { task, n1, n2, n3 } = await setup();
+    const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
+    const chain = swarmChainFor(init);
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: 'old-session', chain }));
+    await new Promise(r => setTimeout(r, 20));
+    expect(jsonFrames(n1).some(f => f.type === 'swarm-slice')).toBe(false);
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain }));
+    await new Promise(r => setTimeout(r, 20));
+    n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: 'old-session' }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
+    n2.socket.send(JSON.stringify({ type: 'result', taskId: task.id, sessionId: 'old-session', payload: {} }));
+    n1.socket.send(JSON.stringify({ type: 'error', taskId: task.id, sessionId: 'old-session', error: 'old' }));
+    n3.socket.send(JSON.stringify({ type: 'error', taskId: task.id, sessionId: init.sessionId, error: 'unrelated' }));
+    n2.socket.send(encodeSwarmEnvelope('old-session', new ArrayBuffer(16)));
+    await new Promise(r => setTimeout(r, 30));
+    expect(jsonFrames(n2).some(f => f.type === 'swarm-start')).toBe(false);
+    expect(n1.frames.some(f => typeof f !== 'string')).toBe(false);
+    expect(await stub.fetch(`http://internal/task/${task.id}`).then(r => r.json())).toMatchObject({
+      status: 'processing', retryCount: 0,
+    });
+    n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
+    await new Promise(r => setTimeout(r, 20));
+    expect(jsonFrames(n2).some(f => f.type === 'swarm-start')).toBe(true);
   });
 });

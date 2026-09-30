@@ -14,7 +14,24 @@ import {
   isValidSwarmChain,
   SWARM_FRAME_MAGIC,
   SWARM_FRAME_HEADER_BYTES,
+  encodeSwarmEnvelope,
+  decodeSwarmEnvelope,
 } from '../swarm';
+
+describe('swarm session envelopes', () => {
+  it('preserves the session and binary frame', () => {
+    const frame = encodeSwarmStopFrame();
+    const decoded = decodeSwarmEnvelope(encodeSwarmEnvelope('attempt-2', frame));
+    expect(decoded?.sessionId).toBe('attempt-2');
+    expect(decoded?.frame).toEqual(frame);
+  });
+
+  it('rejects missing or truncated session envelopes', () => {
+    expect(decodeSwarmEnvelope(new ArrayBuffer(0))).toBeNull();
+    expect(decodeSwarmEnvelope(encodeSwarmStopFrame())).toBeNull();
+    expect(decodeSwarmEnvelope(encodeSwarmEnvelope('s', encodeSwarmStopFrame()).slice(0, 8))).toBeNull();
+  });
+});
 
 describe('planSwarmLayers', () => {
   it('splits proportionally to capacity', () => {

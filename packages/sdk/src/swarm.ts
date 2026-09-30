@@ -114,6 +114,8 @@ export function swarmNextHopIndex(chainLength: number, fromIndex: number): numbe
  * only the header (to route by session chain position) and copies the payload
  * through untouched; f16 packing of the payload itself is the node's concern.
  *
+ * On the node/coordinator WebSocket this frame is wrapped with
+ * `encodeSwarmEnvelope`, so frames from a retired attempt cannot enter a new one.
  * Layout (little-endian): u16 magic, u8 kind, u8 flags, u32 requestId,
  * u32 pos, u16 tokens, u16 reserved.
  */
@@ -126,6 +128,24 @@ export const SWARM_FRAME_KIND = {
   hidden: SWARM_FRAME_KIND_HIDDEN,
   stop: SWARM_FRAME_KIND_STOP,
 } as const;
+
+/** WebSocket envelope: bind an engine frame to one session attempt. */
+export function encodeSwarmEnvelope(sessionId: string, frame: ArrayBuffer): ArrayBuffer {
+  const id = new TextEncoder().encode(sessionId);
+  const buffer = new ArrayBuffer(4 + id.length + frame.byteLength);
+  new DataView(buffer).setUint32(0, id.length, true);
+  new Uint8Array(buffer, 4, id.length).set(id);
+  new Uint8Array(buffer, 4 + id.length).set(new Uint8Array(frame));
+  return buffer;
+}
+
+export function decodeSwarmEnvelope(buffer: ArrayBuffer): { sessionId: string; frame: ArrayBuffer } | null {
+  if (buffer.byteLength < 4) return null;
+  const length = new DataView(buffer).getUint32(0, true);
+  if (!length || length > 256 || buffer.byteLength < 4 + length + SWARM_FRAME_HEADER_BYTES) return null;
+  const sessionId = new TextDecoder().decode(new Uint8Array(buffer, 4, length));
+  return { sessionId, frame: buffer.slice(4 + length) };
+}
 
 export interface SwarmFrameHeader {
   /** Correlates a round trip; the host increments it per frame. */

@@ -431,6 +431,8 @@ export interface SubmitTaskResponse {
 export interface AbortMessage {
   type: 'abort';
   taskId: string;
+  /** Required for swarm tasks: identifies the attempt being stopped. */
+  sessionId?: string;
   error: string;
 }
 

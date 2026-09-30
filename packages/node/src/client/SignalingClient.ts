@@ -12,6 +12,7 @@ import {
 import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
 import { probeWebGpu } from '../executor/webgpuProbe';
+import { decodeSwarmEnvelope, encodeSwarmEnvelope } from '@flaxia/sdk';
 
 import type { ConsentState, FlaxiaNodeController, NodeConfig, SwarmNodeCapabilities, WorkloadType } from '@flaxia/sdk';
 
@@ -45,6 +46,15 @@ class SignalingClient {
   private inflightTasks = new Set<string>();
   /** Tasks the coordinator told us to stop; their failure must not be echoed back. */
   private abortedTasks = new Set<string>();
+  private swarmSessions = new Map<string, string>();
+  private retiredSwarmSessions = new Set<string>();
+
+  private retireSwarmSession(sessionId: string) {
+    this.retiredSwarmSessions.add(sessionId);
+    if (this.retiredSwarmSessions.size > 64) {
+      this.retiredSwarmSessions.delete(this.retiredSwarmSessions.values().next().value!);
+    }
+  }
 
   constructor(
     private config: NodeConfig,
@@ -88,10 +98,14 @@ class SignalingClient {
     };
 
     ws.onmessage = async (event) => {
+      if (this.ws !== ws) return;
       // Binary frames are swarm hidden states; hand them to the running worker
-      // without decoding.
+      // after checking their session envelope.
       if (typeof event.data !== 'string') {
-        this.workerPool.sendFrame(event.data as ArrayBuffer);
+        const envelope = decodeSwarmEnvelope(event.data as ArrayBuffer);
+        if (envelope && [...this.swarmSessions.values()].includes(envelope.sessionId)) {
+          this.workerPool.sendFrame(envelope.frame);
+        }
         return;
       }
 
@@ -129,24 +143,29 @@ class SignalingClient {
       if (data.type === 'swarm-init' || data.type === 'swarm-slice') {
         const taskId = String(data.taskId ?? '');
         if (!taskId) return;
+        if (typeof data.sessionId !== 'string' || this.retiredSwarmSessions.has(data.sessionId)) return;
         // The host starts on swarm-init and a worker on its first swarm-slice;
         // a host's later slice just reaches the already-running worker.
-        if (this.inflightTasks.has(taskId)) {
-          this.workerPool.sendControl(data);
+        if (this.swarmSessions.get(taskId) === data.sessionId) {
+          this.workerPool.sendControl(data, data.sessionId);
           return;
         }
         void this.startSwarm(taskId, data);
         return;
       }
       if (data.type === 'swarm-start') {
-        this.workerPool.sendControl(data);
+        if (this.swarmSessions.get(String(data.taskId)) === data.sessionId) {
+          this.workerPool.sendControl(data, data.sessionId as string);
+        }
         return;
       }
       if (data.type === 'swarm-error') {
         // The coordinator rejected the session: fail it locally too, so this
         // node releases its slot instead of waiting out the task timeout.
         const taskId = String(data.taskId ?? '');
-        if (taskId && this.inflightTasks.has(taskId)) this.workerPool.sendControl(data);
+        if (taskId && this.swarmSessions.get(taskId) === data.sessionId) {
+          this.workerPool.sendControl(data, data.sessionId as string);
+        }
         return;
       }
       if (data.type === 'abort') {
@@ -176,7 +195,11 @@ class SignalingClient {
     if (!taskId || !this.inflightTasks.has(taskId)) return;
     const error =
       typeof data.error === 'string' && data.error ? data.error : 'aborted by the coordinator';
-    if (this.workerPool.abort(taskId, error)) this.abortedTasks.add(taskId);
+    const sessionId = this.swarmSessions.get(taskId);
+    if (sessionId && sessionId !== data.sessionId) return;
+    const executionId = sessionId ?? taskId;
+    if (sessionId) this.retireSwarmSession(sessionId);
+    if (this.workerPool.abort(executionId, error)) this.abortedTasks.add(executionId);
     log(`task abort received taskId=${taskId} error=${error}`);
   }
 
@@ -336,40 +359,49 @@ class SignalingClient {
    * running worker. The host's final result completes the task.
    */
   private async startSwarm(taskId: string, initial: Record<string, unknown>) {
-    if (this.inflightTasks.has(taskId)) return;
+    const sessionId = initial.sessionId;
+    if (typeof sessionId !== 'string' || !sessionId) return;
+    if (this.swarmSessions.get(taskId) === sessionId) return;
+    this.swarmSessions.set(taskId, sessionId);
     this.inflightTasks.add(taskId);
     const startedAt = performance.now();
     const timeoutMs = typeof initial.timeoutMs === 'number' ? initial.timeoutMs + 30000 : undefined;
 
     try {
       const result = await this.workerPool.run(
-        taskId,
+        sessionId,
         'swarm-inference',
         initial,
         timeoutMs,
         (token: string) => {
-          this.send({ type: 'progress', taskId, token });
+          this.send({ type: 'progress', taskId, sessionId, token });
         },
         { maxCpuLoad: this.config.maxCpuLoad },
         {
-          onFrame: (frame) => this.sendBinary(frame),
+          onFrame: (frame) => this.sendBinary(encodeSwarmEnvelope(sessionId, frame)),
           onMessage: (message) => this.send(message as Record<string, unknown>),
         },
       );
-      this.send({ type: 'result', taskId, payload: result });
+      if (!this.abortedTasks.delete(sessionId)) {
+        this.send({ type: 'result', taskId, sessionId, payload: result });
+      }
       log(
         `swarm result sent taskId=${taskId} durationMs=${Math.round(performance.now() - startedAt)}`,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (this.abortedTasks.delete(taskId)) {
+      if (this.abortedTasks.delete(sessionId)) {
         log(`swarm stopped on coordinator abort taskId=${taskId} error=${message}`);
       } else {
         logError(`swarm failed taskId=${taskId} error=${message}`);
-        this.send({ type: 'error', taskId, error: message });
+        this.send({ type: 'error', taskId, sessionId, error: message });
       }
     } finally {
-      this.inflightTasks.delete(taskId);
+      this.retireSwarmSession(sessionId);
+      if (this.swarmSessions.get(taskId) === sessionId) {
+        this.swarmSessions.delete(taskId);
+        this.inflightTasks.delete(taskId);
+      }
     }
   }
 
