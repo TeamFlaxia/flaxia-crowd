@@ -24,10 +24,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build SDK
-        # @flaxia/node and @flaxia/worker import runtime values from
-        # @flaxia/sdk, so its dist/ must exist before their tests run.
-        run: npm run build --workspace=packages/sdk
+      - name: Build packages
+        # @flaxia/node resolves its types from dist/, so it has to be built
+        # before @flaxia/text-analyzer typechecks, and dependents import
+        # runtime values from @flaxia/sdk.
+        run: npm run build
 
       - name: Type check
         # `npm test` only runs the suites, so without this step type errors in
@@ -36,6 +37,3 @@ jobs:
 
       - name: Run tests
         run: npm test --workspaces --if-present
-
-      - name: Build packages
-        run: npm run build
