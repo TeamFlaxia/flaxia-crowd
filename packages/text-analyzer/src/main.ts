@@ -22,8 +22,10 @@ const defaultOrchestrator = window.location.hostname === 'localhost' || window.l
 
 const savedOrchestrator = localStorage.getItem('flaxia_orchestrator_url');
 const displayOrchestratorUrl = savedOrchestrator || defaultOrchestrator;
-const useViteProxy = !savedOrchestrator && window.location.hostname === 'localhost';
-const orchestratorUrl = useViteProxy ? window.location.origin : displayOrchestratorUrl;
+// Node signaling may connect directly to the orchestrator. Authenticated task
+// API calls are intentionally separate and always go through same-origin
+// /crowd/* so the browser never receives the API key.
+const orchestratorUrl = displayOrchestratorUrl;
 
 // UI Elements
 const analysisInput = document.getElementById('analysis-input') as HTMLTextAreaElement;
