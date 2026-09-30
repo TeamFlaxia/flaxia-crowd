@@ -13,7 +13,8 @@ export type WorkloadType =
   | 'vector-store'
   | 'vector-query'
   | 'moe-inference'
-  | 'nudenet';
+  | 'nudenet'
+  | 'swarm-inference';
 
 // --- AI Inference ---
 
@@ -143,6 +144,91 @@ export interface MoENodeConfig {
   role?: MoENodeRole;
   expertIds?: number[];
   modelId?: string;
+}
+
+// --- Swarm Inference (multi-node, layer-sharded generation) ---
+
+/** Room-sizing and scheduling hints for a swarm inference job. */
+export interface SwarmOptions {
+  /** Minimum nodes the job needs before it may start (default: 1). */
+  minNodes?: number;
+  /** Maximum nodes the coordinator may reserve (default: 4). */
+  maxNodes?: number;
+  /** Prefer nodes whose layer range is already cached (default: true). */
+  preferWarm?: boolean;
+}
+
+export interface SwarmInferencePayload {
+  /**
+   * Model identifier understood by the swarm engine (e.g. 'qwen3-1.7b').
+   * The engine resolves it to a GGUF source and layer plan.
+   */
+  model: string;
+  /** Prompt text for a base model, or a single user turn for an instruct model. */
+  prompt: string | string[];
+  /** Maximum number of tokens to generate (default: 128). */
+  maxNewTokens?: number;
+  /** Sampling temperature (default: greedy / 0). */
+  temperature?: number;
+  /** Top-p nucleus sampling threshold. */
+  topP?: number;
+  /** Top-k sampling threshold. */
+  topK?: number;
+  /** Optional room sizing / scheduling hints. */
+  swarm?: SwarmOptions;
+}
+
+/** One node's role in a completed swarm session, surfaced in the result. */
+export interface SwarmInferenceNodeInfo {
+  /** Assigned contiguous transformer layer range `[start, end)` (end exclusive, as in {@link SwarmSlice}). */
+  layers: [number, number];
+  /** Whether this node ran the host duties (tokenizer, embed, LM head, sampling). */
+  host: boolean;
+  /**
+   * Whether the node served its layer range from a warm cache. Only set for a
+   * node that can observe its own cache (the reporter); the other members'
+   * warmth is not part of the protocol, so it is omitted rather than guessed.
+   */
+  warm?: boolean;
+  /** Per-node load duration in milliseconds, when reported. */
+  loadMs?: number;
+}
+
+export interface SwarmInferenceResult {
+  output: string;
+  tokens: string[];
+  nodes: SwarmInferenceNodeInfo[];
+  durationMs: number;
+  prefillMs?: number;
+  tokensPerSecond?: number;
+}
+
+/** A node's role in a swarm session: the host drives generation, workers run a slice. */
+export type SwarmRole = 'host' | 'worker';
+
+/** One node's contiguous transformer layer slice. `end` is exclusive. */
+export interface SwarmSlice {
+  start: number;
+  end: number;
+  hasEmbed: boolean;
+  hasHead: boolean;
+}
+
+export interface SwarmChainNode {
+  nodeId: string;
+  role: SwarmRole;
+  slice: SwarmSlice;
+}
+
+/** The layer placement and ordered node chain for one swarm inference session. */
+export interface SwarmSessionPlan {
+  sessionId: string;
+  taskId: string;
+  model: string;
+  /** Total number of trunk layers in the model. */
+  layers: number;
+  /** Ordered chain; index 0 is the host and owns the generation loop. */
+  chain: SwarmChainNode[];
 }
 
 // --- Image Processing ---
@@ -301,7 +387,8 @@ export type TaskPayload =
   | VectorStorePayload
   | VectorQueryPayload
   | MoEInferencePayload
-  | NudeNetPayload;
+  | NudeNetPayload
+  | SwarmInferencePayload;
 
 export interface TaskRecord {
   id: string;
@@ -317,6 +404,8 @@ export interface TaskRecord {
   retryCount: number;
   timeoutMs: number;
   callbackUrl?: string;
+  /** Set for `swarm-inference` tasks once the coordinator has assembled a chain. */
+  swarmSession?: SwarmSessionPlan;
   result?: unknown;
   error?: string;
 }
@@ -328,6 +417,23 @@ export interface SubmitTaskResponse {
   id: string;
   status: TaskStatus;
   createdAt: number;
+}
+
+/**
+ * Coordinator -> node: the task is already settled (it timed out, a peer
+ * failed, the plan was rejected), so stop working on it.
+ *
+ * Without this a node still running a session holds a slot the scheduler counts
+ * as busy for the rest of the task timeout. The receiver must not report the
+ * abort back: the coordinator may already have requeued the task for a retry,
+ * and an error echo would race that attempt.
+ */
+export interface AbortMessage {
+  type: 'abort';
+  taskId: string;
+  /** Required for swarm tasks: identifies the attempt being stopped. */
+  sessionId?: string;
+  error: string;
 }
 
 // --- Node Types ---
@@ -396,4 +502,53 @@ export interface NodeConfig {
   maxCpuLoad?: number;
   capabilities?: WorkloadType[];
   moe?: MoENodeConfig;
+  /**
+   * Opt in to downloading model layer weights for swarm inference. Swarm jobs
+   * can pull multi-GB byte spans into the browser cache, so hosts must ask for
+   * this explicitly rather than inheriting it from the general node consent.
+   */
+  allowModelDownload?: boolean;
+}
+
+/**
+ * GPU capability a node advertises to the orchestrator. Only nodes with
+ * `webgpu: true` are eligible for `swarm-inference` routing.
+ */
+export interface SwarmNodeCapabilities {
+  webgpu: boolean;
+  /** Adapter vendor/architecture string, when the browser exposes one. */
+  gpuArchitecture?: string;
+  /** Adapter max storage-buffer binding size in bytes, when reported. */
+  maxStorageBufferBindingSize?: number;
+}
+
+/** A layer span of a model a node already holds in its persistent cache. */
+export interface WarmModelRange {
+  modelId: string;
+  /** Cached contiguous layer range [start, end], inclusive. */
+  layers: [number, number];
+}
+
+/**
+ * Body of `POST /crowd/nodes/register`. Shared so worker and node agree on the
+ * capability contract.
+ */
+export interface NodeRegisterRequest {
+  siteId: string;
+  nodeId?: string;
+  capabilities?: WorkloadType[];
+  deviceMemory?: number | null;
+  /** Measured WASM memory the device could commit, in bytes. */
+  wasmMemoryBytes?: number;
+  /** WebGPU capabilities, when the node has been probed for swarm inference. */
+  swarm?: SwarmNodeCapabilities;
+  /** Warm model layer ranges the node can serve without a download. */
+  warmModels?: WarmModelRange[];
+}
+
+export interface NodeRegisterResponse {
+  token: string;
+  nodeId: string;
+  expiresAt: number;
+  lowMemory: boolean;
 }

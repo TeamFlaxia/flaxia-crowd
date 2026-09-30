@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import type { Env } from '../index'
-import type { TaskRecord, WorkloadType } from '@flaxia/sdk'
-import { isRoutableWorkload } from '@flaxia/sdk'
+import type { SwarmNodeCapabilities, TaskRecord, WarmModelRange, WorkloadType } from '@flaxia/sdk'
+import { isRoutableWorkload, defaultTimeoutFor } from '@flaxia/sdk'
 import {
   createNodeToken,
   NODE_TOKEN_TTL_MS,
@@ -9,7 +9,6 @@ import {
   validateCallbackUrl,
   safeEqual,
 } from '../security'
-import { DEFAULT_TIMEOUT_MS } from '../worker/Coordinator'
 
 // Re-exported from @flaxia/sdk so hosts, worker and node share one definition.
 export { isHeavyWorkload } from '@flaxia/sdk'
@@ -44,6 +43,87 @@ function validatePayloadSize(env: Env, body: string): boolean {
   return new TextEncoder().encode(body).byteLength <= max
 }
 
+/** Validate a node's advertised WebGPU capabilities; returns undefined when absent/invalid. */
+export function parseSwarmCapabilities(value: unknown): SwarmNodeCapabilities | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.webgpu !== 'boolean') return undefined
+  const swarm: SwarmNodeCapabilities = { webgpu: record.webgpu }
+  if (typeof record.gpuArchitecture === 'string') swarm.gpuArchitecture = record.gpuArchitecture
+  if (typeof record.maxStorageBufferBindingSize === 'number' && Number.isFinite(record.maxStorageBufferBindingSize)) {
+    swarm.maxStorageBufferBindingSize = record.maxStorageBufferBindingSize
+  }
+  return swarm
+}
+
+/** Validate a node's warm model layer ranges; drops malformed entries. */
+export function parseWarmModels(value: unknown): WarmModelRange[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const ranges: WarmModelRange[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    const layers = record.layers
+    if (typeof record.modelId !== 'string' || !record.modelId) continue
+    if (!Array.isArray(layers) || layers.length !== 2) continue
+    const [start, end] = layers
+    if (typeof start !== 'number' || typeof end !== 'number') continue
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) continue
+    ranges.push({ modelId: record.modelId, layers: [start, end] })
+  }
+  return ranges.length > 0 ? ranges : undefined
+}
+
+/**
+ * Validate a `swarm-inference` payload at the API boundary.
+ *
+ * The scheduler tolerates unusable `swarm` options by falling back to defaults,
+ * but silently reinterpreting a request means the client never learns its
+ * options were dropped. Rejecting at submit time keeps a bad payload out of the
+ * queue entirely. Returns an error message, or null when the payload is valid.
+ */
+export function validateSwarmPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return 'payload must be an object'
+  }
+  const body = payload as Record<string, unknown>
+
+  if (body.maxNewTokens !== undefined && body.maxNewTokens !== null) {
+    const maxNewTokens = body.maxNewTokens
+    if (typeof maxNewTokens !== 'number' || !Number.isInteger(maxNewTokens) || maxNewTokens < 1) {
+      return 'payload.maxNewTokens must be a positive integer'
+    }
+  }
+
+  if (body.swarm === undefined || body.swarm === null) return null
+  if (typeof body.swarm !== 'object' || Array.isArray(body.swarm)) {
+    return 'payload.swarm must be an object'
+  }
+  const swarm = body.swarm as Record<string, unknown>
+
+  const asCount = (key: 'minNodes' | 'maxNodes'): string | null => {
+    const value = swarm[key]
+    if (value === undefined || value === null) return null
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+      return `payload.swarm.${key} must be an integer >= 1`
+    }
+    return null
+  }
+  const minError = asCount('minNodes')
+  if (minError) return minError
+  const maxError = asCount('maxNodes')
+  if (maxError) return maxError
+
+  const { minNodes, maxNodes } = swarm as { minNodes?: number; maxNodes?: number }
+  if (minNodes !== undefined && maxNodes !== undefined && maxNodes < minNodes) {
+    return 'payload.swarm.maxNodes must be >= payload.swarm.minNodes'
+  }
+  if (swarm.preferWarm !== undefined && swarm.preferWarm !== null && typeof swarm.preferWarm !== 'boolean') {
+    return 'payload.swarm.preferWarm must be a boolean'
+  }
+  return null
+}
+
 const app = new Hono<{ Bindings: Env }>()
 
 function getCoordinator(c: any) {
@@ -60,7 +140,15 @@ function checkOrigin(c: any): boolean {
 // --- Node registration & signaling ---
 
 app.post('/nodes/register', async (c) => {
-  let body: { siteId?: string; nodeId?: string; capabilities?: string[]; deviceMemory?: number | null }
+  let body: {
+    siteId?: string
+    nodeId?: string
+    capabilities?: string[]
+    deviceMemory?: number | null
+    wasmMemoryBytes?: number
+    swarm?: unknown
+    warmModels?: unknown
+  }
   try {
     body = await c.req.json()
   } catch {
@@ -84,6 +172,12 @@ app.post('/nodes/register', async (c) => {
 
   // A `null`/undefined deviceMemory means a mobile WebView or unknown device.
   const deviceMemory = typeof body.deviceMemory === 'number' ? body.deviceMemory : null
+  const wasmMemoryBytes = typeof body.wasmMemoryBytes === 'number' && Number.isFinite(body.wasmMemoryBytes)
+    ? body.wasmMemoryBytes
+    : undefined
+
+  const swarm = parseSwarmCapabilities(body.swarm)
+  const warmModels = parseWarmModels(body.warmModels)
 
   const exp = Date.now() + NODE_TOKEN_TTL_MS
   const token = await createNodeToken(c.env.NODE_TOKEN_SECRET, {
@@ -91,6 +185,9 @@ app.post('/nodes/register', async (c) => {
     nodeId,
     capabilities,
     deviceMemory,
+    wasmMemoryBytes,
+    swarm,
+    warmModels,
     exp,
   })
 
@@ -106,7 +203,7 @@ app.get('/signal', async (c) => {
     return c.text('Origin not allowed', 403)
   }
 
-  const token = c.req.query('token')
+  const token = c.req.query('token') ?? null
   const payload = await verifyNodeToken(c.env.NODE_TOKEN_SECRET, token)
   if (!payload) {
     return c.text('Invalid or expired token', 401)
@@ -117,6 +214,21 @@ app.get('/signal', async (c) => {
   url.searchParams.set('nodeId', payload.nodeId)
   url.searchParams.set('capabilities', payload.capabilities.join(','))
   url.searchParams.set('lowMemory', String(payload.deviceMemory === null || payload.deviceMemory === undefined || payload.deviceMemory < 4))
+  if (typeof payload.wasmMemoryBytes === 'number') {
+    url.searchParams.set('wasm', String(payload.wasmMemoryBytes))
+  }
+  if (payload.swarm?.webgpu) {
+    url.searchParams.set('webgpu', 'true')
+    if (payload.swarm.gpuArchitecture) url.searchParams.set('gpu', payload.swarm.gpuArchitecture)
+    if (payload.swarm.maxStorageBufferBindingSize !== undefined) {
+      url.searchParams.set('maxBuffer', String(payload.swarm.maxStorageBufferBindingSize))
+    }
+  }
+  if (payload.warmModels?.length) {
+    try {
+      url.searchParams.set('warmModels', JSON.stringify(payload.warmModels))
+    } catch {}
+  }
 
   const stub = getCoordinator(c)
   return stub.fetch(new Request(url.toString(), {
@@ -167,9 +279,14 @@ app.post('/tasks', async (c) => {
   }
   if (!body.payload) return c.json({ error: 'payload is required' }, 400)
 
+  if (body.workload === 'swarm-inference') {
+    const swarmError = validateSwarmPayload(body.payload)
+    if (swarmError) return c.json({ error: swarmError }, 400)
+  }
+
   let timeoutMs = body.timeoutMs
   if (timeoutMs === undefined || timeoutMs === null) {
-    timeoutMs = DEFAULT_TIMEOUT_MS
+    timeoutMs = defaultTimeoutFor(body.workload as WorkloadType)
   } else if (
     typeof timeoutMs !== 'number' ||
     !Number.isFinite(timeoutMs) ||
@@ -184,7 +301,7 @@ app.post('/tasks', async (c) => {
     if (typeof body.callbackUrl !== 'string') {
       return c.json({ error: 'callbackUrl must be a string' }, 400)
     }
-    callbackUrl = validateCallbackUrl(body.callbackUrl)
+    callbackUrl = validateCallbackUrl(body.callbackUrl) ?? undefined
     if (!callbackUrl) {
       return c.json({ error: 'callbackUrl is not allowed (HTTPS required, internal addresses blocked)' }, 400)
     }

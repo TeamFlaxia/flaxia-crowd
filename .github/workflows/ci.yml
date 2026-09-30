@@ -29,6 +29,11 @@ jobs:
         # @flaxia/sdk, so its dist/ must exist before their tests run.
         run: npm run build --workspace=packages/sdk
 
+      - name: Type check
+        # `npm test` only runs the suites, so without this step type errors in
+        # packages that do not emit during their build (worker) are never seen.
+        run: npm run typecheck
+
       - name: Run tests
         run: npm test --workspaces --if-present
 

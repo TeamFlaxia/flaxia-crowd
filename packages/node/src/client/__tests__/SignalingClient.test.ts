@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initFlaxiaNode } from '../SignalingClient';
+import { encodeSwarmEnvelope } from '@flaxia/sdk';
+
+// Swarm capability advertisement is driven by the WebGPU probe; mock it so
+// tests never touch a real adapter.
+const { probeWebGpuMock } = vi.hoisted(() => ({ probeWebGpuMock: vi.fn() }));
+vi.mock('../../executor/webgpuProbe', () => ({ probeWebGpu: probeWebGpuMock }));
 
 // Deterministic capability probe so obtainToken() never actually tries to
 // allocate gigabytes of RAM in the test runner. This file simulates a capable
@@ -29,6 +35,7 @@ describe('SignalingClient', () => {
     document.body.innerHTML = '';
     localStorage.clear();
     vi.restoreAllMocks();
+    probeWebGpuMock.mockClear();
     vi.useRealTimers();
     // Reset node init idempotency flags and any leaked Worker global between tests.
     delete (window as any).__flaxia_node_init_started;
@@ -88,6 +95,79 @@ describe('SignalingClient', () => {
       wasmMemoryBytes: 4 * 1024 ** 3,
       deviceMemory: null, // jsdom / mobile WebViews do not expose navigator.deviceMemory
     });
+  });
+
+  it('advertises swarm-inference with WebGPU details when the host opts in', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    probeWebGpuMock.mockResolvedValue({
+      webgpu: true,
+      gpuArchitecture: 'apple m1',
+      maxStorageBufferBindingSize: 134217728,
+    });
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['ai-inference', 'swarm-inference'],
+      allowModelDownload: true,
+    });
+    await flush();
+    await flush();
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.capabilities).toEqual(['ai-inference', 'swarm-inference']);
+    expect(body.swarm).toEqual({
+      webgpu: true,
+      gpuArchitecture: 'apple m1',
+      maxStorageBufferBindingSize: 134217728,
+    });
+  });
+
+  it('drops swarm-inference when the device has no WebGPU adapter', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    probeWebGpuMock.mockResolvedValue({ webgpu: false });
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['ai-inference', 'swarm-inference'],
+      allowModelDownload: true,
+    });
+    await flush();
+    await flush();
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.capabilities).toEqual(['ai-inference']);
+    expect(body.swarm).toBeUndefined();
+  });
+
+  it('never probes WebGPU without the model-download opt-in', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['ai-inference', 'swarm-inference'],
+    });
+    await flush();
+    await flush();
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.capabilities).toEqual(['ai-inference']);
+    expect(body.swarm).toBeUndefined();
+    expect(probeWebGpuMock).not.toHaveBeenCalled();
   });
 
   it('should create consent container with correct id', () => {
@@ -388,5 +468,139 @@ describe('SignalingClient', () => {
     expect(controller.getConsentState()).toBe('denied');
     expect(controller.isRunning()).toBe(false);
     expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
+  });
+
+  /**
+   * Boot a node against a fake socket and worker, and expose the hooks a test
+   * needs to feed coordinator messages in and worker reports back.
+   */
+  async function bootNode() {
+    const send = vi.fn();
+    let wsInstance: {
+      close: () => void;
+      send: typeof send;
+      onmessage: ((e: MessageEvent) => void) | null;
+      readyState?: number;
+    };
+    const MockWebSocket = vi.fn().mockImplementation(function () {
+      wsInstance = { close: vi.fn(), send, onmessage: null, readyState: 1 };
+      return wsInstance;
+    });
+    globalThis.WebSocket = MockWebSocket as any;
+    (globalThis.WebSocket as any).OPEN = 1;
+
+    const postMessage = vi.fn();
+    let workerHandler: ((event: { data: unknown }) => void) | undefined;
+    class MockWorker {
+      postMessage = postMessage;
+      terminate = vi.fn();
+      addEventListener = vi.fn((_event: string, handler: (event: { data: unknown }) => void) => {
+        workerHandler = handler;
+      });
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    await flush();
+    await flush();
+
+    const onmessage = wsInstance!.onmessage as (e: MessageEvent) => void;
+    return {
+      onmessage,
+      postMessage,
+      coordinator: (message: Record<string, unknown>) => onmessage({ data: JSON.stringify(message) } as MessageEvent),
+      workerReports: (id: string, type: string, error: string) =>
+        workerHandler!({ data: { id, type, error } }),
+      sent: () =>
+        send.mock.calls
+          .map(([m]) => JSON.parse(m as string))
+          .filter((m: Record<string, unknown>) => m.type !== 'pong'),
+    };
+  }
+
+  it('stops an aborted task locally and does not report its failure back', async () => {
+    const { coordinator, postMessage, workerReports, sent } = await bootNode();
+
+    coordinator({
+      type: 'task',
+      taskId: 'task-abort-1',
+      workload: 'ai-inference',
+      payload: { task: 'text-generation', model: 'm', input: 'hi' },
+    });
+    await flush();
+
+    // The coordinator settled the task elsewhere and tells us to stop.
+    coordinator({ type: 'abort', taskId: 'task-abort-1', error: 'peer failed' });
+    await flush();
+    expect(postMessage).toHaveBeenCalledWith({ id: 'task-abort-1', type: 'abort', reason: 'peer failed' });
+
+    // The worker obeys and reports the abort as an error. The coordinator
+    // already knows the task is over — and may have requeued it for a retry —
+    // so echoing this back would race that attempt.
+    workerReports('task-abort-1', 'error', 'peer failed');
+    await flush();
+    await flush();
+
+    expect(sent().filter((m) => m.type === 'error')).toHaveLength(0);
+  });
+
+  it('still reports a task failure when the task was not aborted', async () => {
+    const { coordinator, workerReports, sent } = await bootNode();
+
+    coordinator({
+      type: 'task',
+      taskId: 'task-err-1',
+      workload: 'ai-inference',
+      payload: { task: 'text-generation', model: 'm', input: 'hi' },
+    });
+    await flush();
+
+    workerReports('task-err-1', 'error', 'boom');
+    await flush();
+    await flush();
+
+    expect(sent()).toContainEqual(
+      expect.objectContaining({ type: 'error', taskId: 'task-err-1', error: 'boom' }),
+    );
+  });
+
+  it('queues a fresh session behind an abort and ignores the retired attempt', async () => {
+    const { coordinator, postMessage, workerReports, onmessage, sent } = await bootNode();
+    const initial = { type: 'swarm-init', taskId: 'swarm-task', sessionId: 'old', model: 'm', members: [] };
+    coordinator(initial);
+    coordinator({ type: 'abort', taskId: 'swarm-task', sessionId: 'old', error: 'reconnect' });
+    coordinator({ ...initial, sessionId: 'new' });
+    expect(postMessage.mock.calls.filter(([m]) => m.workload)).toHaveLength(1);
+    expect(postMessage).toHaveBeenCalledWith({ id: 'old', type: 'abort', reason: 'reconnect' });
+
+    workerReports('old', 'error', 'reconnect');
+    await flush();
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 'new', workload: 'swarm-inference' }));
+    expect(sent().some(m => m.type === 'error')).toBe(false);
+    postMessage.mockClear();
+    coordinator({ type: 'swarm-start', taskId: 'swarm-task', sessionId: 'old' });
+    coordinator({ type: 'abort', taskId: 'swarm-task', sessionId: 'old', error: 'late' });
+    coordinator({ ...initial, type: 'swarm-slice' });
+    onmessage({ data: encodeSwarmEnvelope('old', new ArrayBuffer(16)) } as MessageEvent);
+    expect(postMessage).not.toHaveBeenCalled();
+
+    coordinator({ type: 'swarm-start', taskId: 'swarm-task', sessionId: 'new' });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'new', type: 'swarm-control', message: expect.objectContaining({ sessionId: 'new', taskId: 'swarm-task' }),
+    }), []);
+    workerReports('new', 'done', '');
+    await flush();
+    expect(sent()).toContainEqual(expect.objectContaining({ type: 'result', taskId: 'swarm-task', sessionId: 'new' }));
   });
 });

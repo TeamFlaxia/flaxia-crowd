@@ -1,4 +1,4 @@
-import type { WorkloadType } from '@flaxia/sdk';
+import type { WorkloadType, SwarmInitMessage, SwarmSliceMessage } from '@flaxia/sdk';
 import { HEAVY_WORKLOADS } from '@flaxia/sdk';
 import { CpuThrottle } from '../executor/throttle';
 import {
@@ -6,8 +6,26 @@ import {
   hasEnoughWasmMemoryForHeavy,
   probeMaxWasmMemoryBytes,
 } from '../executor/memoryProbe';
+import { SwarmController } from '../swarm/controller';
+import { createSwarmRuntime } from '../swarm/runtime';
+import type { SwarmControlMessage } from '../swarm/messages';
 
 let throttle: CpuThrottle | null = null;
+
+// The active swarm session, if any. One task at a time, so a single slot is
+// enough; control messages and frames from the main thread route here.
+let activeSwarm: SwarmController | null = null;
+let activeSwarmTaskId: string | null = null;
+/** The task this worker is executing right now, if any (tasks are serialized). */
+let activeTaskId: string | null = null;
+
+/**
+ * Tasks the coordinator told us to stop while they were still running. Only
+ * streaming workloads can act on it (their token callback throws, ending the
+ * generation); the rest run to completion and their result is discarded, which
+ * is why the pool releases the slot only on the worker's own done/error.
+ */
+const cancelRequested = new Map<string, string>();
 
 const IDLE_EVICT_MS = 60_000;
 
@@ -84,9 +102,65 @@ async function runWorkload(
   }
 }
 
+/** Start a swarm session and resolve when it finishes or fails. */
+function startSwarmTask(id: string, initial: SwarmInitMessage | SwarmSliceMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const controller = new SwarmController({
+      initial,
+      runtime: createSwarmRuntime(),
+      sendControl: (message) => (self as any).postMessage({ id, type: 'swarm-message', message }),
+      sendFrame: (frame) => (self as any).postMessage({ id, type: 'swarm-frame', frame }, [frame]),
+      emitToken: (token) => (self as any).postMessage({ id, type: 'token', token }),
+      onDone: (result) => {
+        if (activeSwarm === controller) {
+          activeSwarm = null;
+          activeSwarmTaskId = null;
+        }
+        resolve(result);
+      },
+      onError: (error) => {
+        if (activeSwarm === controller) {
+          activeSwarm = null;
+          activeSwarmTaskId = null;
+        }
+        reject(new Error(error));
+      },
+    });
+    activeSwarm = controller;
+    activeSwarmTaskId = id;
+    void controller.start();
+  });
+}
+
 self.onmessage = async (e: MessageEvent) => {
-  const { id, workload, payload, config } = e.data;
+  const data = e.data;
+
+  if (data?.type === 'swarm-control') {
+    void activeSwarm?.handleControl(data.message as SwarmControlMessage);
+    return;
+  }
+  if (data?.type === 'swarm-frame') {
+    activeSwarm?.handleFrame(data.frame as ArrayBuffer);
+    return;
+  }
+  if (data?.type === 'abort') {
+    const id = data.id as string;
+    const reason = typeof data.reason === 'string' && data.reason ? data.reason : 'aborted by the coordinator';
+    if (activeSwarm && activeSwarmTaskId === id) {
+      // Settling the controller posts the error this pool needs to release the
+      // slot; nothing waits on this message's reply.
+      activeSwarm.abort(reason);
+    } else if (activeTaskId === id) {
+      // Only a task we are actually running can be cancelled; an abort that
+      // races its completion would otherwise leave an entry behind forever.
+      cancelRequested.set(id, reason);
+    }
+    return;
+  }
+
+  const { id, workload, payload, config } = data;
   const taskStartedAt = performance.now();
+  activeTaskId = id;
 
   try {
     if (!throttle) {
@@ -119,15 +193,23 @@ self.onmessage = async (e: MessageEvent) => {
     const taskStart = performance.now();
     try {
       const emitToken = (token: string) => {
+        // Aborted mid-generation: throw so the streaming loop unwinds instead
+        // of spending the rest of the task budget on a result nobody wants.
+        const cancelled = cancelRequested.get(id);
+        if (cancelled !== undefined) throw new Error(cancelled);
         self.postMessage({ id, type: 'token', token });
       };
-      const result = await runWorkload(workload as WorkloadType, payload, emitToken);
+      const result = workload === 'swarm-inference'
+        ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage)
+        : await runWorkload(workload as WorkloadType, payload, emitToken);
 
       self.postMessage({ id, type: 'done', result });
       console.log(
         `[flaxia-node:worker] task done id=${id} workload=${workload} durationMs=${Math.round(performance.now() - taskStartedAt)}`,
       );
     } finally {
+      activeTaskId = null;
+      cancelRequested.delete(id);
       clearInterval(heartbeat);
       throttle.markTaskComplete(performance.now() - taskStart);
       armIdleEviction();
@@ -135,6 +217,7 @@ self.onmessage = async (e: MessageEvent) => {
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     console.error(`[flaxia-node:worker] task error id=${id} workload=${workload} error=${error}`);
+    if (activeTaskId === id) activeTaskId = null;
     self.postMessage({ id, type: 'error', error });
   }
 };

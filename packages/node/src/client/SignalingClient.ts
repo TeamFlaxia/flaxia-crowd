@@ -11,8 +11,10 @@ import {
 } from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
+import { probeWebGpu } from '../executor/webgpuProbe';
+import { decodeSwarmEnvelope, encodeSwarmEnvelope } from '@flaxia/sdk';
 
-import type { ConsentState, FlaxiaNodeController, NodeConfig, WorkloadType } from '@flaxia/sdk';
+import type { ConsentState, FlaxiaNodeController, NodeConfig, SwarmNodeCapabilities, WorkloadType } from '@flaxia/sdk';
 
 const log = (...args: unknown[]) => console.log('[flaxia-node]', ...args);
 const logError = (...args: unknown[]) => console.error('[flaxia-node]', ...args);
@@ -42,6 +44,17 @@ class SignalingClient {
   private suspended = false;
   private visibilityHandler: (() => void) | null = null;
   private inflightTasks = new Set<string>();
+  /** Tasks the coordinator told us to stop; their failure must not be echoed back. */
+  private abortedTasks = new Set<string>();
+  private swarmSessions = new Map<string, string>();
+  private retiredSwarmSessions = new Set<string>();
+
+  private retireSwarmSession(sessionId: string) {
+    this.retiredSwarmSessions.add(sessionId);
+    if (this.retiredSwarmSessions.size > 64) {
+      this.retiredSwarmSessions.delete(this.retiredSwarmSessions.values().next().value!);
+    }
+  }
 
   constructor(
     private config: NodeConfig,
@@ -76,6 +89,7 @@ class SignalingClient {
     wsUrl.searchParams.set('token', token.token);
 
     const ws = new WebSocket(wsUrl.toString());
+    ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
     ws.onopen = () => {
@@ -84,6 +98,17 @@ class SignalingClient {
     };
 
     ws.onmessage = async (event) => {
+      if (this.ws !== ws) return;
+      // Binary frames are swarm hidden states; hand them to the running worker
+      // after checking their session envelope.
+      if (typeof event.data !== 'string') {
+        const envelope = decodeSwarmEnvelope(event.data as ArrayBuffer);
+        if (envelope && [...this.swarmSessions.values()].includes(envelope.sessionId)) {
+          this.workerPool.sendFrame(envelope.frame);
+        }
+        return;
+      }
+
       let data: Record<string, unknown>;
       try {
         data = JSON.parse(event.data as string);
@@ -102,6 +127,10 @@ class SignalingClient {
           await this.handleTask(msg);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
+          if (this.abortedTasks.delete(msg.taskId)) {
+            log(`task stopped on coordinator abort taskId=${msg.taskId} error=${message}`);
+            return;
+          }
           logError(`task failed taskId=${msg.taskId} workload=${msg.workload} error=${message}`);
           this.send({
             type: 'error',
@@ -109,6 +138,39 @@ class SignalingClient {
             error: message,
           });
         }
+        return;
+      }
+      if (data.type === 'swarm-init' || data.type === 'swarm-slice') {
+        const taskId = String(data.taskId ?? '');
+        if (!taskId) return;
+        if (typeof data.sessionId !== 'string' || this.retiredSwarmSessions.has(data.sessionId)) return;
+        // The host starts on swarm-init and a worker on its first swarm-slice;
+        // a host's later slice just reaches the already-running worker.
+        if (this.swarmSessions.get(taskId) === data.sessionId) {
+          this.workerPool.sendControl(data, data.sessionId);
+          return;
+        }
+        void this.startSwarm(taskId, data);
+        return;
+      }
+      if (data.type === 'swarm-start') {
+        if (this.swarmSessions.get(String(data.taskId)) === data.sessionId) {
+          this.workerPool.sendControl(data, data.sessionId as string);
+        }
+        return;
+      }
+      if (data.type === 'swarm-error') {
+        // The coordinator rejected the session: fail it locally too, so this
+        // node releases its slot instead of waiting out the task timeout.
+        const taskId = String(data.taskId ?? '');
+        if (taskId && this.swarmSessions.get(taskId) === data.sessionId) {
+          this.workerPool.sendControl(data, data.sessionId as string);
+        }
+        return;
+      }
+      if (data.type === 'abort') {
+        this.handleAbort(data);
+        return;
       }
     };
 
@@ -120,6 +182,25 @@ class SignalingClient {
       log(`signal disconnected; scheduling reconnect attempt=${this.reconnectAttempts + 1}`);
       this.scheduleReconnect();
     };
+  }
+
+  /**
+   * The coordinator settled this task (timeout, a peer failed, the plan was
+   * rejected): stop it now instead of waiting out our own task timeout. The
+   * failure is not reported back — the coordinator may already have requeued
+   * the task for a retry, and an error echo would race that attempt.
+   */
+  private handleAbort(data: Record<string, unknown>) {
+    const taskId = String(data.taskId ?? '');
+    if (!taskId || !this.inflightTasks.has(taskId)) return;
+    const error =
+      typeof data.error === 'string' && data.error ? data.error : 'aborted by the coordinator';
+    const sessionId = this.swarmSessions.get(taskId);
+    if (sessionId && sessionId !== data.sessionId) return;
+    const executionId = sessionId ?? taskId;
+    if (sessionId) this.retireSwarmSession(sessionId);
+    if (this.workerPool.abort(executionId, error)) this.abortedTasks.add(executionId);
+    log(`task abort received taskId=${taskId} error=${error}`);
   }
 
   private scheduleReconnect() {
@@ -196,9 +277,25 @@ class SignalingClient {
       // routes every task elsewhere.
       const wasmMemoryBytes = probeMaxWasmMemoryBytes();
       const capable = wasmMemoryBytes >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
-      const capabilities = capable ? (this.config.capabilities ?? ['ai-inference', 'image-process']) : [];
+      const requested = this.config.capabilities ?? ['ai-inference', 'image-process'];
+      let capabilities = capable ? [...requested] : [];
+
+      // Swarm inference additionally needs WebGPU and an explicit opt-in to
+      // download multi-GB layer weights. Probe only when the host asked for it,
+      // and drop the capability when the device cannot actually serve it.
+      let swarm: SwarmNodeCapabilities | undefined;
+      if (capable && requested.includes('swarm-inference') && this.config.allowModelDownload === true) {
+        swarm = await probeWebGpu();
+        if (!swarm.webgpu) {
+          capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
+          swarm = undefined;
+        }
+      } else {
+        capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
+      }
+
       log(
-        `register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)}`,
+        `register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)} webgpu=${swarm?.webgpu ?? false}`,
       );
 
       const base = this.config.orchestratorUrl.replace(/\/+$/, '');
@@ -219,6 +316,7 @@ class SignalingClient {
             typeof (navigator as Navigator & { deviceMemory?: number }).deviceMemory === 'number'
               ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory
               : null,
+          swarm,
         }),
       });
       if (!response.ok) {
@@ -246,6 +344,64 @@ class SignalingClient {
   private send(message: Record<string, unknown>) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+    }
+  }
+
+  private sendBinary(frame: ArrayBuffer) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(frame);
+    }
+  }
+
+  /**
+   * Start a swarm session in the worker. The first control message is the task
+   * payload; later control messages and binary frames are forwarded into the
+   * running worker. The host's final result completes the task.
+   */
+  private async startSwarm(taskId: string, initial: Record<string, unknown>) {
+    const sessionId = initial.sessionId;
+    if (typeof sessionId !== 'string' || !sessionId) return;
+    if (this.swarmSessions.get(taskId) === sessionId) return;
+    this.swarmSessions.set(taskId, sessionId);
+    this.inflightTasks.add(taskId);
+    const startedAt = performance.now();
+    const timeoutMs = typeof initial.timeoutMs === 'number' ? initial.timeoutMs + 30000 : undefined;
+
+    try {
+      const result = await this.workerPool.run(
+        sessionId,
+        'swarm-inference',
+        initial,
+        timeoutMs,
+        (token: string) => {
+          this.send({ type: 'progress', taskId, sessionId, token });
+        },
+        { maxCpuLoad: this.config.maxCpuLoad },
+        {
+          onFrame: (frame) => this.sendBinary(encodeSwarmEnvelope(sessionId, frame)),
+          onMessage: (message) => this.send(message as Record<string, unknown>),
+        },
+      );
+      if (!this.abortedTasks.delete(sessionId)) {
+        this.send({ type: 'result', taskId, sessionId, payload: result });
+      }
+      log(
+        `swarm result sent taskId=${taskId} durationMs=${Math.round(performance.now() - startedAt)}`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.abortedTasks.delete(sessionId)) {
+        log(`swarm stopped on coordinator abort taskId=${taskId} error=${message}`);
+      } else {
+        logError(`swarm failed taskId=${taskId} error=${message}`);
+        this.send({ type: 'error', taskId, sessionId, error: message });
+      }
+    } finally {
+      this.retireSwarmSession(sessionId);
+      if (this.swarmSessions.get(taskId) === sessionId) {
+        this.swarmSessions.delete(taskId);
+        this.inflightTasks.delete(taskId);
+      }
     }
   }
 

@@ -24,24 +24,29 @@ describe('workloads', () => {
     expect(WORKLOAD_TYPES).toContain('nudenet');
     expect(WORKLOAD_TYPES).toContain('vector-embed');
     expect(WORKLOAD_TYPES).toContain('moe-inference');
+    expect(WORKLOAD_TYPES).toContain('swarm-inference');
     expect(new Set(WORKLOAD_TYPES).size).toBe(WORKLOAD_TYPES.length);
   });
 
   it('narrows untrusted values', () => {
     expect(isWorkloadType('nudenet')).toBe(true);
     expect(isWorkloadType('moe-inference')).toBe(true);
+    expect(isWorkloadType('swarm-inference')).toBe(true);
     expect(isWorkloadType('not-a-workload')).toBe(false);
     expect(isWorkloadType(42)).toBe(false);
   });
 
   it('only treats implemented workloads as routable', () => {
     expect(ROUTABLE_WORKLOADS).not.toContain('moe-inference');
+    expect(ROUTABLE_WORKLOADS).toContain('swarm-inference');
     expect(isRoutableWorkload('nudenet')).toBe(true);
     expect(isRoutableWorkload('moe-inference')).toBe(false);
+    expect(isRoutableWorkload('swarm-inference')).toBe(true);
   });
 
   it('classifies heavy workloads', () => {
     expect(isHeavyWorkload('nudenet')).toBe(true);
+    expect(isHeavyWorkload('swarm-inference')).toBe(true);
     expect(isHeavyWorkload('vector-store')).toBe(false);
     expect(HEAVY_WORKLOADS.has('moe-inference')).toBe(false);
   });
@@ -51,6 +56,10 @@ describe('workloads', () => {
       expect(defaultTimeoutFor(workload)).toBe(DEFAULT_WORKLOAD_TIMEOUT_MS[workload]);
       expect(defaultTimeoutFor(workload)).toBeGreaterThan(0);
     }
+  });
+
+  it('gives swarm inference room for a cold model download', () => {
+    expect(defaultTimeoutFor('swarm-inference')).toBeGreaterThan(defaultTimeoutFor('ai-inference'));
   });
 });
 

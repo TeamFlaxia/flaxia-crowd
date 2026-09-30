@@ -17,6 +17,7 @@
   "scripts": {
     "build": "rm -f tsconfig.tsbuildinfo && vite build && tsc -b",
     "dev": "vite",
+    "typecheck": "tsc --noEmit",
     "test": "vitest"
   },
   "dependencies": {

@@ -1,13 +1,29 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../index";
-import type { TaskRecord, WorkloadType } from "@flaxia/sdk";
-import { HEAVY_WORKLOADS } from "@flaxia/sdk";
+import type {
+  SwarmChainNode,
+  SwarmInferencePayload,
+  SwarmInitMessage,
+  SwarmSessionPlan,
+  TaskRecord,
+  WarmModelRange,
+  WorkloadType,
+} from "@flaxia/sdk";
+import {
+  HEAVY_WORKLOADS,
+  isValidSwarmChain,
+  swarmChainIndex,
+  swarmNextHopIndex,
+  decodeSwarmEnvelope,
+} from "@flaxia/sdk";
 import { signPayload } from "../security";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_RETRIES = 3;
 export const STALE_NODE_MS = 60000;
 export const ALARM_INTERVAL_MS = 30000;
+const DEFAULT_MIN_SWARM_NODES = 1;
+const DEFAULT_MAX_SWARM_NODES = 4;
 
 interface NodeRecord {
   id: string;
@@ -19,6 +35,25 @@ interface NodeRecord {
   currentTaskId?: string;
   /** True when the device is a mobile WebView / has < 4 GB RAM. */
   lowMemory?: boolean;
+  /** Measured WASM memory the device can commit; used as swarm split capacity. */
+  wasmMemoryBytes?: number;
+  /** WebGPU adapter is available; required for `swarm-inference`. */
+  webgpu?: boolean;
+  gpuArchitecture?: string;
+  maxStorageBufferBindingSize?: number;
+  /** Model layer spans already cached on the node. */
+  warmModels?: WarmModelRange[];
+}
+
+/** Coordinator-side state for one swarm session, keyed by task id. */
+interface SwarmRecord {
+  sessionId: string;
+  taskId: string;
+  hostNodeId: string;
+  members: Array<{ nodeId: string; capacity: number }>;
+  ready: string[];
+  plan?: SwarmSessionPlan;
+  started?: boolean;
 }
 
 interface RateEntry {
@@ -71,21 +106,44 @@ export class Coordinator extends DurableObject<Env> {
     const nodeId = url.searchParams.get("nodeId");
     if (!nodeId) return new Response("nodeId is required", { status: 400 });
     const capabilities = (url.searchParams.get("capabilities") || "").split(",").filter(Boolean) as WorkloadType[];
+    const webgpu = url.searchParams.get("webgpu") === "true";
+    const gpuArchitecture = url.searchParams.get("gpu") || undefined;
+    const wasmRaw = url.searchParams.get("wasm");
+    const wasmMemoryBytes = wasmRaw !== null && Number.isFinite(Number(wasmRaw)) ? Number(wasmRaw) : undefined;
+    const maxBufferRaw = url.searchParams.get("maxBuffer");
+    const maxStorageBufferBindingSize = maxBufferRaw !== null && Number.isFinite(Number(maxBufferRaw))
+      ? Number(maxBufferRaw)
+      : undefined;
+    let warmModels: WarmModelRange[] | undefined;
+    const warmRaw = url.searchParams.get("warmModels");
+    if (warmRaw) {
+      try {
+        const parsed = JSON.parse(warmRaw);
+        if (Array.isArray(parsed) && parsed.length > 0) warmModels = parsed as WarmModelRange[];
+      } catch {}
+    }
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    // If the node reconnects while a task is still in flight, keep the task
+    // If the node reconnects while a single-node task is still in flight, keep the task
     // assigned to this node and deliver it on the new socket. Failing and
     // requeueing here would redeliver the same task on every reconnect
     // (mobile / tab-switch flapping) and consume retry budget, so a single
     // task could be dispatched to the node many times in a short window.
     const existing = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     let resumeTask: TaskRecord | undefined;
+    let restartSwarmTaskId: string | undefined;
     if (existing?.currentTaskId) {
       const inFlight = await this.ctx.storage.get<TaskRecord>(`task:${existing.currentTaskId}`);
-      if (inFlight && inFlight.status === "processing" && inFlight.assignedNodeId === nodeId) {
-        resumeTask = inFlight;
+      if (inFlight && inFlight.status === "processing") {
+        const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${inFlight.id}`);
+        if (swarm?.members.some(member => member.nodeId === nodeId)) {
+          restartSwarmTaskId = inFlight.id;
+          resumeTask = inFlight;
+        } else if (inFlight.assignedNodeId === nodeId) {
+          resumeTask = inFlight;
+        }
       }
     }
 
@@ -105,6 +163,11 @@ export class Coordinator extends DurableObject<Env> {
       lastPongAt: Date.now(),
       currentTaskId: resumeTask?.id,
       lowMemory: url.searchParams.get("lowMemory") === "true",
+      webgpu,
+      gpuArchitecture,
+      maxStorageBufferBindingSize,
+      warmModels,
+      wasmMemoryBytes,
     };
 
     await this.ctx.storage.put(`node:${nodeId}`, node);
@@ -119,7 +182,11 @@ export class Coordinator extends DurableObject<Env> {
 
     // Continue the in-flight task on the new socket so the node can finish it
     // instead of the coordinator requeueing a duplicate.
-    if (resumeTask) {
+    if (restartSwarmTaskId) {
+      // A reconnect may have lost frames or worker state. Abort the entire
+      // attempt on the replacement socket before issuing a fresh session.
+      await this.failTask(restartSwarmTaskId, "Swarm member reconnected");
+    } else if (resumeTask) {
       if (!(await this.deliverTask(resumeTask, server))) {
         await this.failTask(resumeTask.id, "Failed to deliver task to node");
       }
@@ -135,6 +202,13 @@ export class Coordinator extends DurableObject<Env> {
     const nodeId = tags[0];
 
     if (!nodeId || nodeId.startsWith("client:")) return;
+
+    // A binary frame is a swarm hidden state: route it to the next chain hop
+    // without decoding the payload.
+    if (message instanceof ArrayBuffer) {
+      await this.relaySwarmFrame(nodeId, message);
+      return;
+    }
 
     let data: Record<string, unknown>;
     try {
@@ -155,14 +229,32 @@ export class Coordinator extends DurableObject<Env> {
         return;
       }
 
+      if (data.type === "swarm-plan") {
+        await this.handleSwarmPlan(nodeId, data);
+        return;
+      }
+
+      if (data.type === "swarm-ready") {
+        await this.handleSwarmReady(nodeId, data.sessionId);
+        return;
+      }
+
       if (data.type === "result" || data.type === "error") {
         const isError = data.type === "error";
         const taskId = typeof data.taskId === "string" ? data.taskId : "";
+        const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+        if (data.sessionId !== undefined && !swarm) return;
+        if (swarm && (data.sessionId !== swarm.sessionId ||
+          !swarm.members.some(member => member.nodeId === nodeId))) return;
 
         if (isError) {
           const error = typeof data.error === "string" ? data.error : "Node error";
-          await this.failTask(taskId, error, nodeId);
+          // A swarm member may fail at any position, so do not gate the failure
+          // on the (host) assignedNodeId.
+          await this.failTask(taskId, error, swarm ? undefined : nodeId);
         } else {
+          // Worker results are ignored: completeTask only accepts the node that
+          // matches assignedNodeId (the host). The host result is authoritative.
           await this.completeTask(taskId, data.payload, nodeId);
         }
 
@@ -173,6 +265,8 @@ export class Coordinator extends DurableObject<Env> {
       if (data.type === "progress") {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (!node || node.currentTaskId !== data.taskId) return;
+        const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${node.currentTaskId}`);
+        if (swarm && (data.sessionId !== swarm.sessionId || swarm.hostNodeId !== nodeId)) return;
         if (typeof data.token !== "string") return;
 
         const subs = this.ctx.getWebSockets(`client:${data.taskId}`);
@@ -183,6 +277,127 @@ export class Coordinator extends DurableObject<Env> {
         return;
       }
     } catch {}
+  }
+
+  // --- Swarm session relay ---
+
+  private sendToNode(nodeId: string, message: unknown, binary?: ArrayBuffer) {
+    for (const sock of this.ctx.getWebSockets(nodeId)) {
+      try {
+        sock.send(binary ?? JSON.stringify(message));
+      } catch {}
+    }
+  }
+
+  private async relaySwarmFrame(nodeId: string, frame: ArrayBuffer) {
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    const taskId = node?.currentTaskId;
+    if (!taskId) return;
+    const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
+    const plan = task?.swarmSession;
+    if (!plan) return;
+    const envelope = decodeSwarmEnvelope(frame);
+    if (!envelope || envelope.sessionId !== plan.sessionId) return;
+
+    const index = swarmChainIndex(plan, nodeId);
+    if (index < 0) return;
+    const next = plan.chain[swarmNextHopIndex(plan.chain.length, index)];
+    if (!next) return;
+    this.sendToNode(next.nodeId, null, frame);
+  }
+
+  /**
+   * A plan the coordinator cannot accept must be reported back: silently
+   * dropping it leaves every member `busy` and the session wedged until the
+   * task timeout. Tell the host (which is running the session) and fail the
+   * task so its members are released and the failure reaches the caller.
+   */
+  private async rejectSwarmPlan(taskId: string, sessionId: string, nodeId: string, reason: string) {
+    this.sendToNode(nodeId, { type: "swarm-error", sessionId, taskId, error: reason });
+    // The plan is derived from the model metadata, so the same host would
+    // produce the same broken chain again: fail for good rather than burning
+    // retries (and leave no window for a retry to start a second session).
+    await this.failTask(taskId, reason, undefined, true, true);
+    await this.tryAssignAll();
+  }
+
+  private async handleSwarmPlan(nodeId: string, data: Record<string, unknown>) {
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    const taskId = node?.currentTaskId;
+    if (!taskId) return;
+
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+    if (!swarm) return;
+    if (data.sessionId !== swarm.sessionId) return;
+    if (swarm.hostNodeId !== nodeId) {
+      await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan was sent by a node that is not the host");
+      return;
+    }
+    if (swarm.plan) return;
+
+    const chain = data.chain as SwarmChainNode[] | undefined;
+    if (!isValidSwarmChain(chain)) {
+      await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan is not a valid contiguous layer chain");
+      return;
+    }
+
+    // The host is authoritative for placement, but every member must appear.
+    const plannedIds = new Set(chain.map((c) => c.nodeId));
+    if (plannedIds.size !== swarm.members.length || !swarm.members.every((m) => plannedIds.has(m.nodeId))) {
+      await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan does not cover every member");
+      return;
+    }
+
+    const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
+    if (!task) return;
+
+    const layers = chain[chain.length - 1].slice.end;
+    const plan: SwarmSessionPlan = {
+      sessionId: swarm.sessionId,
+      taskId,
+      model: (task.payload as SwarmInferencePayload)?.model ?? "",
+      layers,
+      chain,
+    };
+    task.swarmSession = plan;
+    await this.ctx.storage.put(`task:${taskId}`, task);
+
+    swarm.plan = plan;
+    await this.ctx.storage.put(`swarm:${taskId}`, swarm);
+
+    for (let i = 0; i < chain.length; i++) {
+      this.sendToNode(chain[i].nodeId, {
+        type: "swarm-slice",
+        sessionId: swarm.sessionId,
+        taskId,
+        model: (task.payload as SwarmInferencePayload)?.model ?? "",
+        timeoutMs: task.timeoutMs,
+        index: i,
+        chainLength: chain.length,
+        role: chain[i].role,
+        slice: chain[i].slice,
+      });
+    }
+  }
+
+  private async handleSwarmReady(nodeId: string, sessionId: unknown) {
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    const taskId = node?.currentTaskId;
+    if (!taskId) return;
+
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+    if (!swarm || !swarm.plan || swarm.started) return;
+    if (sessionId !== swarm.sessionId) return;
+    if (!swarm.members.some((m) => m.nodeId === nodeId)) return;
+
+    if (!swarm.ready.includes(nodeId)) swarm.ready.push(nodeId);
+    if (swarm.ready.length >= swarm.members.length) {
+      swarm.started = true;
+      await this.ctx.storage.put(`swarm:${taskId}`, swarm);
+      this.sendToNode(swarm.hostNodeId, { type: "swarm-start", sessionId: swarm.sessionId, taskId });
+    } else {
+      await this.ctx.storage.put(`swarm:${taskId}`, swarm);
+    }
   }
 
   async webSocketClose(ws: WebSocket) {
@@ -282,9 +497,17 @@ export class Coordinator extends DurableObject<Env> {
     task.status = "done";
     task.result = result;
     task.completedAt = Date.now();
+    // The session is over: drop the chain so `relaySwarmFrame` cannot keep
+    // routing on it (and a retry never inherits a previous attempt's plan).
+    task.swarmSession = undefined;
     await this.ctx.storage.put(`task:${taskId}`, task);
 
-    await this.releaseNode(nodeId);
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+    if (swarm) {
+      await this.releaseSwarmMembers(taskId);
+    } else {
+      await this.releaseNode(nodeId);
+    }
 
     const processing = await this.getProcessing();
     this.processingCache = processing.filter(id => id !== taskId);
@@ -303,12 +526,37 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
-  private async failTask(taskId: string, error: string, expectedNodeId?: string, release = true) {
+  /**
+   * Fail a task. Transient failures (timeout, disconnect) are retried up to
+   * MAX_RETRIES; `permanent` is for protocol violations that would fail the same
+   * way on every attempt, so they are reported to the caller immediately.
+   */
+  private async failTask(taskId: string, error: string, expectedNodeId?: string, release = true, permanent = false) {
     const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
     if (!task || (task.status !== "pending" && task.status !== "processing")) return;
     if (expectedNodeId && task.assignedNodeId && task.assignedNodeId !== expectedNodeId) return;
 
-    if (task.assignedNodeId && release) {
+    // The session ends here either way (retry or failure): a stale chain must
+    // not survive to route a later attempt's frames.
+    task.swarmSession = undefined;
+
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+    // The session ends here either way, so every node still working on it must
+    // be told: without a stop signal a member whose peer failed sits idle until
+    // the task timeout, holding a slot the scheduler is still counting as busy.
+    // The receiver does not echo an error back (see AbortMessage), so a task
+    // requeued for retry below cannot be knocked over by its own members.
+    const running = swarm
+      ? swarm.members.map(member => member.nodeId)
+      : task.assignedNodeId
+        ? [task.assignedNodeId]
+        : [];
+    for (const nodeId of running) {
+      this.sendToNode(nodeId, { type: "abort", taskId, sessionId: swarm?.sessionId, error });
+    }
+    if (swarm) {
+      await this.releaseSwarmMembers(taskId);
+    } else if (task.assignedNodeId && release) {
       await this.releaseNode(task.assignedNodeId);
     }
 
@@ -316,7 +564,7 @@ export class Coordinator extends DurableObject<Env> {
     // Keyed on retryCount (not status) so a task that was already requeued by
     // an earlier failure keeps its remaining retries instead of being
     // permanently failed by a second overlapping failure signal.
-    if (task.retryCount < MAX_RETRIES) {
+    if (!permanent && task.retryCount < MAX_RETRIES) {
       if (task.status === "processing") task.retryCount++;
       task.status = "pending";
       task.assignedNodeId = undefined;
@@ -378,6 +626,18 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
+  private async releaseSwarmMembers(taskId: string) {
+    const record = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+    if (!record) return;
+    for (const member of record.members) {
+      const node = await this.ctx.storage.get<NodeRecord>(`node:${member.nodeId}`);
+      if (node?.currentTaskId === taskId) {
+        await this.releaseNode(member.nodeId);
+      }
+    }
+    await this.ctx.storage.delete(`swarm:${taskId}`);
+  }
+
   private async deliverCallback(url: string, body: Record<string, unknown>) {
     try {
       const payload = JSON.stringify(body);
@@ -429,6 +689,15 @@ export class Coordinator extends DurableObject<Env> {
     for (const taskId of [...pendingIds]) {
       const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
       if (!task || task.status !== "pending") continue;
+
+      if (task.workload === "swarm-inference") {
+        const chosen = await this.tryAssignSwarm(taskId, task, remainingIdle);
+        if (chosen) {
+          remainingIdle = remainingIdle.filter(id => !chosen.includes(id));
+          await this.ctx.storage.put("nodes:idle", remainingIdle);
+        }
+        continue;
+      }
 
       let chosenNode: string | null = null;
       let bestLoad = Infinity;
@@ -489,6 +758,104 @@ export class Coordinator extends DurableObject<Env> {
         await this.failTask(taskId, "Failed to deliver task to node");
       }
     }
+  }
+
+  /**
+   * Reserve a group of WebGPU nodes for a swarm session and hand the host the
+   * member list. Slices are planned by the host (it owns the model metadata);
+   * the coordinator only brokers resources and relays frames.
+   */
+  private async tryAssignSwarm(taskId: string, task: TaskRecord, idle: string[]): Promise<string[] | null> {
+    const payload = task.payload as SwarmInferencePayload;
+    const opts = payload?.swarm ?? {};
+    // `payload` is unvalidated API input: `Math.floor("abc")` is NaN, and NaN
+    // silently defeats both the availability check and `slice(0, ...)`. Anything
+    // that is not a usable count falls back to the default instead of wedging
+    // the scheduler (or the task) on a bad payload.
+    const asCount = (value: unknown, fallback: number): number => {
+      const n = typeof value === "number" ? value : Number(value);
+      return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
+    };
+    const minNodes = asCount(opts.minNodes, DEFAULT_MIN_SWARM_NODES);
+    const maxNodes = Math.max(minNodes, asCount(opts.maxNodes, DEFAULT_MAX_SWARM_NODES));
+
+    const eligible: NodeRecord[] = [];
+    for (const nodeId of idle) {
+      const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+      if (!node || node.status !== "idle") continue;
+      if (!node.capabilities.includes("swarm-inference")) continue;
+      if (!node.webgpu) continue;
+      if (node.lowMemory) continue;
+      if (this.ctx.getWebSockets(nodeId).length === 0) continue;
+      eligible.push(node);
+    }
+    if (eligible.length < minNodes) return null;
+
+    // Warm first, then strongest devices: a node that already holds the model's
+    // byte ranges skips the range download entirely, which dominates the load
+    // time on crowd links. `preferWarm` defaults to true; the capacity ordering
+    // still decides the host within each group (index 0 runs embedding, head,
+    // sampling).
+    const preferWarm = opts.preferWarm !== false;
+    const wantedModel = typeof payload?.model === "string" ? payload.model : "";
+    const isWarm = (n: NodeRecord) =>
+      !!n.warmModels?.some((m) => m.modelId === wantedModel);
+    eligible.sort(
+      (a, b) =>
+        (preferWarm ? Number(isWarm(b)) - Number(isWarm(a)) : 0) ||
+        (b.wasmMemoryBytes ?? b.maxStorageBufferBindingSize ?? 0) -
+          (a.wasmMemoryBytes ?? a.maxStorageBufferBindingSize ?? 0) ||
+        a.connectedAt - b.connectedAt,
+    );
+    const chosen = eligible.slice(0, Math.min(maxNodes, eligible.length));
+    if (chosen.length === 0) return null;
+    const host = chosen[0];
+    const sessionId = crypto.randomUUID();
+    const members = chosen.map((n) => ({
+      nodeId: n.id,
+      capacity: n.wasmMemoryBytes ?? n.maxStorageBufferBindingSize ?? 1,
+    }));
+
+    task.status = "processing";
+    task.assignedNodeId = host.id;
+    task.assignedAt = Date.now();
+    await this.ctx.storage.put(`task:${taskId}`, task);
+
+    this.pendingCache = (await this.getPending()).filter(id => id !== taskId);
+    await this.ctx.storage.put("queue:pending", this.pendingCache);
+    const processing = await this.getProcessing();
+    if (!processing.includes(taskId)) processing.push(taskId);
+    this.processingCache = processing;
+    await this.ctx.storage.put("queue:processing", processing);
+
+    for (const n of chosen) {
+      n.status = "busy";
+      n.currentTaskId = taskId;
+      await this.ctx.storage.put(`node:${n.id}`, n);
+    }
+
+    const record: SwarmRecord = {
+      sessionId,
+      taskId,
+      hostNodeId: host.id,
+      members,
+      ready: [],
+    };
+    await this.ctx.storage.put(`swarm:${taskId}`, record);
+
+    const init: SwarmInitMessage = {
+      type: "swarm-init",
+      sessionId,
+      taskId,
+      model: payload?.model ?? "",
+      timeoutMs: task.timeoutMs,
+      members,
+      prompt: payload?.prompt ?? "",
+      maxNewTokens: payload?.maxNewTokens,
+    };
+    this.sendToNode(host.id, init);
+
+    return chosen.map(n => n.id);
   }
 
   async alarm() {
