@@ -21,6 +21,18 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
 
+      - name: Reject committed live API keys
+        shell: bash
+        run: |
+          if git grep -n -E 'fc_live_[A-Za-z0-9_-]+' -- ':!package-lock.json'; then
+            echo "::error::Live-looking Crowd API key committed to the repository"
+            exit 1
+          fi
+          if git grep -n 'VITE_FLAXIA_API_KEY'; then
+            echo "::error::Crowd API keys must not be exposed through VITE_* variables"
+            exit 1
+          fi
+
       - name: Install dependencies
         run: npm ci
 
