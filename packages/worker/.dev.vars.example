@@ -1,0 +1,3 @@
+# Copy to .dev.vars and replace the placeholders. Never commit .dev.vars.
+API_KEYS=replace-with-a-local-development-key
+NODE_TOKEN_SECRET=replace-with-a-long-random-local-secret
