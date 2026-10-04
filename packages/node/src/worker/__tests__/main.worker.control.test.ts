@@ -114,12 +114,12 @@ describe('main.worker swarm-control validation (#17)', () => {
     }
     expect(handleControl).not.toHaveBeenCalled();
 
-    // A well-formed envelope is forwarded to the active controller.
-    selfObj.onmessage({
-      data: { id: 't-swarm', type: 'swarm-control', message: { type: 'swarm-start', sessionId: 's-1' } },
-    });
+    // A well-formed envelope is forwarded to the active controller. The SDK
+    // contract requires swarm-start to carry the task id too.
+    const start = { type: 'swarm-start', sessionId: 's-1', taskId: 't-1' };
+    selfObj.onmessage({ data: { id: 't-swarm', type: 'swarm-control', message: start } });
     expect(handleControl).toHaveBeenCalledTimes(1);
-    expect(handleControl).toHaveBeenCalledWith({ type: 'swarm-start', sessionId: 's-1' });
+    expect(handleControl).toHaveBeenCalledWith(start);
 
     await settleSwarm(task);
   });
