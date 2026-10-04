@@ -14,7 +14,7 @@
     "dev:text-analyzer": "npm run dev --workspace=packages/text-analyzer",
     "dev:translation": "npm run dev --workspace=packages/translation",
     "spike:swarm": "deno run --unstable-webgpu --allow-read scripts/swarm-spike/run-synth.mjs",
-    "spike:swarm-real": "deno run --unstable-webgpu --allow-read --allow-write --allow-net scripts/swarm-spike/run-real.mjs",
+    "spike:swarm-real": "deno run --unstable-webgpu --allow-read --allow-write --allow-net=huggingface.co,us.aws.cdn.hf.co,cdn-lfs-us-1.hf.co,cas-bridge.xethub.hf.co,127.0.0.1 scripts/swarm-spike/run-real.mjs",
     "spike:real-worker": "node scripts/swarm-spike/check-real-worker.mjs",
     "spike:webgpu-worker": "node scripts/swarm-spike/check-webgpu-worker.mjs"
   },

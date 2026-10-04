@@ -1,12 +1,25 @@
 // Phase 0/1 validation: run the vendored Pooled engine on a REAL GGUF over
 // WebGPU (Deno), solo and split across two engines, and compare token streams.
 //
-//   deno run --unstable-webgpu --allow-read --allow-write --allow-net \
+//   deno run --unstable-webgpu --allow-read --allow-write \
+//     --allow-net=huggingface.co,us.aws.cdn.hf.co,cdn-lfs.huggingface.co,cdn-lfs-us-1.hf.co,cas-bridge.xethub.hf.co,127.0.0.1 \
 //     scripts/swarm-spike/run-real.mjs --tokens 12
 //
 // The GGUF is served from a local HTTP server with Range support, and every
 // tensor is range-fetched — the same streaming loader path the production
 // runtime uses (nothing tensor-sized is ever held in JS).
+//
+// Network allowlist (keep package.json `spike:swarm-real` in sync):
+// - `huggingface.co`      — the `--url` entry point (HTTPS only)
+// - `us.aws.cdn.hf.co`    — current HuggingFace Xet CDN the default model redirects to
+// - `cdn-lfs-us-1.hf.co`, `cas-bridge.xethub.hf.co`
+//                         — HuggingFace LFS/Xet CDN hosts
+// - `127.0.0.1`           — the local Range server this script starts
+// Redirects are followed by `fetch()` and re-checked by Deno per host, so a
+// redirect outside this list fails closed; add the host here and in
+// package.json when HuggingFace moves a model to a different CDN. `--url` is
+// additionally validated against the fixed host allowlist below before
+// anything is downloaded.
 import http from "node:http";
 import fs from "node:fs";
 import { Qwen35Engine } from "../../vendor/pooled/engine/qwen35.js";
@@ -25,15 +38,55 @@ const arg = (k, d) => {
   const i = argv.indexOf("--" + k);
   return i >= 0 ? argv[i + 1] : d;
 };
-const URL_ =
-  arg("url", "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf");
-const TOKENS = +arg("tokens", 12);
-const CACHE = arg("cache", "/tmp/opencode/swarm-real.gguf");
+
+/** HuggingFace hosts a model download may start from. */
+const ALLOWED_MODEL_HOSTS = new Set([
+  "huggingface.co",
+  "us.aws.cdn.hf.co",
+  "cdn-lfs-us-1.hf.co",
+  "cas-bridge.xethub.hf.co",
+]);
+
+const DEFAULT_URL =
+  "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf";
 
 function fail(msg) {
   console.error("REAL SPIKE FAIL:", msg);
   process.exit(1);
 }
+
+/**
+ * Validate `--url` before any download/cache work happens. Only HTTPS URLs on
+ * the fixed host allowlist are accepted; everything else is rejected.
+ */
+function validateModelUrl(raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    fail(`--url is not a valid absolute URL: ${JSON.stringify(raw)}`);
+  }
+  if (url.protocol !== "https:") {
+    fail(`--url must use https:// (got ${url.protocol}//${url.host})`);
+  }
+  if (url.username || url.password) {
+    fail("--url must not embed credentials");
+  }
+  if (url.port && url.port !== "443") {
+    fail(`--url must use the default https port (got :${url.port})`);
+  }
+  if (!ALLOWED_MODEL_HOSTS.has(url.hostname)) {
+    fail(
+      `--url host ${url.hostname} is not allowlisted. Allowed hosts: ` +
+        [...ALLOWED_MODEL_HOSTS].join(", "),
+    );
+  }
+  return url.toString();
+}
+
+const URL_ = validateModelUrl(arg("url", DEFAULT_URL));
+const TOKENS = +arg("tokens", 12);
+const CACHE = arg("cache", "/tmp/opencode/swarm-real.gguf");
 
 async function ensureModel() {
   if (fs.existsSync(CACHE)) return;
