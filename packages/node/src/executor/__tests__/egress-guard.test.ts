@@ -129,7 +129,7 @@ describe('fetchGuarded', () => {
   });
 
   function stubFetch(impl: (url: string, init?: RequestInit) => Promise<Response>) {
-    globalThis.fetch = vi.fn(impl) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(impl as any) as unknown as typeof fetch;
   }
 
   it('rejects a blocked host before any request is made', async () => {
@@ -279,7 +279,7 @@ describe('fetchGuarded', () => {
   });
 
   it('passes an abort signal and manual redirect mode to fetch', async () => {
-    const spy = vi.fn(async () =>
+    const spy = vi.fn(async (_url: string, _init?: RequestInit) =>
       new Response(new Uint8Array([1]), { status: 200, headers: { 'content-type': 'application/wasm' } }),
     );
     stubFetch(spy as any);
@@ -290,7 +290,7 @@ describe('fetchGuarded', () => {
       'https://cdn.example.com/x.wasm',
       expect.objectContaining({ redirect: 'manual', credentials: 'omit' }),
     );
-    const init = spy.mock.calls[0]![1] as RequestInit;
+    const init = spy.mock.calls[0]![1] as unknown as RequestInit;
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 });

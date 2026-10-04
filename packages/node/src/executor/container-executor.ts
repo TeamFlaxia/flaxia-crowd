@@ -271,9 +271,9 @@ export const runContainer = async (payload: ContainerPayload): Promise<Container
     `[flaxia-node] container: memory cap ${memoryLimit}MB (declared initial=${Math.round(limits.initialBytes / 1024 / 1024)}MB max=${limits.maximumBytes === null ? 'unbounded' : `${Math.round(limits.maximumBytes / 1024 / 1024)}MB`})`,
   );
 
-  const { instance } = await WebAssembly.instantiate(wasmBinary, {
+  const { instance } = (await WebAssembly.instantiate(wasmBinary.slice().buffer, {
     wasi_snapshot_preview1: wasi.wasiImport
-  });
+  })) as unknown as { instance: WebAssembly.Instance };
 
   // 4. Run
   try {

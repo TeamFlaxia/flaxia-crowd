@@ -67,7 +67,7 @@ export interface EgressResult {
   /** `Content-Type` of the final response, lowercased without parameters. */
   contentType: string;
   /** Full body bytes; empty for HEAD or an error status. */
-  bytes: Uint8Array;
+  bytes: Uint8Array<ArrayBuffer>;
   byteLength: number;
 }
 
@@ -293,7 +293,7 @@ async function readCapped(
   response: Response,
   maxBytes: number,
   url: string,
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > maxBytes) {
     fail(`response too large: ${url} declares ${declared} bytes (cap ${maxBytes})`);

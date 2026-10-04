@@ -140,7 +140,7 @@ describe('container memoryLimitMb enforcement (#10-4)', () => {
     configureContainerImageOrigins(['https://cdn.example.com']);
     const oversized = wasmWithMemory(1, 4096); // 256 MiB max
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(oversized, { status: 200, headers: { 'content-type': 'application/wasm' } }),
+      new Response(oversized as any, { status: 200, headers: { 'content-type': 'application/wasm' } }),
     );
     const instantiateSpy = vi.spyOn(WebAssembly, 'instantiate');
 
