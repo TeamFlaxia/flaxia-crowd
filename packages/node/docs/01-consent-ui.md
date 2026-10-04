@@ -96,8 +96,10 @@ await initFlaxiaNodeConsent()
 
 `initConsentIntegrity()` はモジュール読み込み時にも自動で開始されるが、
 同期読み取りは検証完了まで `'unset'` を返す（fail closed）。
-設定画面などでリロード直後に正しい状態を表示したい場合は
-`await initFlaxiaNodeConsent()` してから読むこと。
+リロード後の自動再開を維持したいホストは、**`initFlaxiaNode()` の前に**
+`await initFlaxiaNodeConsent()` を実行すること。await せずに初期化すると、
+再訪した同意済みの訪問者にもバナーが表示され、ノードは自動起動しない
+（同意が無いものとして扱われるため）。
 
 ## 同意操作の強制（headless accept の禁止）
 

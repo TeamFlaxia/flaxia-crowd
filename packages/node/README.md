@@ -104,14 +104,19 @@ controller.clearConsent()    // 同意・拒否・HMAC鍵をすべて消去
 
 `getFlaxiaNodeConsentState()` はコントローラを作らず、ネットワークにも触れず、
 保存済みの同意状態を同期的に返します。**fail closed** で、HMAC 検証が完了して
-いなければ `'granted'` は返しません。リロード直後から正確な状態を表示したい
-ホストは `initFlaxiaNodeConsent()` を await してから読んでください。
+いなければ `'granted'` は返しません。
+
+リロード後の自動再開を維持したいホストは、**`initFlaxiaNode()` を呼ぶ前に**
+`await initFlaxiaNodeConsent()` を実行してください。await せずに初期化すると、
+再訪した同意済みの訪問者にもバナーが表示され、ノードは自動起動しません
+（同意が無いものとして扱われるため）。
 
 ```typescript
-import { getFlaxiaNodeConsentState, initFlaxiaNodeConsent } from '@flaxia/node'
+import { getFlaxiaNodeConsentState, initFlaxiaNode, initFlaxiaNodeConsent } from '@flaxia/node'
 
 await initFlaxiaNodeConsent()          // 冪等・例外を投げない
-getFlaxiaNodeConsentState()            // 'unset' | 'granted' | 'denied'
+if (getFlaxiaNodeConsentState() !== 'granted') showSettingsToggle()
+initFlaxiaNode({ /* ... */ })
 ```
 
 ## アーキテクチャ
