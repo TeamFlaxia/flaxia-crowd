@@ -151,7 +151,8 @@ async function main() {
     }
     if (url.startsWith('/engine/')) {
       const file = path.resolve(ENGINE_DIR, url.slice('/engine/'.length));
-      if (!file.startsWith(ENGINE_DIR)) { res.statusCode = 403; res.end(); return; }
+      const relative = path.relative(ENGINE_DIR, file);
+      if (relative.startsWith('..') || path.isAbsolute(relative)) { res.statusCode = 403; res.end(); return; }
       try {
         const body = readFileSync(file);
         res.setHeader('content-type', 'text/javascript; charset=utf-8');
