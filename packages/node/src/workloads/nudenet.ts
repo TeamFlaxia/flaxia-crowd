@@ -1,5 +1,6 @@
 import type { NudeNetDetection, NudeNetPayload, NudeNetResult } from '@flaxia/sdk';
 import * as ort from 'onnxruntime-web';
+import { MAX_IMAGE_BYTES, readImageBlob, resolveImageUrl } from './nudenet-url';
 
 const IMG_SIZE = 320;
 const ORT_WASM_VERSION = '1.26.0';
@@ -80,9 +81,16 @@ async function loadImage(payload: NudeNetPayload): Promise<ImageBitmap> {
     const res = await fetch(`data:${mimeType};base64,${payload.imageBase64}`);
     blob = await res.blob();
   } else if (payload.imageUrl) {
-    const res = await fetch(payload.imageUrl);
-    if (!res.ok) throw new Error(`Failed to fetch image: ${payload.imageUrl} (HTTP ${res.status})`);
-    blob = await res.blob();
+    // The URL is task-payload input: refuse private/loopback targets before any
+    // request is made, drop ambient credentials (same-origin cookies included),
+    // and read the body under a size cap. Errors carry the status only — a body
+    // is attacker-controlled data and never belongs in an error message.
+    const url = resolveImageUrl(payload.imageUrl);
+    const res = await fetch(url, { credentials: 'omit' });
+    if (!res.ok) throw new Error(`Failed to fetch image (HTTP ${res.status})`);
+    // A public URL may still redirect into the LAN; the final URL is checked too.
+    if (res.url) resolveImageUrl(res.url);
+    blob = await readImageBlob(res, MAX_IMAGE_BYTES);
   } else {
     throw new Error('NudeNet payload requires either imageUrl or imageBase64');
   }
