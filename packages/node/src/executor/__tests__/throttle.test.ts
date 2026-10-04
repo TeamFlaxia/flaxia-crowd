@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { CpuThrottle } from '../throttle';
+import {
+  CpuThrottle,
+  DUTY_CYCLE_BUDGET_MS,
+  THROTTLE_WINDOW_MS,
+  ThrottleBusyError,
+} from '../throttle';
 
 /**
  * The throttle tracks a rolling busy ratio computed from `markTaskComplete()`
@@ -109,7 +114,7 @@ describe('CpuThrottle', () => {
     vi.useRealTimers();
   });
 
-  it('should give up waiting after maxWaitMs on a persistently busy machine', async () => {
+  it('should fail with a retryable error after maxWaitMs on a persistently busy machine', async () => {
     vi.useFakeTimers();
     const ref = { now: 1000 };
     mockPerformanceNow(ref);
@@ -120,14 +125,137 @@ describe('CpuThrottle', () => {
     expect(await t.shouldPause()).toBe(true);
 
     const promise = t.waitForSlot(1200);
-    // Each sleep is 500ms. Load stays at ~100% (wall time grows but nothing
-    // is recharged), so the wait must bail once elapsed time exceeds maxWait.
+    const settled = promise.catch((err) => err);
+    // Each sleep is 500ms. Load stays at ~100% (wall time grows but nothing is
+    // recharged), so the wait must fail instead of starting the task anyway.
     for (let i = 0; i < 4; i++) {
       await vi.advanceTimersByTimeAsync(500);
       ref.now += 500;
     }
 
-    await expect(promise).resolves.toBeUndefined();
+    const err = await settled;
+    expect(err).toBeInstanceOf(ThrottleBusyError);
+    expect((err as ThrottleBusyError).retryable).toBe(true);
+    expect((err as ThrottleBusyError).message).toMatch(/task not started/);
     vi.useRealTimers();
+  });
+
+  it('should never force-start a task while over budget (#10-2)', async () => {
+    vi.useFakeTimers();
+    const ref = { now: 1000 };
+    mockPerformanceNow(ref);
+
+    const t = new CpuThrottle(0.15);
+    t.markTaskComplete(30_000); // a full window of busy time
+    ref.now = 2000;
+
+    let started = false;
+    const promise = t.waitForSlot(1000).then(() => {
+      started = true;
+    });
+    const settled = promise.catch(() => undefined);
+
+    // Even after the budget has elapsed and the device stays saturated, the
+    // task must not start.
+    for (let i = 0; i < 6; i++) {
+      ref.now += 500;
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    await settled;
+
+    expect(started).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('should reject a negative wait budget instead of starting anyway', async () => {
+    const t = new CpuThrottle(0.15);
+    await expect(t.waitForSlot(-1)).rejects.toThrow(/maxWaitMs must be a non-negative number/);
+  });
+});
+
+describe('CpuThrottle mid-execution duty cycle (#10-1)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('should not pause before a full duty-cycle burst has elapsed', async () => {
+    const ref = { now: 1000 };
+    mockPerformanceNow(ref);
+    vi.useFakeTimers();
+
+    const t = new CpuThrottle(0.15);
+    t.beginWork();
+    ref.now += DUTY_CYCLE_BUDGET_MS - 1;
+
+    expect(await t.yieldIfOverloaded()).toBe(0);
+  });
+
+  it('should pause so a long task cannot pin the CPU at 100%', async () => {
+    const ref = { now: 1000 };
+    // Fake timers replace performance.now with their own clock, so the spy has
+    // to be installed afterwards to keep driving the throttle deterministically.
+    vi.useFakeTimers();
+    mockPerformanceNow(ref);
+
+    const t = new CpuThrottle(0.3);
+    t.beginWork();
+    ref.now += DUTY_CYCLE_BUDGET_MS;
+
+    const pausePromise = t.yieldIfOverloaded();
+    // maxLoad is clamped to 0.3 → a 200ms burst needs ~467ms of pause.
+    await vi.advanceTimersByTimeAsync(600);
+    const pauseMs = await pausePromise;
+    expect(pauseMs).toBe(Math.ceil(DUTY_CYCLE_BUDGET_MS * (1 / 0.3 - 1)));
+    expect(pauseMs).toBeGreaterThan(DUTY_CYCLE_BUDGET_MS);
+  });
+
+  it('should keep the reported load at or below maxLoad after a duty-cycle pause', async () => {
+    const ref = { now: 1000 };
+    // Fake timers replace performance.now with their own clock, so the spy has
+    // to be installed afterwards to keep driving the throttle deterministically.
+    vi.useFakeTimers();
+    mockPerformanceNow(ref);
+
+    const t = new CpuThrottle(0.3);
+    t.beginWork();
+    ref.now += DUTY_CYCLE_BUDGET_MS;
+
+    const pausePromise = t.yieldIfOverloaded();
+    await vi.advanceTimersByTimeAsync(600);
+    const pauseMs = await pausePromise;
+    expect(pauseMs).toBeGreaterThan(0);
+    // The pause is charged as wall time, so the rolling estimate stays bounded.
+    expect(t.lastMeasuredLoad).toBeLessThanOrEqual(t.maxLoadValue + 0.001);
+  });
+
+  it('should reset the duty cycle when a new task begins', async () => {
+    const ref = { now: 1000 };
+    mockPerformanceNow(ref);
+    vi.useFakeTimers();
+
+    const t = new CpuThrottle(0.5);
+    t.beginWork();
+    ref.now += DUTY_CYCLE_BUDGET_MS;
+    const first = t.yieldIfOverloaded();
+    await vi.advanceTimersByTimeAsync(600);
+    await first;
+
+    t.beginWork();
+    ref.now += DUTY_CYCLE_BUDGET_MS - 1;
+    expect(await t.yieldIfOverloaded()).toBe(0);
+  });
+
+  it('should roll the window over after THROTTLE_WINDOW_MS of idle time', async () => {
+    const ref = { now: 1000 };
+    mockPerformanceNow(ref);
+
+    const t = new CpuThrottle(0.15);
+    t.markTaskComplete(20_000);
+    ref.now = 2000;
+    expect(await t.shouldPause()).toBe(true);
+
+    ref.now = 1000 + THROTTLE_WINDOW_MS + 1;
+    expect(await t.shouldPause()).toBe(false);
   });
 });

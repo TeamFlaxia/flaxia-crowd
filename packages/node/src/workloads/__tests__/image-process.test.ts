@@ -1,7 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import { handleImageProcess } from '../image-process';
+import {
+  MAX_CANVAS_PIXELS,
+  MAX_CANVAS_SIDE,
+  handleImageProcess,
+  resolveCanvasSize,
+} from '../image-process';
 
 const mockConvertToBlob = vi.fn();
+/** Canvas sizes requested during the test (OffscreenCanvas is a stub here). */
+const canvasSizes: Array<{ width: number; height: number }> = [];
 
 if (typeof OffscreenCanvas === 'undefined') {
   global.OffscreenCanvas = class {
@@ -10,6 +17,7 @@ if (typeof OffscreenCanvas === 'undefined') {
     constructor(width: number, height: number) {
       this.width = width;
       this.height = height;
+      canvasSizes.push({ width, height });
     }
     getContext() {
       return {
@@ -106,5 +114,66 @@ describe('Image Processing Workload', () => {
     expect(mockConvertToBlob).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'image/jpeg', quality: 0.3 })
     );
+  });
+});
+
+describe('Image Processing canvas limits (#10-5)', () => {
+  beforeEach(() => {
+    mockConvertToBlob.mockClear();
+    canvasSizes.length = 0;
+  });
+
+  it('rejects a side above the hard cap before allocating', () => {
+    expect(() => resolveCanvasSize({ width: 100000, height: 100000 }, { width: 100, height: 100 })).toThrow(
+      /exceeds the 8192px limit/,
+    );
+    expect(() => resolveCanvasSize({ height: MAX_CANVAS_SIDE + 1 }, { width: 100, height: 100 })).toThrow(
+      /exceeds the 8192px limit/,
+    );
+  });
+
+  it('rejects non-integer, zero and negative sides', () => {
+    for (const value of [0, -10, 12.5, Number.NaN, Number.POSITIVE_INFINITY, '100' as any]) {
+      expect(() => resolveCanvasSize({ width: value }, { width: 100, height: 100 })).toThrow(
+        /must be a positive integer/,
+      );
+    }
+  });
+
+  it('rejects a request whose pixel count exceeds the cap', () => {
+    // 8192 x 8192 = 67M pixels > 32M cap, even though both sides are legal.
+    expect(() => resolveCanvasSize({ width: 8192, height: 8192 }, { width: 10000, height: 10000 })).toThrow(
+      new RegExp(`exceeds the ${MAX_CANVAS_PIXELS} pixel limit`),
+    );
+  });
+
+  it('clamps the request to the source bitmap so it can never upscale', () => {
+    expect(resolveCanvasSize({ width: 4000, height: 4000 }, { width: 100, height: 100 })).toEqual({
+      width: 100,
+      height: 100,
+    });
+    expect(resolveCanvasSize({ width: 50 }, { width: 100, height: 80 })).toEqual({ width: 50, height: 80 });
+    expect(resolveCanvasSize({}, { width: 100, height: 80 })).toEqual({ width: 100, height: 80 });
+  });
+
+  it('never constructs an oversized OffscreenCanvas for a hostile payload', async () => {
+    await expect(
+      handleImageProcess({
+        operation: 'resize',
+        imageBase64: sampleBase64,
+        mimeType: 'image/png',
+        options: { width: 100000, height: 100000 },
+      }),
+    ).rejects.toThrow(/exceeds the 8192px limit/);
+    expect(canvasSizes).toHaveLength(0);
+
+    // A legal-but-huge request is clamped to the 100x100 source bitmap.
+    await handleImageProcess({
+      operation: 'resize',
+      imageBase64: sampleBase64,
+      mimeType: 'image/png',
+      options: { width: 8000, height: 8000 },
+    });
+    expect(canvasSizes).toEqual([{ width: 100, height: 100 }]);
   });
 });

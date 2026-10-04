@@ -48,7 +48,7 @@ export const releaseCache = (): void => {
 };
 
 const createBufferedTokenCallback = (
-  onToken: (token: string) => void,
+  onToken: (token: string) => void | Promise<void>,
   options: AiInferenceOptions,
 ): ((text: string) => void) => {
   if (!options.tokenBuffer) return onToken;
@@ -59,7 +59,9 @@ const createBufferedTokenCallback = (
 
   const flush = () => {
     if (buffer) {
-      onToken(buffer);
+      // The callback may yield for CPU throttling; a failed yield (abort) must
+      // surface as an unhandled rejection instead of being silently swallowed.
+      void onToken(buffer);
       buffer = '';
     }
     timer = null;
@@ -112,7 +114,7 @@ if (env.backends?.onnx?.wasm) {
 
 export const handleAiInference = async (
   payload: AiInferencePayload,
-  onToken?: (token: string) => void,
+  onToken?: (token: string) => void | Promise<void>,
 ): Promise<AiInferenceResult> => {
   const { task, model, input, options = {} } = payload;
 

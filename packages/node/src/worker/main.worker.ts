@@ -1,6 +1,6 @@
 import type { WorkloadType, SwarmInitMessage, SwarmSliceMessage } from '@flaxia/sdk';
 import { HEAVY_WORKLOADS } from '@flaxia/sdk';
-import { CpuThrottle } from '../executor/throttle';
+import { CpuThrottle, DEFAULT_WAIT_SLOT_MS, ThrottleBusyError } from '../executor/throttle';
 import {
   HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
   hasEnoughWasmMemoryForHeavy,
@@ -8,9 +8,23 @@ import {
 } from '../executor/memoryProbe';
 import { SwarmController } from '../swarm/controller';
 import { createSwarmRuntime } from '../swarm/runtime';
-import type { SwarmControlMessage } from '../swarm/messages';
+import { isSwarmControlEnvelope } from '../swarm/messages';
 
 let throttle: CpuThrottle | null = null;
+
+/**
+ * CPU-budget policy for a task that arrives while the device is saturated.
+ *
+ * The wait budget must stay well under the WorkerPool timeout (300s default)
+ * because the worker owns the whole budget; when it is exhausted the task is
+ * rejected with a retryable error instead of being force-started at 100% CPU.
+ */
+const SLOT_WAIT_BUDGET_MS = DEFAULT_WAIT_SLOT_MS;
+const SLOT_WAIT_RETRIES = 1;
+const SLOT_RETRY_COOLDOWN_MS = 15_000;
+
+/** Task ids the coordinator asked us to abort, with the reason to surface. */
+const cancelRequested = new Map<string, string>();
 
 // The active swarm session, if any. One task at a time, so a single slot is
 // enough; control messages and frames from the main thread route here.
@@ -19,15 +33,53 @@ let activeSwarmTaskId: string | null = null;
 /** The task this worker is executing right now, if any (tasks are serialized). */
 let activeTaskId: string | null = null;
 
-/**
- * Tasks the coordinator told us to stop while they were still running. Only
- * streaming workloads can act on it (their token callback throws, ending the
- * generation); the rest run to completion and their result is discarded, which
- * is why the pool releases the slot only on the worker's own done/error.
- */
-const cancelRequested = new Map<string, string>();
-
 const IDLE_EVICT_MS = 60_000;
+
+/**
+ * Acquire a CPU slot before starting a task.
+ *
+ * `waitForSlot()` throws once its budget is exhausted instead of starting the
+ * task anyway; this gives the device one bounded cooldown and then fails the
+ * task with a retryable marker so the orchestrator can move it to an idle node.
+ */
+async function waitForCpuSlot(): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await throttle!.waitForSlot(SLOT_WAIT_BUDGET_MS);
+      return;
+    } catch (err) {
+      if (!(err instanceof ThrottleBusyError)) throw err;
+      if (attempt >= SLOT_WAIT_RETRIES) {
+        throw new Error(
+          `device CPU busy: ${err.message}; task not started, retry on an idle node (retryable)`,
+        );
+      }
+      console.warn(
+        `[flaxia-node:worker] ${err.message}; cooling down ${SLOT_RETRY_COOLDOWN_MS}ms before retrying`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, SLOT_RETRY_COOLDOWN_MS));
+    }
+  }
+}
+
+/**
+ * Token sink for streaming workloads.
+ *
+ * The cancellation check is synchronous so an abort that arrives mid-stream is
+ * observed on the very next token (no microtask delay), while the CPU duty
+ * cycle yields between tokens so a long generation cannot pin a core.
+ */
+function createTokenSink(id: string): (token: string) => Promise<void> {
+  const postToken = (token: string): void => {
+    const cancelled = cancelRequested.get(id);
+    if (cancelled !== undefined) throw new Error(cancelled);
+    self.postMessage({ id, type: 'token', token });
+  };
+  return async (token: string): Promise<void> => {
+    postToken(token);
+    await throttle?.yieldIfOverloaded();
+  };
+}
 
 // Measured at worker startup: the maximum WebAssembly linear memory this
 // runtime can actually commit. We reject heavy workloads (and, as defense in
@@ -68,7 +120,7 @@ function armIdleEviction(): void {
 async function runWorkload(
   workload: WorkloadType,
   payload: unknown,
-  emitToken: (token: string) => void,
+  emitToken: (token: string) => void | Promise<void>,
 ): Promise<unknown> {
   switch (workload) {
     case 'ai-inference':
@@ -136,11 +188,24 @@ self.onmessage = async (e: MessageEvent) => {
   const data = e.data;
 
   if (data?.type === 'swarm-control') {
-    void activeSwarm?.handleControl(data.message as SwarmControlMessage);
+    // The main thread forwards whatever the coordinator sent; it is untrusted
+    // input. Only a well-formed control envelope reaches the session, so a
+    // malformed message cannot make the controller act on a bogus slice/plan.
+    if (!isSwarmControlEnvelope(data)) {
+      console.warn('[flaxia-node:worker] dropped malformed swarm-control message');
+      return;
+    }
+    if (activeSwarm) {
+      void activeSwarm.handleControl(data.message);
+    }
     return;
   }
   if (data?.type === 'swarm-frame') {
-    activeSwarm?.handleFrame(data.frame as ArrayBuffer);
+    if (data.frame instanceof ArrayBuffer) {
+      activeSwarm?.handleFrame(data.frame);
+    } else {
+      console.warn('[flaxia-node:worker] dropped malformed swarm-frame message');
+    }
     return;
   }
   if (data?.type === 'abort') {
@@ -180,7 +245,12 @@ self.onmessage = async (e: MessageEvent) => {
       throw new Error(`${workload}: insufficient WASM memory (${WASM_MEMORY_BYTES} bytes < ${HEAVY_WORKLOAD_WASM_MEMORY_BYTES})`);
     }
 
-    await throttle.waitForSlot();
+    await waitForCpuSlot();
+
+    // Mid-execution limiting: the pre-task gate alone cannot stop a 10-minute
+    // generation from pinning a core at 100%, so the streaming path yields
+    // between tokens/batches and holds the configured duty cycle.
+    throttle.beginWork();
 
     const heartbeat = setInterval(() => {
       self.postMessage({
@@ -192,13 +262,7 @@ self.onmessage = async (e: MessageEvent) => {
 
     const taskStart = performance.now();
     try {
-      const emitToken = (token: string) => {
-        // Aborted mid-generation: throw so the streaming loop unwinds instead
-        // of spending the rest of the task budget on a result nobody wants.
-        const cancelled = cancelRequested.get(id);
-        if (cancelled !== undefined) throw new Error(cancelled);
-        self.postMessage({ id, type: 'token', token });
-      };
+      const emitToken = createTokenSink(id);
       const result = workload === 'swarm-inference'
         ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage)
         : await runWorkload(workload as WorkloadType, payload, emitToken);

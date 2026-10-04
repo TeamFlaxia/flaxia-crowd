@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   probeMaxWasmMemoryBytes,
   hasEnoughWasmMemoryForHeavy,
+  getWasmMemoryBytes,
+  getWasmMemoryProbeRuns,
+  resetWasmMemoryProbeCache,
   HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
 } from '../memoryProbe';
 
@@ -11,8 +14,13 @@ const GB = 1024 ** 3;
 describe('memoryProbe', () => {
   const original = (globalThis as any).WebAssembly;
 
+  beforeEach(() => {
+    resetWasmMemoryProbeCache();
+  });
+
   afterEach(() => {
     (globalThis as any).WebAssembly = original;
+    resetWasmMemoryProbeCache();
   });
 
   // Installs a WebAssembly.Memory mock that can only grow up to `capacityBytes`
@@ -66,5 +74,45 @@ describe('memoryProbe', () => {
     };
     expect(probeMaxWasmMemoryBytes()).toBe(0);
     expect(hasEnoughWasmMemoryForHeavy()).toBe(false);
+  });
+
+  it('memoizes the probe so repeated capability checks never re-allocate (#10-6)', () => {
+    installMock(4 * GB);
+
+    const first = getWasmMemoryBytes();
+    const runsAfterFirst = getWasmMemoryProbeRuns();
+
+    // A registration followed by reconnect retries asks many times: every call
+    // must be served from the cache instead of committing 2 GiB again.
+    for (let i = 0; i < 5; i++) {
+      expect(getWasmMemoryBytes()).toBe(first);
+      expect(hasEnoughWasmMemoryForHeavy()).toBe(true);
+    }
+    expect(getWasmMemoryProbeRuns()).toBe(runsAfterFirst);
+    expect(runsAfterFirst).toBe(1);
+  });
+
+  it('does not cache a partial probe against a larger later target', () => {
+    installMock(1 * GB);
+    expect(probeMaxWasmMemoryBytes(1 * GB)).toBe(1 * GB);
+    expect(getWasmMemoryProbeRuns()).toBe(1);
+
+    // The engine cannot grow past 1 GiB, so a bigger target is answered from
+    // the cache instead of re-running the allocation.
+    expect(probeMaxWasmMemoryBytes(3 * GB)).toBe(1 * GB);
+    expect(getWasmMemoryProbeRuns()).toBe(1);
+  });
+
+  it('serves a smaller target from a completed larger probe', () => {
+    installMock(4 * GB);
+    expect(probeMaxWasmMemoryBytes(2 * GB)).toBe(4 * GB);
+    expect(probeMaxWasmMemoryBytes(512 * 1024 * 1024)).toBe(4 * GB);
+    expect(getWasmMemoryProbeRuns()).toBe(1);
+  });
+
+  it('finds the engine maximum beyond the requested target', () => {
+    installMock(3 * GB);
+    expect(probeMaxWasmMemoryBytes(1 * GB)).toBe(3 * GB);
+    expect(getWasmMemoryProbeRuns()).toBe(1);
   });
 });
