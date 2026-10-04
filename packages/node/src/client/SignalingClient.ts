@@ -12,7 +12,7 @@ import {
 import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
 import { probeWebGpu } from '../executor/webgpuProbe';
-import { decodeSwarmEnvelope, encodeSwarmEnvelope } from '@flaxia/sdk';
+import { buildNodeSignalProtocols, buildWsUrl, decodeSwarmEnvelope, encodeSwarmEnvelope } from '@flaxia/sdk';
 
 import type { ConsentState, FlaxiaNodeController, NodeConfig, SwarmNodeCapabilities, WorkloadType } from '@flaxia/sdk';
 
@@ -25,6 +25,12 @@ export interface TaskMessage {
   workload: WorkloadType;
   payload: unknown;
   timeoutMs?: number;
+  /**
+   * Coordinator-generated id for this delivery. Must be echoed on `result`,
+   * `progress` and `error`: the coordinator only accepts messages that arrive
+   * on the socket that received the delivery and carry its attempt id.
+   */
+  attemptId?: string;
 }
 
 interface NodeToken {
@@ -34,6 +40,11 @@ interface NodeToken {
 }
 
 const NODE_ID_KEY = 'flaxia_node_id';
+/**
+ * Legacy key from when the raw node token was cached in localStorage. The token
+ * now lives in memory only (an XSS on the host page must not be able to steal a
+ * long-lived bearer), but old values are still purged on startup.
+ */
 const NODE_TOKEN_KEY = 'flaxia_node_token';
 
 class SignalingClient {
@@ -48,6 +59,13 @@ class SignalingClient {
   private abortedTasks = new Set<string>();
   private swarmSessions = new Map<string, string>();
   private retiredSwarmSessions = new Set<string>();
+  /** Delivery attempt ids per task, echoed back so the coordinator can bind results. */
+  private attempts = new Map<string, string>();
+  /**
+   * In-memory node token. Never persisted: a page reload simply re-registers,
+   * which also rotates the token and keeps the server-issued node id current.
+   */
+  private cachedToken: NodeToken | null = null;
 
   private retireSwarmSession(sessionId: string) {
     this.retiredSwarmSessions.add(sessionId);
@@ -84,17 +102,20 @@ class SignalingClient {
       return;
     }
 
-    const wsBase = this.config.orchestratorUrl.replace(/\/+$/, '').replace(/^http/, 'ws');
-    const wsUrl = new URL(`${wsBase}/crowd/signal`);
-    wsUrl.searchParams.set('token', token.token);
-
-    const ws = new WebSocket(wsUrl.toString());
+    // The token travels in the WebSocket subprotocol list: a browser cannot set
+    // request headers, and a `?token=` query string would end up in proxy and
+    // CDN access logs.
+    const wsUrl = buildWsUrl(this.config.orchestratorUrl, '/crowd/signal');
+    const ws = new WebSocket(wsUrl, buildNodeSignalProtocols(token.token));
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
+    let opened = false;
+
     ws.onopen = () => {
+      opened = true;
       this.reconnectAttempts = 0;
-      log(`signal connected ${wsUrl.toString()}`);
+      log(`signal connected ${wsUrl}`);
     };
 
     ws.onmessage = async (event) => {
@@ -123,6 +144,10 @@ class SignalingClient {
       if (data.type === 'task') {
         const msg = data as unknown as TaskMessage;
         log(`task received taskId=${msg.taskId} workload=${msg.workload} timeoutMs=${msg.timeoutMs ?? 'default'}`);
+        if (typeof msg.attemptId === 'string') this.attempts.set(msg.taskId, msg.attemptId);
+        // Captured before the runner clears the map in its `finally`, so a
+        // failure can still be reported against the delivery it belongs to.
+        const attemptId = msg.attemptId ?? this.attempts.get(msg.taskId);
         try {
           await this.handleTask(msg);
         } catch (err) {
@@ -136,6 +161,7 @@ class SignalingClient {
             type: 'error',
             taskId: String(data.taskId ?? ''),
             error: message,
+            attemptId,
           });
         }
         return;
@@ -144,6 +170,9 @@ class SignalingClient {
         const taskId = String(data.taskId ?? '');
         if (!taskId) return;
         if (typeof data.sessionId !== 'string' || this.retiredSwarmSessions.has(data.sessionId)) return;
+        // Only the host receives swarm-init, and only that delivery carries the
+        // attempt id it must echo back when it settles the session.
+        if (typeof data.attemptId === 'string') this.attempts.set(taskId, data.attemptId);
         // The host starts on swarm-init and a worker on its first swarm-slice;
         // a host's later slice just reaches the already-running worker.
         if (this.swarmSessions.get(taskId) === data.sessionId) {
@@ -178,6 +207,10 @@ class SignalingClient {
       ws.onclose = null;
       if (this.ws !== ws) return;
       this.ws = null;
+      // A close before the handshake completed means the token was rejected
+      // (expired, rotated, or the identity is gone): drop it so the next attempt
+      // registers afresh instead of looping on a dead bearer.
+      if (!opened) this.cachedToken = null;
       if (this.destroyed) return;
       log(`signal disconnected; scheduling reconnect attempt=${this.reconnectAttempts + 1}`);
       this.scheduleReconnect();
@@ -257,17 +290,13 @@ class SignalingClient {
 
   private async obtainToken(): Promise<NodeToken | null> {
     try {
-      const cachedRaw = safeLocalStorageGet(NODE_TOKEN_KEY);
-      if (cachedRaw) {
-        try {
-          const cached = JSON.parse(cachedRaw) as NodeToken;
-          if (cached.token && cached.nodeId && cached.expiresAt > Date.now() + 60000) {
-            log(
-              `token cached nodeId=${cached.nodeId} expiresIn=${Math.round((cached.expiresAt - Date.now()) / 1000)}s`,
-            );
-            return cached;
-          }
-        } catch {}
+      // Memory-only cache: the token is not written to localStorage, so a host
+      // XSS cannot lift a node identity out of persistent storage.
+      if (this.cachedToken && this.cachedToken.expiresAt > Date.now() + 60000) {
+        log(
+          `token cached nodeId=${this.cachedToken.nodeId} expiresIn=${Math.round((this.cachedToken.expiresAt - Date.now()) / 1000)}s`,
+        );
+        return this.cachedToken;
       }
 
       // Gate heavy WASM workloads on a real measured allocation probe, not on
@@ -304,7 +333,9 @@ class SignalingClient {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           siteId: this.config.siteId,
-          nodeId: this.nodeId,
+          // No client-chosen nodeId: the coordinator always issues a fresh
+          // random id and binds the token to it, so a node cannot claim another
+          // node's identity (or displace a live socket).
           capabilities,
           // Measured WASM memory the device could actually commit (bytes). The
           // orchestrator uses this to avoid routing heavy workloads to devices
@@ -330,10 +361,12 @@ class SignalingClient {
         return null;
       }
 
+      // Adopt the server-issued identity. A locally generated id is only a log
+      // label; the coordinator's id is the one the token is bound to.
+      if (typeof data.nodeId === 'string' && data.nodeId) this.nodeId = data.nodeId;
+      this.cachedToken = data;
+
       log(`node registered nodeId=${this.nodeId} expiresIn=${Math.round((data.expiresAt - Date.now()) / 1000)}s`);
-      try {
-        safeLocalStorageSet(NODE_TOKEN_KEY, JSON.stringify(data));
-      } catch {}
       return data;
     } catch (err) {
       logError('node register threw', err instanceof Error ? err.message : err);
@@ -366,6 +399,7 @@ class SignalingClient {
     this.inflightTasks.add(taskId);
     const startedAt = performance.now();
     const timeoutMs = typeof initial.timeoutMs === 'number' ? initial.timeoutMs + 30000 : undefined;
+    const attemptId = this.attempts.get(taskId);
 
     try {
       const result = await this.workerPool.run(
@@ -374,16 +408,23 @@ class SignalingClient {
         initial,
         timeoutMs,
         (token: string) => {
-          this.send({ type: 'progress', taskId, sessionId, token });
+          this.send({ type: 'progress', taskId, sessionId, token, attemptId });
         },
         { maxCpuLoad: this.config.maxCpuLoad },
         {
           onFrame: (frame) => this.sendBinary(encodeSwarmEnvelope(sessionId, frame)),
-          onMessage: (message) => this.send(message as Record<string, unknown>),
+          // Attempt ids are transport metadata owned by this client, so stamp
+          // them onto the engine's control messages (swarm-token / swarm-done):
+          // the coordinator only accepts session messages from the host attempt.
+          onMessage: (message) => this.send(
+            message && typeof message === 'object' && !('attemptId' in message)
+              ? { ...message, attemptId }
+              : (message as Record<string, unknown>),
+          ),
         },
       );
       if (!this.abortedTasks.delete(sessionId)) {
-        this.send({ type: 'result', taskId, sessionId, payload: result });
+        this.send({ type: 'result', taskId, sessionId, payload: result, attemptId });
       }
       log(
         `swarm result sent taskId=${taskId} durationMs=${Math.round(performance.now() - startedAt)}`,
@@ -394,13 +435,14 @@ class SignalingClient {
         log(`swarm stopped on coordinator abort taskId=${taskId} error=${message}`);
       } else {
         logError(`swarm failed taskId=${taskId} error=${message}`);
-        this.send({ type: 'error', taskId, sessionId, error: message });
+        this.send({ type: 'error', taskId, sessionId, error: message, attemptId });
       }
     } finally {
       this.retireSwarmSession(sessionId);
       if (this.swarmSessions.get(taskId) === sessionId) {
         this.swarmSessions.delete(taskId);
         this.inflightTasks.delete(taskId);
+        this.attempts.delete(taskId);
       }
     }
   }
@@ -411,6 +453,7 @@ class SignalingClient {
     if (this.inflightTasks.has(data.taskId)) return;
     this.inflightTasks.add(data.taskId);
     const startedAt = performance.now();
+    const attemptId = data.attemptId ?? this.attempts.get(data.taskId);
     try {
       const timeoutMs = data.timeoutMs ? data.timeoutMs + 30000 : undefined;
       const result = await this.workerPool.run(
@@ -419,16 +462,17 @@ class SignalingClient {
         data.payload,
         timeoutMs,
         (token: string) => {
-          this.send({ type: 'progress', taskId: data.taskId, token });
+          this.send({ type: 'progress', taskId: data.taskId, token, attemptId });
         },
         { maxCpuLoad: this.config.maxCpuLoad },
       );
-      this.send({ type: 'result', taskId: data.taskId, payload: result });
+      this.send({ type: 'result', taskId: data.taskId, payload: result, attemptId });
       log(
         `task result sent taskId=${data.taskId} workload=${data.workload} durationMs=${Math.round(performance.now() - startedAt)}`,
       );
     } finally {
       this.inflightTasks.delete(data.taskId);
+      this.attempts.delete(data.taskId);
     }
   }
 
@@ -461,6 +505,9 @@ const startNode = (config: NodeConfig) => {
   if (prev) {
     prev.disconnect();
   }
+
+  // Purge a token persisted by an older bundle: the bearer is memory-only now.
+  safeLocalStorageRemove(NODE_TOKEN_KEY);
 
   const workerUrl = new URL('./worker.js', import.meta.url).href;
   const workerPool = new WorkerPool(workerUrl);
