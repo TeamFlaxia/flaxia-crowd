@@ -185,6 +185,89 @@ describe('FlaxiaClient', () => {
     });
   });
 
+  describe('subscribe', () => {
+    class MockWebSocket {
+      static instances: MockWebSocket[] = [];
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      closed = false;
+
+      constructor(public url: string, public protocols?: string[]) {
+        MockWebSocket.instances.push(this);
+        queueMicrotask(() => this.onopen?.());
+      }
+
+      close() { this.closed = true; }
+    }
+
+    beforeEach(() => {
+      MockWebSocket.instances = [];
+      (globalThis as any).WebSocket = MockWebSocket;
+    });
+
+    it('uses the token from the submit response', async () => {
+      (fetch as any).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          message: 'Task submitted', taskId: 'task_1', id: 'task_1', status: 'pending', createdAt: 1,
+          subscribeToken: 'sub-token', subscribeTokenExpiresAt: Date.now() + 600000,
+        }),
+      });
+
+      const submitted = await client.submit({
+        workload: 'ai-inference',
+        payload: { task: 'test', model: 'test', input: 'hi' },
+      });
+      expect(submitted.subscribeToken).toBe('sub-token');
+
+      const subscription = await client.subscribe('task_1');
+      const socket = MockWebSocket.instances[0];
+      expect(socket.url).toBe(`${baseUrl.replace('https', 'wss')}/crowd/subscribe?taskId=task_1`);
+      expect(socket.protocols).toEqual(['flaxia-subscribe-v1', 'bearer.sub-token']);
+      subscription.close();
+      expect(socket.closed).toBe(true);
+      // No extra fetch: the token came from the submit response.
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('fetches a token with the API key when none is cached', async () => {
+      (fetch as any).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          id: 'task_2', status: 'pending', workload: 'ai-inference', payload: {},
+          createdAt: 1, retryCount: 0, timeoutMs: 1000, tenantId: 'tenant',
+          subscribeToken: 'fresh-token', subscribeTokenExpiresAt: Date.now() + 600000,
+        }),
+      });
+
+      await client.subscribe('task_2');
+      expect(fetch).toHaveBeenCalledWith(`${baseUrl}/crowd/tasks/task_2`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      expect(MockWebSocket.instances[0].protocols).toEqual(['flaxia-subscribe-v1', 'bearer.fresh-token']);
+    });
+
+    it('refuses to stream when the server issues no token', async () => {
+      (fetch as any).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          id: 'task_3', status: 'pending', workload: 'ai-inference', payload: {},
+          createdAt: 1, retryCount: 0, timeoutMs: 1000, tenantId: 'tenant',
+        }),
+      });
+
+      await expect(client.subscribe('task_3')).rejects.toThrow(/subscribe token/i);
+      expect(MockWebSocket.instances).toHaveLength(0);
+    });
+
+    it('accepts an explicitly supplied token', async () => {
+      await client.subscribe('task_4', { subscribeToken: 'explicit' });
+      expect(MockWebSocket.instances[0].protocols).toEqual(['flaxia-subscribe-v1', 'bearer.explicit']);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe('waitForTask', () => {
     it('returns task when done', async () => {
       const mockTask: TaskRecord = {

@@ -12,6 +12,20 @@ import type { SwarmChainNode, SwarmRole, SwarmSessionPlan, SwarmSlice } from './
 // --- Layer planning ---
 
 /**
+ * Swarm sizing bounds. These are API contract, not tuning knobs: the worker
+ * rejects a `swarm.minNodes`/`maxNodes` outside them, and a plan may never
+ * exceed the layer bounds below. A host that proposes an absurd slice (e.g.
+ * `end: 1e9`) would otherwise make a volunteer expand the whole model into GPU
+ * memory and crash the tab.
+ */
+export const MIN_SWARM_NODES = 2;
+export const MAX_SWARM_NODES = 16;
+/** Deepest model the coordinator accepts a plan for. */
+export const MAX_SWARM_LAYERS = 1024;
+/** Most layers a single node may be asked to hold in one session. */
+export const MAX_SWARM_SLICE_LAYERS = 256;
+
+/**
  * Deal `layers` consecutive transformer layers over devices in proportion to
  * capacity, giving every device at least one layer. The number of devices is
  * clamped to `layers` so a tiny model never yields empty slices. Ported from
@@ -331,6 +345,11 @@ export function isSwarmInitMessage(value: unknown): value is SwarmInitMessage {
  * Validate a host-supplied plan before the coordinator stores it: the slices
  * must be non-empty, contiguous, cover every layer exactly once, and the first
  * entry must be the host that owns the embedding and head.
+ *
+ * Slice bounds are enforced too: layer indices must be non-negative integers,
+ * the model may not be deeper than {@link MAX_SWARM_LAYERS}, and no single node
+ * may be handed more than {@link MAX_SWARM_SLICE_LAYERS} layers. A malicious
+ * host otherwise assigns a real volunteer `end: 1e9` and OOMs its GPU.
  */
 export function isValidSwarmChain(chain: unknown): chain is SwarmChainNode[] {
   if (!Array.isArray(chain) || chain.length === 0) return false;
@@ -340,11 +359,15 @@ export function isValidSwarmChain(chain: unknown): chain is SwarmChainNode[] {
     if (!isRecord(node) || typeof node.nodeId !== 'string' || !node.nodeId) return false;
     if (node.role !== (i === 0 ? 'host' : 'worker')) return false;
     if (!isSlice(node.slice)) return false;
-    if (node.slice.start !== cursor) return false;
-    if (node.slice.end <= node.slice.start) return false;
+    const { start, end } = node.slice;
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
+    if (start < 0 || end > MAX_SWARM_LAYERS) return false;
+    if (end - start > MAX_SWARM_SLICE_LAYERS) return false;
+    if (start !== cursor) return false;
+    if (end <= start) return false;
     if (node.slice.hasEmbed !== (i === 0)) return false;
     if (node.slice.hasHead !== (i === 0)) return false;
-    cursor = node.slice.end;
+    cursor = end;
   }
   return true;
 }
