@@ -11,13 +11,21 @@ import {
   isSwarmStopFrame,
   isSwarmInitMessage,
   isSwarmNodeMessage,
+  isSwarmSliceMessage,
+  isSwarmStartMessage,
+  isSwarmErrorMessage,
   isValidSwarmChain,
+  isValidSwarmSlice,
   MAX_SWARM_LAYERS,
   MAX_SWARM_SLICE_LAYERS,
   SWARM_FRAME_MAGIC,
   SWARM_FRAME_HEADER_BYTES,
   encodeSwarmEnvelope,
   decodeSwarmEnvelope,
+  computeSwarmFrameMac,
+  signSwarmEnvelope,
+  verifySwarmEnvelope,
+  SWARM_ENVELOPE_MAC_BYTES,
 } from '../swarm';
 
 describe('swarm session envelopes', () => {
@@ -32,6 +40,126 @@ describe('swarm session envelopes', () => {
     expect(decodeSwarmEnvelope(new ArrayBuffer(0))).toBeNull();
     expect(decodeSwarmEnvelope(encodeSwarmStopFrame())).toBeNull();
     expect(decodeSwarmEnvelope(encodeSwarmEnvelope('s', encodeSwarmStopFrame()).slice(0, 8))).toBeNull();
+  });
+
+  it('round-trips a per-hop MAC and reports its absence', () => {
+    const frame = encodeSwarmFrame({ requestId: 3, pos: 3, tokens: 1 }, new Uint8Array(4));
+    const signed = encodeSwarmEnvelope('session-a', frame, new Uint8Array(SWARM_ENVELOPE_MAC_BYTES).fill(7));
+    const decoded = decodeSwarmEnvelope(signed);
+    expect(decoded?.mac?.byteLength).toBe(SWARM_ENVELOPE_MAC_BYTES);
+    expect(decoded?.mac?.[0]).toBe(7);
+    expect(decoded?.frame).toEqual(frame);
+
+    const unsigned = decodeSwarmEnvelope(encodeSwarmEnvelope('session-a', frame));
+    expect(unsigned?.mac).toBeNull();
+  });
+
+  it('rejects a MAC trailer with an unexpected length', () => {
+    const frame = encodeSwarmStopFrame();
+    const tampered = encodeSwarmEnvelope('s', frame, new Uint8Array(SWARM_ENVELOPE_MAC_BYTES));
+    const view = new DataView(tampered);
+    view.setUint8(4 + 1, 4); // session id length is 1, so the mac length lives here
+    expect(decodeSwarmEnvelope(tampered)).toBeNull();
+  });
+
+  it('signs frames per hop and rejects the wrong key or a tampered frame', async () => {
+    const frame = encodeSwarmFrame({ requestId: 1, pos: 1, tokens: 1 }, new Uint8Array([1, 2]));
+    const signed = await signSwarmEnvelope('hop-key', 'session-a', frame);
+    const decoded = decodeSwarmEnvelope(signed);
+    expect(decoded?.mac?.byteLength).toBe(SWARM_ENVELOPE_MAC_BYTES);
+    expect(await verifySwarmEnvelope('hop-key', 'session-a', decoded!.frame, decoded!.mac!)).toBe(true);
+    expect(await verifySwarmEnvelope('other-key', 'session-a', decoded!.frame, decoded!.mac!)).toBe(false);
+    expect(await verifySwarmEnvelope('hop-key', 'other-session', decoded!.frame, decoded!.mac!)).toBe(false);
+    expect(await verifySwarmEnvelope('hop-key', 'session-a', decoded!.frame, new Uint8Array(4))).toBe(false);
+
+    const tampered = decoded!.frame.slice(0);
+    new Uint8Array(tampered)[SWARM_FRAME_HEADER_BYTES] ^= 0xff;
+    expect(await verifySwarmEnvelope('hop-key', 'session-a', tampered, decoded!.mac!)).toBe(false);
+  });
+
+  it('computes a deterministic truncated MAC', async () => {
+    const frame = encodeSwarmStopFrame();
+    const first = await computeSwarmFrameMac('k', 's', frame);
+    const second = await computeSwarmFrameMac('k', 's', frame);
+    expect(first).toEqual(second);
+    expect(first.byteLength).toBe(SWARM_ENVELOPE_MAC_BYTES);
+  });
+});
+
+describe('swarm slice and control validators', () => {
+  const slice = { start: 0, end: 4, hasEmbed: true, hasHead: true };
+
+  it('accepts a well-formed slice message', () => {
+    expect(
+      isSwarmSliceMessage({
+        type: 'swarm-slice',
+        sessionId: 's',
+        taskId: 't',
+        model: 'qwen3.5-2b',
+        timeoutMs: 1000,
+        index: 0,
+        chainLength: 2,
+        role: 'host',
+        slice,
+        inboundKey: 'abc',
+        outboundKey: 'def',
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a slice message whose bounds would materialise a whole model', () => {
+    const base = {
+      type: 'swarm-slice',
+      sessionId: 's',
+      taskId: 't',
+      model: 'm',
+      timeoutMs: 1000,
+      index: 1,
+      chainLength: 2,
+      role: 'worker',
+    };
+    expect(isSwarmSliceMessage({ ...base, slice: { start: 0, end: 1e9, hasEmbed: false, hasHead: false } })).toBe(false);
+    expect(
+      isSwarmSliceMessage({
+        ...base,
+        slice: { start: 0, end: MAX_SWARM_SLICE_LAYERS + 1, hasEmbed: false, hasHead: false },
+      }),
+    ).toBe(false);
+    expect(isSwarmSliceMessage({ ...base, slice: { start: 2, end: 2, hasEmbed: false, hasHead: false } })).toBe(false);
+    expect(isSwarmSliceMessage({ ...base, slice: { start: -1, end: 2, hasEmbed: false, hasHead: false } })).toBe(false);
+    expect(isSwarmSliceMessage({ ...base, index: 5, slice: { start: 0, end: 2, hasEmbed: false, hasHead: false } })).toBe(
+      false,
+    );
+    expect(
+      isSwarmSliceMessage({ ...base, role: 'host', slice: { start: 0, end: 2, hasEmbed: true, hasHead: true } }),
+    ).toBe(false);
+  });
+
+  it('validates slices on their own', () => {
+    expect(isValidSwarmSlice(slice)).toBe(true);
+    expect(isValidSwarmSlice({ start: 0, end: 1e9, hasEmbed: true, hasHead: true })).toBe(false);
+    expect(isValidSwarmSlice({ start: 1.5, end: 3, hasEmbed: true, hasHead: true })).toBe(false);
+  });
+
+  it('validates start and error messages', () => {
+    expect(isSwarmStartMessage({ type: 'swarm-start', sessionId: 's', taskId: 't' })).toBe(true);
+    expect(isSwarmStartMessage({ type: 'swarm-start', sessionId: 's' })).toBe(false);
+    expect(isSwarmErrorMessage({ type: 'swarm-error', sessionId: 's', taskId: 't', error: 'boom' })).toBe(true);
+    expect(isSwarmErrorMessage({ type: 'swarm-error', sessionId: 's', taskId: 't' })).toBe(false);
+  });
+
+  it('rejects a plan that hands a node an oversized slice', () => {
+    expect(
+      isValidSwarmChain([
+        { nodeId: 'a', role: 'host', slice: { start: 0, end: 1e9, hasEmbed: true, hasHead: true } },
+      ]),
+    ).toBe(false);
+    expect(
+      isValidSwarmChain([
+        { nodeId: 'a', role: 'host', slice: { start: 0, end: 2, hasEmbed: true, hasHead: true } },
+        { nodeId: 'b', role: 'worker', slice: { start: 2, end: 4, hasEmbed: false, hasHead: false } },
+      ]),
+    ).toBe(true);
   });
 });
 
@@ -177,6 +305,8 @@ describe('swarm message guards', () => {
         sessionId: 's',
         taskId: 't',
         model: 'm',
+        timeoutMs: 30_000,
+        prompt: 'hi',
         members: [
           { nodeId: 'a', capacity: 4 },
           { nodeId: 'b', capacity: 2 },
@@ -193,6 +323,28 @@ describe('swarm message guards', () => {
     ).toBe(false);
     expect(
       isSwarmInitMessage({ type: 'swarm-init', sessionId: 's', taskId: 't', model: 'm', members: [{ nodeId: '' }] }),
+    ).toBe(false);
+    // The deadline and prompt are what the host's worker runs on: without them
+    // the session would inherit an unbounded budget.
+    expect(
+      isSwarmInitMessage({
+        type: 'swarm-init',
+        sessionId: 's',
+        taskId: 't',
+        model: 'm',
+        prompt: 'hi',
+        members: [{ nodeId: 'a', capacity: 4 }],
+      }),
+    ).toBe(false);
+    expect(
+      isSwarmInitMessage({
+        type: 'swarm-init',
+        sessionId: 's',
+        taskId: 't',
+        model: 'm',
+        timeoutMs: 1000,
+        members: [{ nodeId: 'a', capacity: 4 }],
+      }),
     ).toBe(false);
   });
 

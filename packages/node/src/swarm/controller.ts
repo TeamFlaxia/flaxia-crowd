@@ -1,10 +1,12 @@
-import type {
-  SwarmChainNode,
-  SwarmInferenceNodeInfo,
-  SwarmInitMessage,
-  SwarmMember,
-  SwarmSlice,
-  SwarmSliceMessage,
+import {
+  isValidSwarmSlice,
+  MAX_SWARM_NODES,
+  type SwarmChainNode,
+  type SwarmInferenceNodeInfo,
+  type SwarmInitMessage,
+  type SwarmMember,
+  type SwarmSlice,
+  type SwarmSliceMessage,
 } from '@flaxia/sdk';
 import type { SwarmEngineAdapter } from './adapter';
 import { runSwarmHost, runSwarmWorker, SESSION_MAX_SEQ, type SwarmFrameLink, type SwarmSemantics } from './session';
@@ -71,6 +73,13 @@ export class SwarmController {
       if (initial.type === 'swarm-init') {
         this.sessionId = initial.sessionId;
         this.model = initial.model;
+        if (
+          !Array.isArray(initial.members) ||
+          initial.members.length < 1 ||
+          initial.members.length > MAX_SWARM_NODES
+        ) {
+          throw new Error(`swarm-init has an invalid member count: ${JSON.stringify(initial.members?.length)}`);
+        }
         this.chainLength = initial.members.length;
         this.prompt = initial.prompt;
         if (initial.maxNewTokens !== undefined) this.maxNewTokens = initial.maxNewTokens;
@@ -126,8 +135,38 @@ export class SwarmController {
     };
   }
 
+  /**
+   * A slice message decides how much of the model this device materialises, so
+   * validate it even when it arrived through a path that already validated it:
+   * a hostile host must not be able to ask for a slice like `end = 1e9` (whole
+   * model in GPU memory) or claim a role/position that is not its own.
+   */
+  private validateSlice(message: SwarmSliceMessage): void {
+    if (
+      !Number.isInteger(message.chainLength) ||
+      message.chainLength < 1 ||
+      message.chainLength > MAX_SWARM_NODES
+    ) {
+      throw new Error(`swarm slice has an invalid chain length: ${JSON.stringify(message.chainLength)}`);
+    }
+    if (!Number.isInteger(message.index) || message.index < 0 || message.index >= message.chainLength) {
+      throw new Error(`swarm slice has an invalid index: ${JSON.stringify(message.index)}`);
+    }
+    if (message.role !== (message.index === 0 ? 'host' : 'worker')) {
+      throw new Error(`swarm slice role ${message.role} does not match index ${message.index}`);
+    }
+    if (!isValidSwarmSlice(message.slice)) {
+      throw new Error(`swarm slice is out of bounds: ${JSON.stringify(message.slice)}`);
+    }
+    const host = message.index === 0;
+    if (message.slice.hasEmbed !== host || message.slice.hasHead !== host) {
+      throw new Error('swarm slice embed/head ownership does not match the host position');
+    }
+  }
+
   private async loadSlice(message: SwarmSliceMessage): Promise<void> {
     if (this.settled || this.sliceLoaded) return;
+    this.validateSlice(message);
     this.sessionId = message.sessionId;
     this.model = message.model;
     this.chainLength = message.chainLength;

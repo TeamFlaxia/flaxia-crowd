@@ -144,21 +144,90 @@ export const SWARM_FRAME_KIND = {
 } as const;
 
 /** WebSocket envelope: bind an engine frame to one session attempt. */
-export function encodeSwarmEnvelope(sessionId: string, frame: ArrayBuffer): ArrayBuffer {
+/**
+ * Length of the truncated HMAC-SHA256 trailer a hop adds to an envelope. 16
+ * bytes (128 bits) is far past forging range for a per-hop session key while
+ * staying small next to a hidden-state payload.
+ */
+export const SWARM_ENVELOPE_MAC_BYTES = 16;
+
+/**
+ * WebSocket envelope: bind an engine frame to one session attempt, optionally
+ * carrying the per-hop MAC that proves which neighbour produced it.
+ *
+ * Layout: u32 sessionIdLength, sessionId bytes, u8 macLength (0 or 16),
+ * mac bytes, frame bytes. `macLength = 0` keeps the pre-MAC wire shape for
+ * sessions that have no hop keys (a single-node chain never sends a frame).
+ */
+export function encodeSwarmEnvelope(sessionId: string, frame: ArrayBuffer, mac?: Uint8Array | null): ArrayBuffer {
   const id = new TextEncoder().encode(sessionId);
-  const buffer = new ArrayBuffer(4 + id.length + frame.byteLength);
-  new DataView(buffer).setUint32(0, id.length, true);
+  const macBytes = mac ?? new Uint8Array(0);
+  const frameOffset = 4 + id.length + 1 + macBytes.byteLength;
+  const buffer = new ArrayBuffer(frameOffset + frame.byteLength);
+  const view = new DataView(buffer);
+  view.setUint32(0, id.length, true);
   new Uint8Array(buffer, 4, id.length).set(id);
-  new Uint8Array(buffer, 4 + id.length).set(new Uint8Array(frame));
+  view.setUint8(4 + id.length, macBytes.byteLength);
+  if (macBytes.byteLength) new Uint8Array(buffer, 4 + id.length + 1, macBytes.byteLength).set(macBytes);
+  new Uint8Array(buffer, frameOffset).set(new Uint8Array(frame));
   return buffer;
 }
 
-export function decodeSwarmEnvelope(buffer: ArrayBuffer): { sessionId: string; frame: ArrayBuffer } | null {
-  if (buffer.byteLength < 4) return null;
-  const length = new DataView(buffer).getUint32(0, true);
-  if (!length || length > 256 || buffer.byteLength < 4 + length + SWARM_FRAME_HEADER_BYTES) return null;
+export function decodeSwarmEnvelope(
+  buffer: ArrayBuffer,
+): { sessionId: string; frame: ArrayBuffer; mac: Uint8Array | null } | null {
+  if (buffer.byteLength < 4 + 1) return null;
+  const view = new DataView(buffer);
+  const length = view.getUint32(0, true);
+  if (!length || length > 256) return null;
+  const macLengthOffset = 4 + length;
+  if (buffer.byteLength < macLengthOffset + 1) return null;
+  const macLength = view.getUint8(macLengthOffset);
+  if (macLength !== 0 && macLength !== SWARM_ENVELOPE_MAC_BYTES) return null;
+  const frameOffset = macLengthOffset + 1 + macLength;
+  if (buffer.byteLength < frameOffset + SWARM_FRAME_HEADER_BYTES) return null;
   const sessionId = new TextDecoder().decode(new Uint8Array(buffer, 4, length));
-  return { sessionId, frame: buffer.slice(4 + length) };
+  const mac = macLength ? new Uint8Array(buffer, macLengthOffset + 1, macLength) : null;
+  return { sessionId, mac, frame: buffer.slice(frameOffset) };
+}
+
+/**
+ * Per-hop frame authentication. The coordinator hands each member a fresh key
+ * for each side of its hop (`inboundKey`/`outboundKey` on `swarm-slice`); a
+ * member signs what it forwards with its outbound key and only accepts frames
+ * signed with its inbound key, so one member cannot inject or rewrite a frame
+ * as another hop.
+ */
+export async function computeSwarmFrameMac(key: string, sessionId: string, frame: ArrayBuffer): Promise<Uint8Array> {
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(key),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', cryptoKey, encodeSwarmEnvelope(sessionId, frame));
+  return new Uint8Array(signature).slice(0, SWARM_ENVELOPE_MAC_BYTES);
+}
+
+/** Sign an engine frame for the next hop. */
+export async function signSwarmEnvelope(key: string, sessionId: string, frame: ArrayBuffer): Promise<ArrayBuffer> {
+  const mac = await computeSwarmFrameMac(key, sessionId, frame);
+  return encodeSwarmEnvelope(sessionId, frame, mac);
+}
+
+/** Constant-time check of a frame's hop MAC. */
+export async function verifySwarmEnvelope(
+  key: string,
+  sessionId: string,
+  frame: ArrayBuffer,
+  mac: Uint8Array,
+): Promise<boolean> {
+  if (mac.byteLength !== SWARM_ENVELOPE_MAC_BYTES) return false;
+  const expected = await computeSwarmFrameMac(key, sessionId, frame);
+  let diff = 0;
+  for (let i = 0; i < expected.byteLength; i++) diff |= expected[i] ^ mac[i];
+  return diff === 0;
 }
 
 export interface SwarmFrameHeader {
@@ -272,6 +341,12 @@ export interface SwarmSliceMessage {
   chainLength: number;
   role: SwarmRole;
   slice: SwarmSlice;
+  /**
+   * Per-hop frame key for the frames this node receives (from the previous hop)
+   * and sends (to the next hop). Base64url; absent on a single-node chain.
+   */
+  inboundKey?: string;
+  outboundKey?: string;
 }
 
 /** Sent to the host once every member has loaded its slice. */
@@ -317,6 +392,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+/**
+ * Per-call overrides for the swarm sizing bounds declared with the layer
+ * planner (`MAX_SWARM_LAYERS`, `MAX_SWARM_SLICE_LAYERS`, `MAX_SWARM_NODES`).
+ */
+export interface SwarmChainLimits {
+  /** Hard cap on the total layer count a plan may cover. */
+  maxLayers?: number;
+  /** Hard cap on the number of layers any single slice may hold. */
+  maxSliceLayers?: number;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+/** Validate one node's slice: integral, non-empty and within the layer caps. */
+export function isValidSwarmSlice(value: unknown, limits: SwarmChainLimits = {}): value is SwarmSlice {
+  const maxLayers = limits.maxLayers ?? MAX_SWARM_LAYERS;
+  const maxSliceLayers = limits.maxSliceLayers ?? MAX_SWARM_SLICE_LAYERS;
+  if (!isSlice(value)) return false;
+  if (!isNonNegativeInteger(value.start) || !isNonNegativeInteger(value.end)) return false;
+  if (value.end <= value.start) return false;
+  if (value.end - value.start > maxSliceLayers) return false;
+  if (value.end > maxLayers) return false;
+  return true;
+}
+
 function isSlice(value: unknown): value is SwarmSlice {
   if (!isRecord(value)) return false;
   return (
@@ -332,42 +434,81 @@ function isMember(value: unknown): value is SwarmMember {
   return typeof value.nodeId === 'string' && value.nodeId.length > 0 && typeof value.capacity === 'number';
 }
 
+function isFrameKey(value: unknown): boolean {
+  return value === undefined || (typeof value === 'string' && value.length > 0 && value.length <= 128);
+}
+
 export function isSwarmInitMessage(value: unknown): value is SwarmInitMessage {
   if (!isRecord(value) || value.type !== 'swarm-init') return false;
   if (typeof value.sessionId !== 'string' || !value.sessionId) return false;
   if (typeof value.taskId !== 'string' || !value.taskId) return false;
   if (typeof value.model !== 'string') return false;
+  if (typeof value.timeoutMs !== 'number') return false;
   if (!Array.isArray(value.members) || value.members.length === 0) return false;
+  if (value.members.length > MAX_SWARM_NODES) return false;
+  if (typeof value.prompt !== 'string' && !Array.isArray(value.prompt)) return false;
   return value.members.every(isMember);
+}
+
+/** Validate a `swarm-slice` before a node loads anything from it. */
+export function isSwarmSliceMessage(value: unknown): value is SwarmSliceMessage {
+  if (!isRecord(value) || value.type !== 'swarm-slice') return false;
+  if (typeof value.sessionId !== 'string' || !value.sessionId) return false;
+  if (typeof value.taskId !== 'string' || !value.taskId) return false;
+  if (typeof value.model !== 'string' || !value.model) return false;
+  if (typeof value.timeoutMs !== 'number') return false;
+  if (!isNonNegativeInteger(value.index) || !isNonNegativeInteger(value.chainLength)) return false;
+  if (value.chainLength < 1 || value.chainLength > MAX_SWARM_NODES) return false;
+  if (value.index >= value.chainLength) return false;
+  if (value.role !== (value.index === 0 ? 'host' : 'worker')) return false;
+  if (!isValidSwarmSlice(value.slice)) return false;
+  if (value.slice.hasEmbed !== (value.index === 0)) return false;
+  if (value.slice.hasHead !== (value.index === 0)) return false;
+  if (!isFrameKey(value.inboundKey) || !isFrameKey(value.outboundKey)) return false;
+  return true;
+}
+
+export function isSwarmStartMessage(value: unknown): value is SwarmStartMessage {
+  if (!isRecord(value) || value.type !== 'swarm-start') return false;
+  return typeof value.sessionId === 'string' && !!value.sessionId && typeof value.taskId === 'string' && !!value.taskId;
+}
+
+export function isSwarmErrorMessage(value: unknown): value is SwarmErrorMessage {
+  if (!isRecord(value) || value.type !== 'swarm-error') return false;
+  return (
+    typeof value.sessionId === 'string' &&
+    !!value.sessionId &&
+    typeof value.taskId === 'string' &&
+    !!value.taskId &&
+    typeof value.error === 'string'
+  );
 }
 
 /**
  * Validate a host-supplied plan before the coordinator stores it: the slices
- * must be non-empty, contiguous, cover every layer exactly once, and the first
- * entry must be the host that owns the embedding and head.
+ * must be non-empty, contiguous, cover every layer exactly once, stay within
+ * the layer caps, and the first entry must be the host that owns the embedding
+ * and head.
  *
  * Slice bounds are enforced too: layer indices must be non-negative integers,
  * the model may not be deeper than {@link MAX_SWARM_LAYERS}, and no single node
  * may be handed more than {@link MAX_SWARM_SLICE_LAYERS} layers. A malicious
  * host otherwise assigns a real volunteer `end: 1e9` and OOMs its GPU.
  */
-export function isValidSwarmChain(chain: unknown): chain is SwarmChainNode[] {
-  if (!Array.isArray(chain) || chain.length === 0) return false;
+export function isValidSwarmChain(chain: unknown, limits: SwarmChainLimits = {}): chain is SwarmChainNode[] {
+  const maxLayers = limits.maxLayers ?? MAX_SWARM_LAYERS;
+  if (!Array.isArray(chain) || chain.length === 0 || chain.length > MAX_SWARM_NODES) return false;
   let cursor = 0;
   for (let i = 0; i < chain.length; i++) {
     const node = chain[i];
     if (!isRecord(node) || typeof node.nodeId !== 'string' || !node.nodeId) return false;
     if (node.role !== (i === 0 ? 'host' : 'worker')) return false;
-    if (!isSlice(node.slice)) return false;
-    const { start, end } = node.slice;
-    if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
-    if (start < 0 || end > MAX_SWARM_LAYERS) return false;
-    if (end - start > MAX_SWARM_SLICE_LAYERS) return false;
-    if (start !== cursor) return false;
-    if (end <= start) return false;
+    if (!isValidSwarmSlice(node.slice, limits)) return false;
+    if (node.slice.start !== cursor) return false;
+    if (node.slice.end > maxLayers) return false;
     if (node.slice.hasEmbed !== (i === 0)) return false;
     if (node.slice.hasHead !== (i === 0)) return false;
-    cursor = end;
+    cursor = node.slice.end;
   }
   return true;
 }

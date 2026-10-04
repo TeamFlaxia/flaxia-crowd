@@ -61,17 +61,42 @@ type HopFrame = { kind: 'stale' } | PayloadFrame;
 
 type DecodedFrame = NonNullable<ReturnType<typeof decodeSwarmFrame>>;
 
+/** KV-cache bound for a frame: the engine's own limit when it declares one. */
+function frameMaxSeq(engine: SwarmEngineAdapter): number {
+  const maxSeq = engine.maxSeq;
+  if (typeof maxSeq === 'number' && Number.isInteger(maxSeq) && maxSeq > 0) return maxSeq;
+  return SESSION_MAX_SEQ;
+}
+
 /** Check a decoded frame's payload against this slice before the engine sees it. */
 function decodeHopPayload(decoded: DecodedFrame, engine: SwarmEngineAdapter, semantics: SwarmSemantics): PayloadFrame {
+  const { pos, tokens } = decoded.header;
+  // `pos` is attacker-controlled in a hostile session: without this bound a peer
+  // could make the engine write outside its KV cache (GPU device loss).
+  const maxSeq = frameMaxSeq(engine);
+  if (!Number.isInteger(tokens) || tokens < 1) {
+    return { kind: 'corrupt', reason: `carried ${tokens} token columns` };
+  }
+  if (!Number.isInteger(pos) || pos < 0 || pos + tokens > maxSeq) {
+    return { kind: 'corrupt', reason: `position ${pos}+${tokens} is outside the ${maxSeq}-token context` };
+  }
+
   let hidden: Float32Array;
   try {
     hidden = semantics.unpackHidden(decoded.payload);
   } catch (err) {
     return { kind: 'corrupt', reason: err instanceof Error ? err.message : String(err) };
   }
-  const expected = engine.dim * decoded.header.tokens;
+  const expected = engine.dim * tokens;
   if (hidden.length !== expected) {
     return { kind: 'corrupt', reason: `carried ${hidden.length} values, expected ${expected}` };
+  }
+  // f16 NaN/Inf survive the length check and would poison every downstream
+  // layer, so reject them before the engine merges the state.
+  for (let i = 0; i < hidden.length; i++) {
+    if (!Number.isFinite(hidden[i])) {
+      return { kind: 'corrupt', reason: `carried a non-finite value at index ${i}` };
+    }
   }
   return { kind: 'ok', hidden };
 }
