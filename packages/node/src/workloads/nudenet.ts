@@ -1,11 +1,20 @@
 import type { NudeNetDetection, NudeNetPayload, NudeNetResult } from '@flaxia/sdk';
 import * as ort from 'onnxruntime-web';
+import { fetchGuarded } from '../executor/egress-guard';
 
 const IMG_SIZE = 320;
 const ORT_WASM_VERSION = '1.26.0';
 
 const MODEL_URL = 'https://huggingface.co/deepghs/nudenet_onnx/resolve/main/320n.onnx';
 const NMS_MODEL_URL = 'https://huggingface.co/deepghs/nudenet_onnx/resolve/main/nms-yolov8.onnx';
+
+/** Hard caps for the inputs this workload accepts. */
+export const MAX_NUDENET_IMAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_NUDENET_MODEL_BYTES = 512 * 1024 * 1024;
+/** Content types accepted for a customer-supplied image URL. */
+export const NUDENET_IMAGE_CONTENT_TYPES = ['image/*', 'application/octet-stream'] as const;
+/** Content types the fixed model registry is served with. */
+const MODEL_CONTENT_TYPES = ['application/octet-stream', 'application/wasm'] as const;
 
 /**
  * NudeNet class labels, in the exact order used by the 320n YOLOv8 export
@@ -55,9 +64,15 @@ function getSession(url: string): Promise<ort.InferenceSession> {
       const modelName = url.split('/').pop() ?? url;
       const startedAt = performance.now();
       console.log(`[flaxia-node] nudenet: downloading model ${modelName}`);
-      const res = await fetch(url);
+      // The model URLs are fixed constants, but they are still fetched through
+      // the egress guard so protocol/host/redirect/type/size stay enforced.
+      const res = await fetchGuarded({
+        url,
+        allowContentTypes: MODEL_CONTENT_TYPES,
+        maxBytes: MAX_NUDENET_MODEL_BYTES,
+      });
       if (!res.ok) throw new Error(`Failed to download ONNX model: ${url} (HTTP ${res.status})`);
-      const buffer = await res.arrayBuffer();
+      const buffer = res.bytes;
       console.log(
         `[flaxia-node] nudenet: model loaded ${modelName} bytes=${buffer.byteLength} downloadMs=${Math.round(performance.now() - startedAt)}`,
       );
@@ -80,9 +95,15 @@ async function loadImage(payload: NudeNetPayload): Promise<ImageBitmap> {
     const res = await fetch(`data:${mimeType};base64,${payload.imageBase64}`);
     blob = await res.blob();
   } else if (payload.imageUrl) {
-    const res = await fetch(payload.imageUrl);
+    // Customer-supplied URL: only https, public hosts, default port, a real
+    // image content type and a bounded body may be fetched (SSRF guard).
+    const res = await fetchGuarded({
+      url: payload.imageUrl,
+      allowContentTypes: NUDENET_IMAGE_CONTENT_TYPES,
+      maxBytes: MAX_NUDENET_IMAGE_BYTES,
+    });
     if (!res.ok) throw new Error(`Failed to fetch image: ${payload.imageUrl} (HTTP ${res.status})`);
-    blob = await res.blob();
+    blob = new Blob([res.bytes], { type: res.contentType || 'application/octet-stream' });
   } else {
     throw new Error('NudeNet payload requires either imageUrl or imageBase64');
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleAiInference } from '../ai-inference';
+import { handleAiInference, registerAiModels, listAiModels } from '../ai-inference';
 
 const mockGenerate = vi.fn().mockResolvedValue([{ label: 'POSITIVE', score: 0.99 }]);
 const mockPipeline = vi.fn();
@@ -17,6 +17,18 @@ vi.mock('@huggingface/transformers', () => {
   };
 });
 
+// The allowlist is process-wide: extend it with a test-only entry so the tests
+// never depend on the production registry contents.
+const TEST_MODEL = 'test/allowlisted-model';
+registerAiModels({
+  [TEST_MODEL]: { repo: 'test/allowlisted-model', revision: 'test-rev', maxBytes: 1024 * 1024 },
+  'test/second-model': { repo: 'test/second-model', revision: 'test-rev', maxBytes: 1024 * 1024 },
+  'test/device-model': { repo: 'test/device-model', revision: 'test-rev', maxBytes: 1024 * 1024 },
+  'test/greedy-model': { repo: 'test/greedy-model', revision: 'test-rev', maxBytes: 1024 * 1024 },
+  'test/gen-opts-model': { repo: 'test/gen-opts-model', revision: 'test-rev', maxBytes: 1024 * 1024 },
+  'test/array-model': { repo: 'test/array-model', revision: 'test-rev', maxBytes: 1024 * 1024 },
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockPipeline.mockReset();
@@ -28,7 +40,7 @@ describe('AI Inference Workload', () => {
   it('should return pipeline output for text-classification', async () => {
     const payload = {
       task: 'text-classification',
-      model: 'Xenova/distilbert-base-uncased-finetuned-sst-2-english',
+      model: TEST_MODEL,
       input: 'I love this service!',
       options: { dtype: 'q4f16' }
     };
@@ -42,7 +54,7 @@ describe('AI Inference Workload', () => {
   it('should pass streamer to generator when onToken provided', async () => {
     const payload = {
       task: 'text-classification',
-      model: 'test-model',
+      model: TEST_MODEL,
       input: 'hello',
     };
 
@@ -53,7 +65,7 @@ describe('AI Inference Workload', () => {
   it('should throw an error for unsupported tasks', async () => {
     const payload = {
       task: 'invalid-task',
-      model: 'some-model',
+      model: TEST_MODEL,
       input: 'test',
     };
 
@@ -63,7 +75,7 @@ describe('AI Inference Workload', () => {
   it('should handle array input', async () => {
     const payload = {
       task: 'text-classification',
-      model: 'test-model',
+      model: 'test/array-model',
       input: ['first input', 'second input'],
     };
 
@@ -83,7 +95,7 @@ describe('AI Inference Workload', () => {
     ];
 
     for (const task of supportedTasks) {
-      const payload = { task, model: 'test-model', input: 'test' };
+      const payload = { task, model: 'test/second-model', input: 'test' };
       const result = await handleAiInference(payload);
       expect(result.output).toBeDefined();
     }
@@ -91,7 +103,7 @@ describe('AI Inference Workload', () => {
 
   it('should provide informative error message listing supported tasks', async () => {
     try {
-      await handleAiInference({ task: 'unsupported', model: 'm', input: 'test' } as any);
+      await handleAiInference({ task: 'unsupported', model: TEST_MODEL, input: 'test' } as any);
       expect.unreachable();
     } catch (e: any) {
       expect(e.message).toContain('unsupported task');
@@ -102,7 +114,7 @@ describe('AI Inference Workload', () => {
   it('should pass device option to pipeline', async () => {
     const payload = {
       task: 'text-generation',
-      model: 'test-model-device-opt',
+      model: 'test/device-model',
       input: 'hello',
       options: { device: 'webgpu' }
     };
@@ -111,7 +123,7 @@ describe('AI Inference Workload', () => {
 
     expect(mockPipeline).toHaveBeenCalledWith(
       'text-generation',
-      'test-model-device-opt',
+      'test/device-model',
       expect.objectContaining({ device: 'webgpu' }),
     );
   });
@@ -119,7 +131,7 @@ describe('AI Inference Workload', () => {
   it('should set do_sample: false by default for greedy decoding', async () => {
     const payload = {
       task: 'text-generation',
-      model: 'test-model-greedy',
+      model: 'test/greedy-model',
       input: 'hello',
     };
 
@@ -134,7 +146,7 @@ describe('AI Inference Workload', () => {
   it('should pass generation options when specified', async () => {
     const payload = {
       task: 'text-generation',
-      model: 'test-model-gen-opts',
+      model: 'test/gen-opts-model',
       input: 'hello',
       options: {
         temperature: 0.7,
@@ -157,5 +169,101 @@ describe('AI Inference Workload', () => {
         repetition_penalty: 1.1,
       }),
     );
+  });
+});
+
+describe('AI Inference model allowlist (#11)', () => {
+  it('exposes the registered models for operator tooling', () => {
+    expect(listAiModels()).toContain(TEST_MODEL);
+  });
+
+  it('rejects an unknown model before any download', async () => {
+    await expect(
+      handleAiInference({ task: 'text-generation', model: 'evil/arbitrary-repo', input: 'hi' } as any),
+    ).rejects.toThrow(/model not allowed: evil\/arbitrary-repo/);
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('rejects a model that is not a non-empty string', async () => {
+    await expect(
+      handleAiInference({ task: 'text-generation', model: '', input: 'hi' } as any),
+    ).rejects.toThrow(/model must be a non-empty string/);
+    await expect(
+      handleAiInference({ task: 'text-generation', model: { repo: 'x' }, input: 'hi' } as any),
+    ).rejects.toThrow(/model must be a non-empty string/);
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('validates registry entries at registration time', () => {
+    expect(() => registerAiModels({ 'bad/entry': { repo: '', revision: 'r', maxBytes: 1 } })).toThrow(/repo/);
+    expect(() =>
+      registerAiModels({ 'bad/entry': { repo: 'x', revision: '', maxBytes: 1 } }),
+    ).toThrow(/revision/);
+    expect(() =>
+      registerAiModels({ 'bad/entry': { repo: 'x', revision: 'r', maxBytes: 0 } }),
+    ).toThrow(/maxBytes/);
+    expect(() =>
+      registerAiModels({ 'bad/entry': { repo: 'x', revision: 'r', maxBytes: 1, sha256: 'nope' } }),
+    ).toThrow(/sha256/);
+  });
+
+  it('rejects an unsafe device', async () => {
+    await expect(
+      handleAiInference({ task: 'text-generation', model: TEST_MODEL, input: 'hi', options: { device: 'cuda' } } as any),
+    ).rejects.toThrow(/device not allowed/);
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsafe dtype (fp32/fp16 are not offered to tasks)', async () => {
+    for (const dtype of ['fp32', 'fp16', 'int4']) {
+      await expect(
+        handleAiInference({ task: 'text-generation', model: TEST_MODEL, input: 'hi', options: { dtype } } as any),
+      ).rejects.toThrow(/dtype not allowed/);
+    }
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed input before loading a model', async () => {
+    await expect(
+      handleAiInference({ task: 'text-generation', model: TEST_MODEL, input: 42 } as any),
+    ).rejects.toThrow(/input must be a string/);
+    await expect(
+      handleAiInference({ task: 'text-generation', model: TEST_MODEL, input: [{ nope: true }] } as any),
+    ).rejects.toThrow(/items must be strings/);
+    await expect(
+      handleAiInference({ task: 'text-generation', model: TEST_MODEL, input: [] } as any),
+    ).rejects.toThrow(/1\.\./);
+    await expect(
+      handleAiInference({ task: 'text-generation', model: TEST_MODEL, input: 'x'.repeat(100_001) } as any),
+    ).rejects.toThrow(/characters/);
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('rejects out-of-range generation options', async () => {
+    await expect(
+      handleAiInference({
+        task: 'text-generation',
+        model: TEST_MODEL,
+        input: 'hi',
+        options: { max_new_tokens: 1e9 },
+      } as any),
+    ).rejects.toThrow(/max_new_tokens must be a number within/);
+    await expect(
+      handleAiInference({
+        task: 'text-generation',
+        model: TEST_MODEL,
+        input: 'hi',
+        options: { temperature: Number.NaN },
+      } as any),
+    ).rejects.toThrow(/temperature must be a number within/);
+    await expect(
+      handleAiInference({
+        task: 'text-generation',
+        model: TEST_MODEL,
+        input: 'hi',
+        options: { do_sample: 'yes' },
+      } as any),
+    ).rejects.toThrow(/do_sample must be a boolean/);
+    expect(mockPipeline).not.toHaveBeenCalled();
   });
 });
