@@ -37,6 +37,13 @@ function readStoredRecord(): Record<string, unknown> | null {
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
 }
 
+/** Let WebCrypto (off the microtask queue) finish its verification. */
+const settle = async () => {
+  for (let i = 0; i < 10; i += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+};
+
 describe('consent/storage', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -331,6 +338,47 @@ describe('consent/storage', () => {
     saveConsent();
     expect(getConsentState()).toBe('unset');
     expect(warn).toHaveBeenCalled();
+  });
+
+  it('re-verifies the record when another tab changes storage', async () => {
+    markUserGestureConsent();
+    await grantConsent();
+    expect(hasConsent()).toBe(true);
+
+    // Another tab tampers with the record: the cached grant must not survive.
+    const record = readStoredRecord();
+    localStorage.setItem(
+      RECORD_KEY,
+      JSON.stringify({ ...record, expiry: (record?.expiry as number) + 1_000 }),
+    );
+    window.dispatchEvent(new StorageEvent('storage', { key: RECORD_KEY }));
+    await settle();
+    expect(hasConsent()).toBe(false);
+
+    // Another tab revokes: same result.
+    markUserGestureConsent();
+    await grantConsent();
+    expect(hasConsent()).toBe(true);
+    localStorage.removeItem(RECORD_KEY);
+    window.dispatchEvent(new StorageEvent('storage', { key: RECORD_KEY }));
+    await settle();
+    expect(hasConsent()).toBe(false);
+  });
+
+  it('picks up a grant made by another tab', async () => {
+    const keyStore = createMemoryKeyStore();
+    __consentTestHooks.setKeyStore(keyStore);
+    markUserGestureConsent();
+    await grantConsent(); // "tab A" grants and seals the shared record
+
+    // "Tab B": fresh document state, the record already sits in storage.
+    __consentTestHooks.resetIntegrityCache();
+    __consentTestHooks.setKeyStore(keyStore);
+    expect(hasConsent()).toBe(false); // fail closed until verification
+
+    window.dispatchEvent(new StorageEvent('storage', { key: RECORD_KEY }));
+    await settle();
+    expect(hasConsent()).toBe(true);
   });
 
   it('rejects a record that claims more than the bounded TTL', async () => {

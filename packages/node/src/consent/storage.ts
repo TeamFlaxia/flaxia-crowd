@@ -667,6 +667,43 @@ export const safeLocalStorageSet = safeSet;
 export const safeLocalStorageRemove = safeRemove;
 
 /**
+ * Re-verify the stored record after another tab changed it. The cached grant
+ * must not outlive a cross-tab revoke, and a cross-tab grant must become
+ * visible here — but only through the same HMAC/origin/notice/expiry checks,
+ * never by trusting the raw value.
+ */
+async function refreshConsentFromStorage(): Promise<void> {
+  const stored = readRecord();
+  if (!stored) {
+    activeGrant = null;
+    activeGrantTrusted = false;
+    return;
+  }
+  if (!getSubtle()) return; // Nothing can be verified in this context.
+  if (!hmacKey) {
+    // The key was never loaded (or was dropped by a revoke): re-run the init.
+    initPromise = null;
+    await initConsentIntegrity();
+    return;
+  }
+  const verified =
+    (await verifyRecordMac(stored)) && isRecordFresh(stored, Date.now()) && isRecordBound(stored);
+  activeGrant = verified ? stored : null;
+  activeGrantTrusted = verified;
+}
+
+try {
+  if (typeof globalThis.addEventListener === 'function') {
+    globalThis.addEventListener('storage', (event: StorageEvent) => {
+      if (event.key !== null && event.key !== RECORD_KEY && event.key !== DENIAL_KEY) return;
+      void refreshConsentFromStorage();
+    });
+  }
+} catch {
+  // Environments without `window`/`storage` events keep the cached state.
+}
+
+/**
  * Returns a UUID, falling back to a random v4 when `crypto.randomUUID` is
  * unavailable (older browsers, or non-secure contexts where `crypto.randomUUID`
  * is undefined on mobile Chrome). Never throws.
