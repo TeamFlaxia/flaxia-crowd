@@ -47,6 +47,19 @@ export interface SwarmSemantics {
 export const SESSION_MAX_SEQ = 4096;
 
 /**
+ * Hard ceiling on one hidden-state frame, header included. A payload is sized
+ * by the model's hidden dim and the tokens it carries, so a real hop is a few
+ * hundred KiB at most; anything past this is a corrupted or hostile frame and
+ * must be rejected before `unpackHidden` allocates it.
+ */
+export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
+/** Whether a frame is past {@link MAX_FRAME_BYTES} and must not be decoded. */
+export function isOversizedFrame(frame: ArrayBuffer): boolean {
+  return frame.byteLength > MAX_FRAME_BYTES;
+}
+
+/**
  * Outcome of reading an inbound frame while a hop is pending. The three cases
  * must stay distinct: a frame that answers a different request is stale (drop
  * it and keep waiting for the right one), a frame that answers this request but
@@ -79,7 +92,8 @@ function decodeHopPayload(decoded: DecodedFrame, engine: SwarmEngineAdapter, sem
 /**
  * Read a frame that arrived while a hop is pending. A frame answering a
  * different request is stale: drop it and keep waiting for the right one, so a
- * straggler from an earlier round cannot resolve this round's hop.
+ * straggler from an earlier round cannot resolve this round's hop. An oversized
+ * frame joins the invalid-frame path instead of being decoded.
  */
 function readHopFrame(
   frame: ArrayBuffer,
@@ -87,6 +101,9 @@ function readHopFrame(
   engine: SwarmEngineAdapter,
   semantics: SwarmSemantics,
 ): HopFrame {
+  if (isOversizedFrame(frame)) {
+    return { kind: 'corrupt', reason: `frame is ${frame.byteLength} bytes, over the ${MAX_FRAME_BYTES} byte limit` };
+  }
   const decoded = decodeSwarmFrame(frame);
   if (!decoded) return { kind: 'corrupt', reason: 'malformed frame header' };
   // `requestId` echoes the position the hop was sent for.
@@ -104,6 +121,12 @@ export interface SwarmHostOptions {
   engine: SwarmEngineAdapter;
   link: SwarmFrameLink;
   semantics: SwarmSemantics;
+  /**
+   * Whole-session budget in ms, from the coordinator. A hop that is still
+   * unanswered when it runs out rejects instead of waiting forever, so the
+   * controller can release the GPU buffers and the worker slot.
+   */
+  timeoutMs?: number;
   /** Stop as soon as this id is sampled (it is not emitted). */
   eosIds?: Set<number>;
   /** Called with each generated token id as it is produced. */
@@ -126,6 +149,14 @@ export async function runSwarmHost(options: SwarmHostOptions): Promise<SwarmHost
 
   engine.reset();
 
+  // The coordinator's budget covers the whole session; every hop must be
+  // answered before it runs out. A peer that never answers then rejects the hop
+  // instead of leaving the host awaiting it forever.
+  const deadline =
+    typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+      ? Date.now() + options.timeoutMs
+      : null;
+
   let pending: { pos: number; resolve: (hidden: Float32Array) => void; reject: (err: Error) => void } | null = null;
   link.onFrame((frame) => {
     if (isSwarmStopFrame(frame)) return;
@@ -144,7 +175,33 @@ export async function runSwarmHost(options: SwarmHostOptions): Promise<SwarmHost
   const hop = (hidden: Float32Array, pos: number): Promise<Float32Array> => {
     if (chainLength <= 1) return Promise.resolve(hidden);
     return new Promise<Float32Array>((resolve, reject) => {
-      pending = { pos, resolve, reject };
+      const remaining = deadline === null ? null : deadline - Date.now();
+      if (remaining !== null && remaining <= 0) {
+        reject(new Error(`swarm hop timed out after ${options.timeoutMs}ms`));
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      // Resolve/reject through `settle` so a hop that completes never leaves a
+      // deadline timer behind to fire into the next round.
+      const settle = (fn: () => void) => {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        fn();
+      };
+      pending = {
+        pos,
+        resolve: (value) => settle(() => resolve(value)),
+        reject: (err) => settle(() => reject(err)),
+      };
+      if (remaining !== null) {
+        timer = setTimeout(() => {
+          timer = null;
+          if (pending?.pos === pos) pending = null;
+          reject(new Error(`swarm hop timed out after ${options.timeoutMs}ms`));
+        }, remaining);
+      }
       link.send(encodeSwarmFrame({ requestId: pos, pos, tokens: 1 }, semantics.packHidden(hidden)));
     });
   };
@@ -183,13 +240,20 @@ export interface SwarmWorkerOptions {
   engine: SwarmEngineAdapter;
   link: SwarmFrameLink;
   semantics: SwarmSemantics;
+  /**
+   * Whole-session budget in ms, from the coordinator. A worker that never sees
+   * the host's stop frame gives up once it is spent, so its slice (and GPU
+   * device) is released with the session.
+   */
+  timeoutMs?: number;
 }
 
 /**
  * Run one middle slice until the host's stop frame arrives. Each hidden frame
  * is unpacked, run through this node's layers and forwarded around the ring.
  * Resolves once the stop frame has been forwarded; rejects if a frame cannot be
- * decoded, so a corrupt stream fails the session instead of hanging it.
+ * decoded (or is oversized), so a corrupt stream fails the session instead of
+ * hanging it.
  */
 export function runSwarmWorker(options: SwarmWorkerOptions): Promise<void> {
   const { engine, link, semantics } = options;
@@ -198,19 +262,39 @@ export function runSwarmWorker(options: SwarmWorkerOptions): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let chain: Promise<void> = Promise.resolve();
     let stopped = false;
+    const timeoutMs = options.timeoutMs;
+    const timer =
+      typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? setTimeout(() => {
+            if (stopped) return;
+            stopped = true;
+            reject(new Error(`swarm worker timed out after ${timeoutMs}ms`));
+          }, timeoutMs)
+        : null;
+    // Every outcome clears the deadline: a session that ends on the stop frame
+    // must not leave a timer behind for the next task in this worker.
+    const settle = (fn: () => void) => {
+      if (timer !== null) clearTimeout(timer);
+      fn();
+    };
 
     link.onFrame((frame) => {
       if (stopped) return;
       if (isSwarmStopFrame(frame)) {
         stopped = true;
         link.send(frame);
-        chain = chain.then(() => resolve());
+        chain = chain.then(() => settle(resolve));
         return;
       }
       // Frames must run in order; serialize even if a handler is still running.
       chain = chain
         .then(async () => {
           if (stopped) return;
+          if (isOversizedFrame(frame)) {
+            throw new Error(
+              `swarm frame is unusable: ${frame.byteLength} bytes exceeds the ${MAX_FRAME_BYTES} byte limit`,
+            );
+          }
           const decoded = decodeSwarmFrame(frame);
           if (!decoded) throw new Error('swarm frame has a malformed frame header');
           const read = decodeHopPayload(decoded, engine, semantics);
@@ -225,7 +309,7 @@ export function runSwarmWorker(options: SwarmWorkerOptions): Promise<void> {
         })
         .catch((err) => {
           stopped = true;
-          reject(err instanceof Error ? err : new Error(String(err)));
+          settle(() => reject(err instanceof Error ? err : new Error(String(err))));
         });
     });
   });

@@ -14,6 +14,7 @@ import {
   type PooledTokenizer,
 } from './adapter';
 import type { SwarmRuntime } from './controller';
+import { findSwarmSliceProblem } from './messages';
 import { SESSION_MAX_SEQ, type SwarmSemantics } from './session';
 
 /**
@@ -250,10 +251,23 @@ export function createSwarmRuntime(): SwarmRuntime {
       }).chain;
     },
 
+    async resolveLayers(model: string): Promise<number> {
+      // Shares the cached GGUF header with `load`, so validating the
+      // coordinator's slice costs no extra range fetch.
+      const { layers } = await resolve(model);
+      return layers;
+    },
+
     async load(slice: SwarmSlice, model: string) {
       rangeCacheHits = 0;
       rangeCacheMisses = 0;
-      const { mod, url, gguf } = await resolve(model);
+      const { mod, url, gguf, layers } = await resolve(model);
+
+      // Defense in depth: the controller validates the coordinator's slice
+      // before calling in, but `load` must never build a layer range (or an
+      // embed/head decision) the model cannot have.
+      const problem = findSwarmSliceProblem(slice, { totalLayers: layers });
+      if (problem) throw new Error(`swarm slice rejected: ${problem}`);
 
       const device = await requestDevice();
       const tokenizer = mod.makeTokenizer(mod.tokenizerFromGGUF(gguf.meta));

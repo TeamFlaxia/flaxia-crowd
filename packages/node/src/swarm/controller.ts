@@ -8,7 +8,19 @@ import type {
 } from '@flaxia/sdk';
 import type { SwarmEngineAdapter } from './adapter';
 import { runSwarmHost, runSwarmWorker, SESSION_MAX_SEQ, type SwarmFrameLink, type SwarmSemantics } from './session';
-import type { SwarmControlMessage } from './messages';
+import { findSwarmSliceProblem, type SwarmControlMessage } from './messages';
+
+/** Bounds of a coordinator-supplied session budget. The crowd API already
+ * enforces 1s .. 1h; a malformed payload falls back to the cap so a session can
+ * never await forever. */
+const MAX_SESSION_TIMEOUT_MS = 60 * 60 * 1000;
+
+/** A usable session budget, clamped to the cap; anything else becomes the cap. */
+function sessionTimeoutMs(value: unknown): number {
+  const timeoutMs = Number(value);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return MAX_SESSION_TIMEOUT_MS;
+  return Math.min(timeoutMs, MAX_SESSION_TIMEOUT_MS);
+}
 
 /**
  * Model and tokenizer access the controller needs. `plan` runs on the host
@@ -21,6 +33,12 @@ export interface SwarmRuntime {
     slice: SwarmSlice,
     model: string,
   ): Promise<{ engine: SwarmEngineAdapter; semantics: SwarmSemantics; warm?: boolean }>;
+  /**
+   * Total trunk layers of `model`, when the runtime can resolve them. The
+   * controller validates a coordinator-supplied slice against this before the
+   * (expensive) load, so an out-of-range range never reaches the engine.
+   */
+  resolveLayers?(model: string): Promise<number>;
 }
 
 export interface SwarmControllerOptions {
@@ -61,12 +79,16 @@ export class SwarmController {
   private sliceLoaded = false;
   private generationStarted = false;
   private settled = false;
+  private timeoutMs = MAX_SESSION_TIMEOUT_MS;
+  private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly options: SwarmControllerOptions) {}
 
   async start(): Promise<void> {
     if (this.settled) return;
     const initial = this.options.initial;
+    this.timeoutMs = sessionTimeoutMs(initial.timeoutMs);
+    this.armDeadline();
     try {
       if (initial.type === 'swarm-init') {
         this.sessionId = initial.sessionId;
@@ -109,9 +131,10 @@ export class SwarmController {
   }
 
   /**
-   * Stop the session because the coordinator settled the task elsewhere. Exactly
-   * like a failure this disposes the engine, so the GPU buffers and device do
-   * not stay resident on a device the scheduler has already moved on from.
+   * Stop the session because the coordinator settled the task elsewhere (or
+   * because the session deadline passed). Exactly like a failure this disposes
+   * the engine, so the GPU buffers and device do not stay resident on a device
+   * the scheduler has already moved on from.
    */
   abort(reason: string): void {
     this.fail(new Error(reason));
@@ -128,6 +151,13 @@ export class SwarmController {
 
   private async loadSlice(message: SwarmSliceMessage): Promise<void> {
     if (this.settled || this.sliceLoaded) return;
+    // The slice decides the engine's layer range and whether it builds the
+    // embedding/head, so it is validated (against the model's real layer count
+    // when the runtime can resolve it) before any weight is fetched or any GPU
+    // buffer is allocated.
+    const problem = await this.findSliceProblem(message);
+    if (problem) throw new Error(`swarm slice rejected: ${problem}`);
+
     this.sessionId = message.sessionId;
     this.model = message.model;
     this.chainLength = message.chainLength;
@@ -148,10 +178,25 @@ export class SwarmController {
     if (message.role === 'worker') {
       // A worker just serves frames until the host's stop frame arrives.
       this.generationStarted = true;
-      void runSwarmWorker({ engine, link: this.link(), semantics })
+      void runSwarmWorker({ engine, link: this.link(), semantics, timeoutMs: this.timeoutMs })
         .then(() => this.finish(emptyResult()))
         .catch((err) => this.fail(err));
     }
+  }
+
+  /** Why the coordinator's slice cannot drive this node, or null when it can. */
+  private async findSliceProblem(message: SwarmSliceMessage): Promise<string | null> {
+    let totalLayers: number | undefined;
+    const resolveLayers = this.options.runtime.resolveLayers;
+    if (resolveLayers) {
+      totalLayers = await resolveLayers.call(this.options.runtime, message.model);
+    }
+    return findSwarmSliceProblem(message.slice, {
+      role: message.role,
+      index: message.index,
+      chainLength: message.chainLength,
+      totalLayers,
+    });
   }
 
   private async startHost(): Promise<void> {
@@ -191,6 +236,7 @@ export class SwarmController {
       engine,
       link: this.link(),
       semantics,
+      timeoutMs: this.timeoutMs,
       eosIds: semantics.eosIds,
       onToken: (id) => this.options.emitToken(semantics.decodeTokens!([id])),
     });
@@ -223,8 +269,31 @@ export class SwarmController {
     });
   }
 
+  /**
+   * Arm the coordinator's session budget. On expiry the session is settled
+   * through `abort()`, the same path an external abort takes, so the engine's
+   * GPU buffers are released and the worker pool can free the task slot instead
+   * of waiting for its own (later) timeout.
+   */
+  private armDeadline(): void {
+    this.clearDeadline();
+    const timeoutMs = this.timeoutMs;
+    this.deadlineTimer = setTimeout(() => {
+      this.deadlineTimer = null;
+      this.abort(`swarm session timed out after ${timeoutMs}ms`);
+    }, timeoutMs);
+  }
+
+  private clearDeadline(): void {
+    if (this.deadlineTimer !== null) {
+      clearTimeout(this.deadlineTimer);
+      this.deadlineTimer = null;
+    }
+  }
+
   /** Release the engine (and its GPU device) exactly once, at session end. */
   private teardown(): void {
+    this.clearDeadline();
     this.frameHandler = null;
     const engine = this.engine;
     this.engine = null;
