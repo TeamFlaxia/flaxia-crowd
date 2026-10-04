@@ -2,7 +2,7 @@
 // WebGPU (Deno), solo and split across two engines, and compare token streams.
 //
 //   deno run --unstable-webgpu --allow-read --allow-write \
-//     --allow-net=huggingface.co,us.aws.cdn.hf.co,cdn-lfs.huggingface.co,cdn-lfs-us-1.hf.co,cas-bridge.xethub.hf.co,127.0.0.1 \
+//     --allow-net=huggingface.co,us.aws.cdn.hf.co,cdn-lfs-us-1.hf.co,cas-bridge.xethub.hf.co,127.0.0.1 \
 //     scripts/swarm-spike/run-real.mjs --tokens 12
 //
 // The GGUF is served from a local HTTP server with Range support, and every
