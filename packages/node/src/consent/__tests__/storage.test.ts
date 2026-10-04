@@ -160,26 +160,26 @@ describe('consent/storage', () => {
   });
 
   it('persists a non-extractable HMAC key', async () => {
-    let stored: CryptoKey | null = null;
+    const captured: { key: CryptoKey | null } = { key: null };
     __consentTestHooks.setKeyStore({
-      load: async () => stored,
+      load: async () => captured.key,
       save: async (key) => {
-        stored = key;
+        captured.key = key;
       },
       clear: async () => {
-        stored = null;
+        captured.key = null;
       },
     });
 
     markUserGestureConsent();
     await grantConsent();
 
-    expect(stored).not.toBeNull();
+    expect(captured.key).not.toBeNull();
     // Non-extractable: the raw key bytes can never leave the browser, so a
     // script that can only write localStorage strings cannot re-sign a record.
-    expect(stored?.extractable).toBe(false);
-    expect(stored?.type).toBe('secret');
-    expect(stored?.algorithm?.name).toBe('HMAC');
+    expect(captured.key?.extractable).toBe(false);
+    expect(captured.key?.type).toBe('secret');
+    expect(captured.key?.algorithm?.name).toBe('HMAC');
   });
 
   it('does not treat a legacy plaintext flag as consent', async () => {
