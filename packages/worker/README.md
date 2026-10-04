@@ -13,21 +13,21 @@ Cloudflare Workers + Durable Objects による**オーケストレーター**実
   (タスク依頼者)   │  POST /crowd/tasks               │
                   │  GET  /crowd/tasks/:id            │
                   │  GET  /crowd/subscribe  (WS)     │
-                  │  GET  /crowd/nodes               │
+                  │  POST /crowd/nodes/register      │
                   │                                  │
   Browser Node ───→│  GET  /crowd/signal    (WS)     │
-  (計算ノード)      │  POST /crowd/tasks/:id/result   │
-                  └────────┬─────────┬───────────────┘
-                           │         │
-                  ┌────────▼──┐ ┌───▼──────────┐
-                  │ TaskQueue │ │ NodeManager  │
-                  │ (DO)      │ │ (DO)         │
-                  │           │ │              │
-                  │ タスク管理 │ │ WebSocket    │
-                  │ 割り当て │ │ ノード選定   │
-                  │ リトライ  │ │ ハートビート │
-                  │ タイムアウト│ │ 結果中継     │
-                  └───────────┘ └──────────────┘
+  (計算ノード)      │  （結果・進捗も同じ WS 上）      │
+                  └────────────────┬─────────────────┘
+                                   │
+                          ┌────────▼─────────┐
+                          │ Coordinator (DO) │
+                          │                  │
+                          │ タスク管理 / 割り当て │
+                          │ 配信試行 (attempt) │
+                          │ ノード選定 / 死活  │
+                          │ swarm ブローカー   │
+                          │ 購読・Webhook 通知 │
+                          └──────────────────┘
 ```
 
 ## エンドポイント
@@ -46,9 +46,10 @@ Webhook 署名の意味）は `docs/07-trust-plane.md` を参照。
 
 ## Durable Objects
 
-### TaskQueue
+### Coordinator
 
-タスクのライフサイクルを管理します。
+タスクのライフサイクル、ノード接続、swarm セッション、購読、Webhook 通知を
+1 つの Durable Object（`global-coordinator`）で管理します。
 
 **状態遷移:**
 ```
@@ -59,22 +60,14 @@ pending ──→ processing ──→ done
 ```
 
 **責務:**
-- タスクの enqueue / 状態取得
-- NodeManager への割り当て要求
-- タイムアウト検出とリトライ
-- Alarm による定期的なタイムアウトチェック（pending あれば2s, なければ10s）
-
-### NodeManager
-
-WebSocket 接続を管理し、タスク割り当てとノード健全性を監視します。
-
-**責務:**
-- ノードの WebSocket 接続受付（`/crowd/signal`）
-- ノード選定（capability 一致 → CPU負荷最低 → 接続時間最古）
+- タスクの enqueue / 状態取得（テナント別キー）
+- ノードの WebSocket 接続受付（`/crowd/signal`）と選定
 - Ping/Pong によるハートビート（30s間隔、60s応答なしで切断）
-- タスク結果・進捗トークンの中継
+- 配信試行（attemptId）の発行と結果・進捗の検証
+- swarm セッションのブローカー（ホスト権限の検証）
 - ノード切断時のタスク再割り当て or 失敗処理
-- SDK クライアントへのタスク状態通知（`/crowd/subscribe`）
+- Alarm によるタイムアウト / pending TTL / 死活の定期チェック（30s）
+- SDK クライアントへのタスク状態通知（`/crowd/subscribe`）と Webhook 署名配送
 
 ## データモデル
 
@@ -159,7 +152,7 @@ npm run test
 |------|-----|
 | Worker名 | `flaxia-worker` |
 | エントリ | `src/index.ts` |
-| Durable Object | `TASK_QUEUE` (TaskQueue), `NODE_MANAGER` (NodeManager) |
+| Durable Object | `COORDINATOR` (Coordinator) |
 | 互換性日付 | 2024-04-03 |
 
 必要に応じて `wrangler secret put` で環境変数を設定してください:
