@@ -46,6 +46,12 @@ flaxia-crowd/
 
 各パッケージの詳細は `packages/*/GEMINI.md` を参照。
 
+### ローカル専用ツール設定
+
+`.gemini/settings.json` のようなエージェント／エディタ用のローカル設定は
+コミットしない（`.gitignore` 済み）。内部エンドポイントや内部モデル名が
+含まれ得るため、各開発者のローカルにのみ置くこと。
+
 ## ルートpackage.json
 
 ```json

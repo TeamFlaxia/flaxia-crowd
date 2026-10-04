@@ -41,3 +41,20 @@ npm test --workspace=@flaxia/text-analyzer
 同意状態の判定には `@flaxia/node` の公開 API（`getFlaxiaNodeConsentState()`）を
 使います。`localStorage` のフラグを直接読む実装は、期限切れや改ざんを検出できない
 ため使用しないでください。
+
+## ノード用ワーカーバンドルの配信
+
+このブラウザをノードとしても動かす場合、`@flaxia/node` はサイト直下の
+`/worker.js` と `/assets/*.js` を読み込みます。これらは `@flaxia/node` の
+ビルド成果物（`packages/node/dist/worker.js` と `dist/assets/`）であり、
+リポジトリには含めません。ホスト側で配信するか、ローカルでは次のように
+シンボリックリンクを張ってください（`.gitignore` 済み）。
+
+```bash
+npm run build --workspace=@flaxia/node
+mkdir -p packages/text-analyzer/public
+ln -sfn ../../node/dist/worker.js packages/text-analyzer/public/worker.js
+ln -sfn ../../node/dist/assets    packages/text-analyzer/public/assets
+```
+
+未配信の場合でも感情分析そのものは動作します（ノード提供機能のみ無効になります）。

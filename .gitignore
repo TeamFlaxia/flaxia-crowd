@@ -23,6 +23,15 @@ build/
 .vite/
 .next/
 
+# local-only agent tooling config (may contain internal endpoints/model names)
+.gemini/settings.json
+
+# text-analyzer demo: locally served @flaxia/node worker bundle (build output).
+# Recreate locally with `npm run build --workspace=@flaxia/node` and symlink
+# packages/node/dist/{worker.js,assets} here; never commit it.
+packages/text-analyzer/public/worker.js
+packages/text-analyzer/public/assets
+
 # environment
 .env
 .env.*
