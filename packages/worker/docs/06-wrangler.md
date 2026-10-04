@@ -64,7 +64,7 @@ wrangler secret put WEBHOOK_SIGNING_SECRET  # Webhook 署名専用（callbackUrl
 ```toml
 [vars]
 # 明示テナント: このキーは tenant-a のタスクだけを読み書きできる
-API_KEYS = "fc_live_flaxia:tenant-a,fc_live_partner:tenant-b"
+API_KEYS = "fc_live_example_a:tenant-a,fc_live_example_b:tenant-b"
 # テナント省略時は key-<sha256先頭16hex> が自動で割り当てられる（後方互換）
 ```
 
