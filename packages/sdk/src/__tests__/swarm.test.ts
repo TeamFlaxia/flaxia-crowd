@@ -12,6 +12,8 @@ import {
   isSwarmInitMessage,
   isSwarmNodeMessage,
   isValidSwarmChain,
+  MAX_SWARM_LAYERS,
+  MAX_SWARM_SLICE_LAYERS,
   SWARM_FRAME_MAGIC,
   SWARM_FRAME_HEADER_BYTES,
   encodeSwarmEnvelope,
@@ -232,5 +234,29 @@ describe('isValidSwarmChain', () => {
     expect(isValidSwarmChain([])).toBe(false);
     expect(isValidSwarmChain('nope')).toBe(false);
     expect(isValidSwarmChain([{ nodeId: 'a' }])).toBe(false);
+  });
+
+  it('rejects slices beyond the accepted layer bounds', () => {
+    // A hostile host assigning a volunteer the whole model (and then some):
+    // the node would expand it into GPU memory and OOM.
+    expect(isValidSwarmChain([
+      valid[0],
+      { ...valid[1], slice: { start: 6, end: 1e9, hasEmbed: false, hasHead: false } },
+    ])).toBe(false);
+
+    // Non-integer layer indices are not a plan.
+    expect(isValidSwarmChain([
+      { ...valid[0], slice: { start: 0, end: 2.5, hasEmbed: true, hasHead: true } },
+    ])).toBe(false);
+
+    // No single node may be asked for more than MAX_SWARM_SLICE_LAYERS.
+    expect(isValidSwarmChain([
+      { ...valid[0], slice: { start: 0, end: MAX_SWARM_SLICE_LAYERS + 1, hasEmbed: true, hasHead: true } },
+    ])).toBe(false);
+
+    // Nor may the model be deeper than MAX_SWARM_LAYERS.
+    expect(isValidSwarmChain([
+      { ...valid[0], slice: { start: 0, end: MAX_SWARM_LAYERS + 1, hasEmbed: true, hasHead: true } },
+    ])).toBe(false);
   });
 });
