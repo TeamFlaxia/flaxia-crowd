@@ -453,6 +453,19 @@ describe('Coordinator', () => {
     expect(got429).toBe(true);
   });
 
+  it('schedules an alarm no later than the pending TTL', async () => {
+    stub = newStub();
+    // A task may ask for an hour-long timeout, but a task nobody picks up must
+    // still be swept after the pending TTL, so the alarm has to be set for the
+    // earlier of the two deadlines.
+    const task = makeTask({ timeoutMs: 3600000 });
+    await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+
+    const alarm = await withStorage((storage) => storage.getAlarm());
+    expect(alarm).toBeTruthy();
+    expect(alarm!).toBeLessThanOrEqual(Date.now() + MAX_PENDING_TTL_MS + 1000);
+  });
+
   it('fails a pending task that outlives the pending TTL', async () => {
     stub = newStub();
     const task = makeTask({ createdAt: Date.now() - MAX_PENDING_TTL_MS - 1000 });

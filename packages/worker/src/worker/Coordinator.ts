@@ -736,8 +736,12 @@ export class Coordinator extends DurableObject<Env> {
     await this.tryAssignAll();
 
     const alarm = await this.ctx.storage.getAlarm();
-    if (!alarm || alarm > Date.now() + (body.timeoutMs || DEFAULT_TIMEOUT_MS)) {
-      await this.ctx.storage.setAlarm(Date.now() + (body.timeoutMs || DEFAULT_TIMEOUT_MS));
+    // Wake up for the earliest deadline that matters: the task timeout, or the
+    // pending TTL when that is sooner (a task nobody can serve must not sit in
+    // the queue for a full hour just because it asked for a long timeout).
+    const sweepAt = Date.now() + Math.min(body.timeoutMs || DEFAULT_TIMEOUT_MS, MAX_PENDING_TTL_MS);
+    if (!alarm || alarm > sweepAt) {
+      await this.ctx.storage.setAlarm(sweepAt);
     }
 
     return Response.json({ message: "Task submitted", taskId: body.id });
