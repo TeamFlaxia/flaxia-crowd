@@ -13,6 +13,12 @@
 //   stage "adapter": worker got an adapter + device
 //   stage "engine":  worker created a Qwen35Engine slice and decoded tokens
 // Exits non-zero if either stage fails.
+//
+// SECURITY: this harness launches Chrome with `--no-sandbox` and a DevTools
+// (CDP) port bound to 127.0.0.1, then drives it. It may only ever load the
+// pages this script itself serves on 127.0.0.1 — never a URL from an untrusted
+// source — and `CHROME` must be an absolute path to a trusted, operator-
+// installed browser binary (see trusted-chrome.mjs).
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -20,8 +26,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSynthGGUF } from '../../vendor/pooled/synth/synth.mjs';
+import { resolveChromeBinary } from './trusted-chrome.mjs';
 
-const CHROME = process.env.CHROME || '/usr/bin/google-chrome';
+let CHROME;
+try {
+  CHROME = resolveChromeBinary();
+} catch (err) {
+  console.error(`FAIL: ${err.message}`);
+  process.exit(1);
+}
 const TIMEOUT_MS = 90000;
 const TOKENS = 12;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -167,6 +180,8 @@ async function main() {
   });
   const webPort = await listen(web);
 
+  // DevTools stays bound to 127.0.0.1: `listen()` never accepts an external
+  // interface, so the CDP port is not reachable from the network.
   const debugServer = http.createServer();
   const debugPort = await listen(debugServer);
   debugServer.close();

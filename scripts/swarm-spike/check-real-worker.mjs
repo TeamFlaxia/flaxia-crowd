@@ -8,14 +8,27 @@
 //
 // The GGUF is served from disk with Range support and every tensor is
 // range-fetched — the same streaming loader the production runtime uses.
+//
+// SECURITY: this harness launches Chrome with `--no-sandbox` and a DevTools
+// (CDP) port bound to 127.0.0.1, then drives it. It may only ever load the
+// pages this script itself serves on 127.0.0.1 — never a URL from an untrusted
+// source — and `CHROME` must be an absolute path to a trusted, operator-
+// installed browser binary (see trusted-chrome.mjs).
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveChromeBinary } from './trusted-chrome.mjs';
 
-const CHROME = process.env.CHROME || '/usr/bin/google-chrome';
+let CHROME;
+try {
+  CHROME = resolveChromeBinary();
+} catch (err) {
+  console.error(`FAIL: ${err.message}`);
+  process.exit(1);
+}
 const MODEL = process.env.MODEL || '/tmp/opencode/swarm-real.gguf';
 const GPU = process.env.CHROME_GPU || 'real';
 const TOKENS = process.env.TOKENS || '6';
@@ -238,6 +251,8 @@ async function main() {
   web.headersTimeout = 0;
   web.on('clientError', () => {});
 
+  // DevTools stays bound to 127.0.0.1: `listen()` never accepts an external
+  // interface, so the CDP port is not reachable from the network.
   const debugServer = http.createServer();
   const debugPort = await listen(debugServer);
   debugServer.close();
