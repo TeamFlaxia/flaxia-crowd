@@ -1,6 +1,7 @@
 import './index.css';
 import { submitCrowdTask, getCrowdTask } from './crowd-client';
-import { initFlaxiaNode } from '@flaxia/node';
+import { initFlaxiaNode, getFlaxiaNodeConsentState } from '@flaxia/node';
+import { resolveOrchestratorUrl } from './orchestrator';
 
 const LABELS = ['1 star', '2 stars', '3 stars', '4 stars', '5 stars'] as readonly string[];
 const SENTIMENT_NAMES = ['Very Negative', 'Negative', 'Neutral', 'Positive', 'Very Positive'];
@@ -16,16 +17,12 @@ interface HistoryEntry {
   score: number;
 }
 
-const defaultOrchestrator = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  ? 'http://localhost:8787'
-  : 'https://flaxia-worker.remydre8.workers.dev';
-
-const savedOrchestrator = localStorage.getItem('flaxia_orchestrator_url');
-const displayOrchestratorUrl = savedOrchestrator || defaultOrchestrator;
-// Node signaling may connect directly to the orchestrator. Authenticated task
-// API calls are intentionally separate and always go through same-origin
-// /crowd/* so the browser never receives the API key.
-const orchestratorUrl = displayOrchestratorUrl;
+// Node signaling connects to the orchestrator configured at build time.
+// Authenticated task API calls are intentionally separate and always go
+// through same-origin /crowd/* so the browser never receives the API key.
+// `null` means the build was shipped without VITE_ORCHESTRATOR_URL: every entry
+// point then shows a configuration error instead of guessing an origin.
+const orchestratorUrl = resolveOrchestratorUrl();
 
 // UI Elements
 const analysisInput = document.getElementById('analysis-input') as HTMLTextAreaElement;
@@ -38,6 +35,21 @@ const historyList = document.getElementById('history-list') as HTMLDivElement;
 const clearHistoryBtn = document.getElementById('clear-history-btn') as HTMLButtonElement;
 const newAnalysisBtn = document.getElementById('new-analysis-btn') as HTMLButtonElement;
 const consentTrigger = document.getElementById('consent-trigger') as HTMLButtonElement;
+
+/**
+ * Surface a missing/invalid build-time orchestrator configuration. The demo
+ * never falls back to a hardcoded origin, so this is the only thing an
+ * unconfigured build can do.
+ */
+function showOrchestratorConfigError(): void {
+  const existing = document.querySelector('.config-error');
+  if (existing) return;
+  const msg = document.createElement('div');
+  msg.className = 'status-message error config-error';
+  msg.textContent =
+    'オーケストレーターが設定されていません。ビルド時に VITE_ORCHESTRATOR_URL を設定してください。';
+  resultsSection.parentNode?.insertBefore(msg, resultsSection);
+}
 
 // Task Visualizer
 function resetVisualizer() { }
@@ -169,7 +181,11 @@ newAnalysisBtn.addEventListener('click', () => {
 
 restoreHistory();
 
-consentTrigger.addEventListener('click', () => {
+function startFlaxiaNode(): void {
+  if (!orchestratorUrl) {
+    showOrchestratorConfigError();
+    return;
+  }
   initFlaxiaNode({
     orchestratorUrl,
     siteId: 'textanalyzer-example',
@@ -179,18 +195,14 @@ consentTrigger.addEventListener('click', () => {
       accentColor: '#7c3aed'
     }
   });
-});
+}
 
-if (localStorage.getItem('flaxia_consent_granted') === 'true') {
-  initFlaxiaNode({
-    orchestratorUrl,
-    siteId: 'textanalyzer-example',
-    consent: {
-      brandName: 'TextAnalyzer Node',
-      position: 'bottom-right',
-      accentColor: '#7c3aed'
-    }
-  });
+consentTrigger.addEventListener('click', startFlaxiaNode);
+
+// Use the library's consent API so the record's integrity/expiry rules apply.
+// A raw localStorage flag must never be trusted as consent.
+if (getFlaxiaNodeConsentState() === 'granted') {
+  startFlaxiaNode();
 }
 
 // Parse classification results
@@ -230,6 +242,11 @@ analyzeBtn.addEventListener('click', submitAnalysis);
 async function submitAnalysis() {
   const text = analysisInput.value.trim();
   if (!text) return;
+
+  if (!orchestratorUrl) {
+    showOrchestratorConfigError();
+    return;
+  }
 
   analyzeBtn.disabled = true;
   analyzeBtn.textContent = '分析中...';
