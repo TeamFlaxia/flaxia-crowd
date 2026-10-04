@@ -14,7 +14,6 @@ import {
   NODE_TOKEN_TTL_MS,
   verifyNodeToken,
   validateCallbackUrl,
-  safeEqual,
   resolveTenantId,
   createSubscribeToken,
   verifySubscribeToken,
