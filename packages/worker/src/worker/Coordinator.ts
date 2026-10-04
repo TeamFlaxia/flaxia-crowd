@@ -22,6 +22,13 @@ export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_RETRIES = 3;
 export const STALE_NODE_MS = 60000;
 export const ALARM_INTERVAL_MS = 30000;
+/** How long a finished task stays readable through `GET /crowd/tasks/:id`. */
+export const TASK_RETENTION_MS = 60 * 60 * 1000;
+/** Callback delivery attempts, the first one included. */
+export const CALLBACK_MAX_ATTEMPTS = 5;
+/** Parked callbacks; past this the oldest one is dropped. */
+export const CALLBACK_QUEUE_LIMIT = 500;
+const CALLBACK_BACKOFF_BASE_MS = 5000;
 const DEFAULT_MIN_SWARM_NODES = 1;
 const DEFAULT_MAX_SWARM_NODES = 4;
 
@@ -61,6 +68,15 @@ interface RateEntry {
   resetAt: number;
 }
 
+/** One callback delivery waiting for its next attempt; parked in `queue:callbacks`. */
+interface CallbackEntry {
+  url: string;
+  body: Record<string, unknown>;
+  /** Attempts made so far, the initial delivery included. */
+  attempts: number;
+  nextAttemptAt: number;
+}
+
 export class Coordinator extends DurableObject<Env> {
   private pendingCache: string[] | null = null;
   private processingCache: string[] | null = null;
@@ -88,6 +104,17 @@ export class Coordinator extends DurableObject<Env> {
 
     if (url.pathname === "/enqueue") {
       return this.handleEnqueue(request);
+    }
+
+    // Internal route: lets the worker layer reuse this limiter (and its
+    // `rate:<kind>:<ip>` keys) for write routes that do not talk to the DO.
+    if (url.pathname.startsWith("/rate-limit/")) {
+      const kind = url.pathname.slice("/rate-limit/".length);
+      if (!kind) return new Response("Not Found", { status: 404 });
+      if (!(await this.checkRateLimit(request, kind))) {
+        return new Response("Rate limit exceeded", { status: 429 });
+      }
+      return new Response(null, { status: 204 });
     }
 
     if (url.pathname.startsWith("/task/")) {
@@ -638,13 +665,50 @@ export class Coordinator extends DurableObject<Env> {
     await this.ctx.storage.delete(`swarm:${taskId}`);
   }
 
+  /**
+   * Deliver a task callback. A delivery the receiver did not accept is parked
+   * in `queue:callbacks` and retried by the alarm: the verdict is the whole
+   * point of the callback, and the task record itself is collected after
+   * `TASK_RETENTION_MS`, so a dropped response is lost for good.
+   */
   private async deliverCallback(url: string, body: Record<string, unknown>) {
+    if (await this.postCallback(url, body)) return;
+
+    const entry: CallbackEntry = {
+      url,
+      body,
+      attempts: 1,
+      nextAttemptAt: Date.now() + CALLBACK_BACKOFF_BASE_MS,
+    };
+    const id = crypto.randomUUID();
+    const queue = (await this.ctx.storage.get<string[]>("queue:callbacks")) || [];
+    queue.push(id);
+    // A caller that stopped listening must not pin storage (and the alarm)
+    // forever: past the limit the oldest waiting callback is dropped.
+    while (queue.length > CALLBACK_QUEUE_LIMIT) {
+      const dropped = queue.shift() as string;
+      await this.ctx.storage.delete(`callback:${dropped}`);
+      console.warn(`[coordinator] dropped callback ${dropped}: retry queue is full (${CALLBACK_QUEUE_LIMIT})`);
+    }
+    await this.ctx.storage.put(`callback:${id}`, entry);
+    await this.ctx.storage.put("queue:callbacks", queue);
+
+    // The alarm may have stopped already (the task settled outside a previous
+    // wake-up); make sure the retry is not waiting on one that never comes.
+    const alarm = await this.ctx.storage.getAlarm();
+    if (!alarm || alarm > entry.nextAttemptAt) {
+      await this.ctx.storage.setAlarm(entry.nextAttemptAt);
+    }
+  }
+
+  /** Single callback POST; true when the receiver accepted it (2xx). */
+  private async postCallback(url: string, body: Record<string, unknown>): Promise<boolean> {
     try {
       const payload = JSON.stringify(body);
       const signature = this.env.NODE_TOKEN_SECRET
         ? await signPayload(this.env.NODE_TOKEN_SECRET, payload)
         : '';
-      await fetch(url, {
+      const res = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -653,9 +717,54 @@ export class Coordinator extends DurableObject<Env> {
         body: payload,
         signal: AbortSignal.timeout(5000),
       });
+      return res.ok;
     } catch {
-      // Callback failure is non-critical; task result remains available via REST API
+      return false;
     }
+  }
+
+  /**
+   * Retry parked callbacks whose backoff has elapsed. Returns true while any
+   * entry is still waiting, so the alarm knows to come back.
+   */
+  private async retryQueuedCallbacks(now: number): Promise<boolean> {
+    const queue = (await this.ctx.storage.get<string[]>("queue:callbacks")) || [];
+    if (queue.length === 0) return false;
+
+    const remaining: string[] = [];
+    for (const id of queue) {
+      const key = `callback:${id}`;
+      const entry = await this.ctx.storage.get<CallbackEntry>(key);
+      if (!entry) continue;
+      if (now < entry.nextAttemptAt) {
+        remaining.push(id);
+        continue;
+      }
+
+      if (await this.postCallback(entry.url, entry.body)) {
+        await this.ctx.storage.delete(key);
+        continue;
+      }
+
+      entry.attempts++;
+      if (entry.attempts >= CALLBACK_MAX_ATTEMPTS) {
+        console.error(
+          `[coordinator] callback for task ${String(entry.body.taskId)} failed after ${entry.attempts} attempts`,
+          entry.url,
+        );
+        await this.ctx.storage.delete(key);
+        continue;
+      }
+
+      entry.nextAttemptAt = now + CALLBACK_BACKOFF_BASE_MS * 2 ** (entry.attempts - 1);
+      await this.ctx.storage.put(key, entry);
+      remaining.push(id);
+    }
+
+    if (remaining.length !== queue.length) {
+      await this.ctx.storage.put("queue:callbacks", remaining);
+    }
+    return remaining.length > 0;
   }
 
   private async deliverTask(task: TaskRecord, socket?: WebSocket): Promise<boolean> {
@@ -858,8 +967,13 @@ export class Coordinator extends DurableObject<Env> {
     return chosen.map(n => n.id);
   }
 
-  async alarm() {
-    const now = Date.now();
+  /**
+   * Settle every queued task whose deadline has passed. A `processing` task is
+   * retried (its node may just be slow); a `pending` task nobody ever took can
+   * only fail for good, and without this it would stay queued — and keep the
+   * alarm armed — forever.
+   */
+  private async expireOverdueTasks(now: number) {
     const processingIds = await this.getProcessing();
 
     for (const taskId of processingIds) {
@@ -868,6 +982,45 @@ export class Coordinator extends DurableObject<Env> {
         await this.failTask(taskId, "Task timed out");
       }
     }
+
+    const pendingIds = await this.getPending();
+    for (const taskId of pendingIds) {
+      const task = await this.ctx.storage.get<TaskRecord>(`task:${taskId}`);
+      if (!task || task.status !== "pending") continue;
+      // A task requeued after a failed attempt keeps its `createdAt`, so it is
+      // allowed one timeout window per attempt — otherwise the same alarm pass
+      // that requeues a timed-out task would fail it again on the spot and no
+      // retry would ever run.
+      const budget = (task.timeoutMs || DEFAULT_TIMEOUT_MS) * (task.retryCount + 1);
+      if (now - task.createdAt > budget) {
+        await this.failTask(taskId, "task_timeout_unassigned", undefined, true, true);
+      }
+    }
+  }
+
+  /**
+   * Delete finished tasks whose caller has had `TASK_RETENTION_MS` to read
+   * them. Returns true while any record is still retained, so the alarm knows
+   * to come back for it.
+   */
+  private async pruneSettledTasks(now: number): Promise<boolean> {
+    const entries = await this.ctx.storage.list<TaskRecord>({ prefix: "task:" });
+
+    let retained = false;
+    for (const [key, task] of entries) {
+      if (task.status !== "done" && task.status !== "failed") continue;
+      if (now - (task.completedAt ?? task.createdAt) > TASK_RETENTION_MS) {
+        await this.ctx.storage.delete(key);
+      } else {
+        retained = true;
+      }
+    }
+    return retained;
+  }
+
+  async alarm() {
+    const now = Date.now();
+    await this.expireOverdueTasks(now);
 
     // Ping live nodes and garbage-collect stale ones (idle or busy).
     const idleNodes = await this.getIdleNodes();
@@ -905,10 +1058,22 @@ export class Coordinator extends DurableObject<Env> {
       }
     }
 
+    // Keep the alarm alive only while there is something left to do: a queued
+    // task, a live node to ping, a callback waiting for its retry, or a
+    // finished task still inside its retention window.
+    const pendingCallbacks = await this.retryQueuedCallbacks(now);
+    const retainedTasks = await this.pruneSettledTasks(now);
+
     const pending = await this.getPending();
     const processing = await this.getProcessing();
     const remainingIdle = await this.getIdleNodes();
-    if (pending.length > 0 || processing.length > 0 || remainingIdle.length > 0) {
+    if (
+      pending.length > 0 ||
+      processing.length > 0 ||
+      remainingIdle.length > 0 ||
+      pendingCallbacks ||
+      retainedTasks
+    ) {
       await this.ctx.storage.setAlarm(now + ALARM_INTERVAL_MS);
     }
   }
