@@ -3,15 +3,21 @@
 ## 概要
 
 同意後、Signalingサーバー（Cloudflare Workers）にWebSocket接続し、
-タスクの受信・WebRTC接続の確立を管理する。
+タスクの受信・実行・結果返送を管理する。
+
+タスクのペイロードも結果も**すべてWebSocket上を流れる**。
+WebRTC（DataChannel / offer / answer / ICE）は使用しない。
 
 ## 接続フロー
 
 ```
-1. POST /crowd/nodes/register → ノードトークン取得
+1. POST /crowd/nodes/register → ノードトークン取得（24時間有効）
+   body: { siteId, nodeId, capabilities, wasmMemoryBytes, deviceMemory, swarm? }
 2. WS  /crowd/signal?token=xxx → Signaling接続確立
-3. { type: 'hello', nodeId } を受信 → 接続完了
-4. タスク待機状態へ
+3. ping / pong でハートビート
+4. { type: 'task', taskId, workload, payload, timeoutMs? } を受信
+5. WorkerPool で実行し { type: 'progress', taskId, token } を随時送信
+6. { type: 'result', taskId, payload } または { type: 'error', taskId, error } を送信
 ```
 
 ## SignalingClient 実装方針
@@ -21,26 +27,25 @@ class SignalingClient {
   private ws: WebSocket | null = null
   private nodeId: string | null = null
   private reconnectAttempts = 0
-  private readonly MAX_RECONNECT = 5
+  private readonly MAX_RECONNECT_DELAY = 30_000
 
-  async connect(orchestratorUrl: string, siteId: string): Promise<void>
+  async connect(): Promise<void>
   disconnect(): void
-  private onMessage(event: MessageEvent): void
+  private async obtainToken(): Promise<NodeToken | null>
+  private send(message: Record<string, unknown>): void
   private scheduleReconnect(): void
 }
 ```
 
 ## 再接続ロジック
 
-指数バックオフで最大5回まで再接続を試みる：
+指数バックオフ（最大30秒）で再接続を試みる：
 
 ```
 1回目: 1秒後
 2回目: 2秒後
 3回目: 4秒後
-4回目: 8秒後
-5回目: 16秒後
-→ 諦める（ユーザーには通知しない・サイレント）
+…上限 30秒
 ```
 
 ページのvisibility変化にも対応する：
@@ -48,57 +53,51 @@ class SignalingClient {
 ```typescript
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    // バックグラウンドになったら切断（CPU節約）
-    this.disconnect()
+    // バックグラウンドになったら停止（CPU・バッテリー節約）
+    this.suspend()
   } else {
-    // フォアグラウンドに戻ったら再接続
-    this.connect(...)
+    // フォアグラウンドに戻ったら再開
+    this.resume()
   }
 })
 ```
 
-## WebRTCPeer 実装方針
+## メッセージ種別
 
-```typescript
-class WebRTCPeer {
-  private pc: RTCPeerConnection
-  private dataChannel: RTCDataChannel | null = null
-
-  // Workerからofferを受け取りanswerを生成
-  async handleOffer(offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit>
-
-  // DataChannelでタスクのpayloadを受け取り・結果を返す
-  private onDataChannel(channel: RTCDataChannel): void
-}
-```
-
-## ICE設定
-
-```typescript
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.cloudflare.com:3478' },
-  // TURNはPhase 2で追加検討
-]
-```
+| type | 方向 | 内容 |
+|------|------|------|
+| `ping` / `pong` | 双方向 | ハートビート（`cpuLoad` を返す） |
+| `task` | 受信 | 実行するワークロードと payload |
+| `progress` | 送信 | ストリーミング途中のトークン |
+| `result` | 送信 | 実行結果 |
+| `error` | 送信 | 実行失敗（中断タスクでは送信しない） |
+| `abort` | 受信 | 協調側からのタスク中断指示 |
+| `swarm-init` / `swarm-slice` / `swarm-start` / `swarm-error` | 双方向 | swarm-inference のセッション制御 |
 
 ## タスク受信から実行までの流れ
 
 ```
-SignalingClient: { type: 'task', taskId, workload, payload, offer } 受信
+SignalingClient: { type: 'task', taskId, workload, payload, timeoutMs } 受信
     ↓
-WebRTCPeer.handleOffer(offer) → answer生成
+WorkerPool.run(taskId, workload, payload, timeoutMs, onProgress)
     ↓
-SignalingClient: { type: 'answer', taskId, answer } 送信
+{ type: 'progress', taskId, token } 送信（onProgress 経由）
     ↓
-DataChannel確立
-    ↓
-WorkerExecutor.run(workload, payload) 呼び出し
-    ↓
-SignalingClient: { type: 'result', taskId, success, payload } 送信
+{ type: 'result', taskId, payload } 送信
 ```
+
+同一 `taskId` の重複配信（at-least-once）は `inflightTasks` で排除し、
+二重実行しない。協調側から `abort` を受けたタスクは失敗として返送しない。
 
 ## エラーハンドリング
 
-- WebRTC接続失敗 → `{ type: 'result', success: false, error: 'WEBRTC_FAILED' }` を送信
-- 処理タイムアウト → `{ type: 'result', success: false, error: 'TIMEOUT' }` を送信
-- いずれの場合もWorker側がリトライを処理する
+- トークン取得失敗 → 指数バックオフで再接続
+- 実行タイムアウト → `{ type: 'error', taskId, error: 'TIMEOUT' }` を送信
+- 実行例外 → `{ type: 'error', taskId, error: message }` を送信
+- いずれの場合も協調側がリトライを判断する
+
+## 同意との関係
+
+`SignalingClient` は同意状態が `granted` のときだけ起動される（`initFlaxiaNode()`）。
+同意レコードの検証と `start()` のゲートは
+[01-consent-ui.md](./01-consent-ui.md) を参照。
