@@ -134,6 +134,17 @@ export interface NodeTokenPayload {
 }
 
 /**
+ * Fresh 256-bit key for one swarm hop edge, base64url encoded. The coordinator
+ * hands each member its inbound/outbound key in `swarm-slice` and never keeps
+ * them: frames are authenticated between neighbours, not by the relay.
+ */
+export function createSwarmHopKey(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return bytesToBase64Url(bytes);
+}
+
+/**
  * Node tokens are short-lived because a node re-registers on every connect (the
  * raw token is no longer cached in `localStorage`). Two hours keeps a long-lived
  * socket working while bounding the value of a leaked token.

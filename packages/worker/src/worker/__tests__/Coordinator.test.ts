@@ -966,10 +966,34 @@ describe('Coordinator swarm sessions', () => {
     n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
-    // Host (n2, index 0) sends a hidden frame; it should reach n1 (index 1).
-    n2.socket.send(encodeSwarmEnvelope(init.sessionId, new ArrayBuffer(16)));
+    // Host (n2, index 0) sends a hidden frame; it should reach n1 (index 1)
+    // byte-for-byte (the coordinator never rewrites a frame).
+    const envelope = encodeSwarmEnvelope(init.sessionId, new ArrayBuffer(16));
+    n2.socket.send(envelope);
     await new Promise((r) => setTimeout(r, 30));
-    expect(n1.frames.some((f) => typeof f !== 'string' && (f as ArrayBuffer).byteLength === 56)).toBe(true);
+    expect(n1.frames.some((f) => typeof f !== 'string' && (f as ArrayBuffer).byteLength === envelope.byteLength)).toBe(
+      true,
+    );
+  });
+
+  it('hands every member distinct per-hop frame keys', async () => {
+    const { n1, n2 } = await setup();
+    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    await new Promise((r) => setTimeout(r, 30));
+
+    // n2 is the host (index 0), n1 the worker (index 1). Each member gets the
+    // key for the edge it sends on and the key for the edge it receives on, so
+    // one member cannot sign a frame as another hop.
+    const hostSlice = jsonFrames(n2).find((f) => f.type === 'swarm-slice')!;
+    const workerSlice = jsonFrames(n1).find((f) => f.type === 'swarm-slice')!;
+    expect(typeof hostSlice.outboundKey).toBe('string');
+    expect(typeof workerSlice.outboundKey).toBe('string');
+    expect(hostSlice.outboundKey).not.toBe(workerSlice.outboundKey);
+    expect(workerSlice.inboundKey).toBe(hostSlice.outboundKey);
+    expect(hostSlice.inboundKey).toBe(workerSlice.outboundKey);
+    // 32 random bytes, base64url without padding.
+    expect(hostSlice.outboundKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   it('accepts only the host result and releases every member', async () => {

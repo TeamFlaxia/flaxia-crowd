@@ -18,7 +18,7 @@ import {
   MIN_SWARM_NODES,
   MAX_SWARM_NODES,
 } from "@flaxia/sdk";
-import { clampByteCapacity, createWebhookSignature } from "../security";
+import { clampByteCapacity, createSwarmHopKey, createWebhookSignature } from "../security";
 import { parseWarmModels } from "../crowd";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
@@ -487,7 +487,14 @@ export class Coordinator extends DurableObject<Env> {
     swarm.plan = plan;
     await this.ctx.storage.put(`swarm:${taskId}`, swarm);
 
+    // One key per hop edge: member i signs what it forwards with edge i's key
+    // and verifies what it receives with edge (i-1)'s key. A member therefore
+    // cannot inject or rewrite a frame as another hop, and the coordinator only
+    // relays opaque bytes (it never holds a key).
+    const hopKeys = chain.map(() => createSwarmHopKey());
     for (let i = 0; i < chain.length; i++) {
+      const inboundKey = chain.length > 1 ? hopKeys[(i - 1 + chain.length) % chain.length] : undefined;
+      const outboundKey = chain.length > 1 ? hopKeys[i] : undefined;
       this.sendToNode(chain[i].nodeId, {
         type: "swarm-slice",
         sessionId: swarm.sessionId,
@@ -498,6 +505,8 @@ export class Coordinator extends DurableObject<Env> {
         chainLength: chain.length,
         role: chain[i].role,
         slice: chain[i].slice,
+        inboundKey,
+        outboundKey,
       });
     }
   }

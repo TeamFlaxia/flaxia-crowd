@@ -12,7 +12,14 @@ import {
 import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
 import { probeWebGpu } from '../executor/webgpuProbe';
-import { buildNodeSignalProtocols, buildWsUrl, decodeSwarmEnvelope, encodeSwarmEnvelope } from '@flaxia/sdk';
+import {
+  buildNodeSignalProtocols,
+  buildWsUrl,
+  decodeSwarmEnvelope,
+  encodeSwarmEnvelope,
+  signSwarmEnvelope,
+  verifySwarmEnvelope,
+} from '@flaxia/sdk';
 
 import type { ConsentState, FlaxiaNodeController, NodeConfig, SwarmNodeCapabilities, WorkloadType } from '@flaxia/sdk';
 
@@ -59,6 +66,15 @@ class SignalingClient {
   private abortedTasks = new Set<string>();
   private swarmSessions = new Map<string, string>();
   private retiredSwarmSessions = new Set<string>();
+  /**
+   * Per-hop frame keys handed out with `swarm-slice`. A member signs what it
+   * forwards with `outboundKey` and only accepts frames signed with
+   * `inboundKey`, so one member cannot inject or rewrite a frame as another hop.
+   */
+  private swarmHopKeys = new Map<string, { inboundKey?: string; outboundKey?: string; chainLength: number }>();
+  /** Frame handling is serialized: HMAC verification and signing are async. */
+  private swarmInboundChain: Promise<void> = Promise.resolve();
+  private swarmOutboundChain: Promise<void> = Promise.resolve();
   /** Delivery attempt ids per task, echoed back so the coordinator can bind results. */
   private attempts = new Map<string, string>();
   /**
@@ -68,6 +84,7 @@ class SignalingClient {
   private cachedToken: NodeToken | null = null;
 
   private retireSwarmSession(sessionId: string) {
+    this.swarmHopKeys.delete(sessionId);
     this.retiredSwarmSessions.add(sessionId);
     if (this.retiredSwarmSessions.size > 64) {
       this.retiredSwarmSessions.delete(this.retiredSwarmSessions.values().next().value!);
@@ -124,9 +141,30 @@ class SignalingClient {
       // after checking their session envelope.
       if (typeof event.data !== 'string') {
         const envelope = decodeSwarmEnvelope(event.data as ArrayBuffer);
-        if (envelope && [...this.swarmSessions.values()].includes(envelope.sessionId)) {
-          this.workerPool.sendFrame(envelope.frame);
-        }
+        if (!envelope || ![...this.swarmSessions.values()].includes(envelope.sessionId)) return;
+        // Keep arrival order: verification is async and two frames must never
+        // reach the engine out of order.
+        this.swarmInboundChain = this.swarmInboundChain
+          .then(async () => {
+            const keys = this.swarmHopKeys.get(envelope.sessionId);
+            if (keys && keys.chainLength > 1) {
+              // Fail closed: once a session has hop keys, an unsigned or
+              // wrongly signed frame is dropped instead of being executed.
+              if (!envelope.mac || !keys.inboundKey) return;
+              const valid = await verifySwarmEnvelope(
+                keys.inboundKey,
+                envelope.sessionId,
+                envelope.frame,
+                envelope.mac,
+              );
+              if (!valid) {
+                logError(`swarm frame rejected: bad hop MAC sessionId=${envelope.sessionId}`);
+                return;
+              }
+            }
+            this.workerPool.sendFrame(envelope.frame);
+          })
+          .catch(() => {});
         return;
       }
 
@@ -170,6 +208,13 @@ class SignalingClient {
         const taskId = String(data.taskId ?? '');
         if (!taskId) return;
         if (typeof data.sessionId !== 'string' || this.retiredSwarmSessions.has(data.sessionId)) return;
+        if (data.type === 'swarm-slice') {
+          this.swarmHopKeys.set(data.sessionId, {
+            inboundKey: typeof data.inboundKey === 'string' ? data.inboundKey : undefined,
+            outboundKey: typeof data.outboundKey === 'string' ? data.outboundKey : undefined,
+            chainLength: typeof data.chainLength === 'number' ? data.chainLength : 1,
+          });
+        }
         // Only the host receives swarm-init, and only that delivery carries the
         // attempt id it must echo back when it settles the session.
         if (typeof data.attemptId === 'string') this.attempts.set(taskId, data.attemptId);
@@ -387,6 +432,28 @@ class SignalingClient {
   }
 
   /**
+   * Sign an engine frame for the next hop and send it, in order. A multi-node
+   * session without hop keys cannot produce a frame its neighbour would accept,
+   * so it is dropped here instead of being sent unsigned.
+   */
+  private queueSwarmFrame(sessionId: string, frame: ArrayBuffer) {
+    this.swarmOutboundChain = this.swarmOutboundChain
+      .then(async () => {
+        const keys = this.swarmHopKeys.get(sessionId);
+        if (keys && keys.chainLength > 1) {
+          if (!keys.outboundKey) {
+            logError(`swarm frame not sent: no hop key sessionId=${sessionId}`);
+            return;
+          }
+          this.sendBinary(await signSwarmEnvelope(keys.outboundKey, sessionId, frame));
+          return;
+        }
+        this.sendBinary(encodeSwarmEnvelope(sessionId, frame));
+      })
+      .catch(() => {});
+  }
+
+  /**
    * Start a swarm session in the worker. The first control message is the task
    * payload; later control messages and binary frames are forwarded into the
    * running worker. The host's final result completes the task.
@@ -412,7 +479,7 @@ class SignalingClient {
         },
         { maxCpuLoad: this.config.maxCpuLoad },
         {
-          onFrame: (frame) => this.sendBinary(encodeSwarmEnvelope(sessionId, frame)),
+          onFrame: (frame) => this.queueSwarmFrame(sessionId, frame),
           // Attempt ids are transport metadata owned by this client, so stamp
           // them onto the engine's control messages (swarm-token / swarm-done):
           // the coordinator only accepts session messages from the host attempt.
