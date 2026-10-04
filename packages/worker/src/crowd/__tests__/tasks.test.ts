@@ -15,7 +15,7 @@ import type { Env } from '../../index';
 
 const API_KEY = 'fc_live_flaxia_dev_key';
 
-function submit(payload: unknown, workload = 'swarm-inference'): Promise<Response> {
+function submit(payload: unknown, workload = 'swarm-inference', ip?: string): Promise<Response> {
   return Promise.resolve(
     crowdApp.request(
       '/tasks',
@@ -24,6 +24,7 @@ function submit(payload: unknown, workload = 'swarm-inference'): Promise<Respons
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${API_KEY}`,
+          ...(ip ? { 'CF-Connecting-IP': ip } : {}),
         },
         body: JSON.stringify({ workload, payload }),
       },
@@ -81,5 +82,55 @@ describe('POST /tasks swarm payload validation', () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toBe('Invalid workload type');
+  });
+});
+
+/**
+ * The limiter itself lives in the Durable Object (the only shared storage the
+ * worker has); these tests cover that the write routes go through it. Each test
+ * uses its own client IP so the counters do not leak into the other cases.
+ */
+describe('write-route rate limiting', () => {
+  const limit = parseInt((testEnv as unknown as Env).RATE_LIMIT_MAX || '100', 10);
+
+  function register(ip: string, nodeId: string): Promise<Response> {
+    const env = Object.assign({}, testEnv, { NODE_TOKEN_SECRET: 'test-node-secret' }) as unknown as Env;
+    return Promise.resolve(
+      crowdApp.request(
+        '/nodes/register',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': ip },
+          body: JSON.stringify({ siteId: 'site-1', nodeId, capabilities: ['ai-inference'] }),
+        },
+        env,
+      ),
+    );
+  }
+
+  it('returns 429 once POST /tasks exceeds the per-IP limit', async () => {
+    const ip = '198.51.100.11';
+    for (let i = 0; i < limit; i++) {
+      const res = await submit({ model: 'qwen3-1.7b', prompt: 'hi' }, 'swarm-inference', ip);
+      expect(res.status).toBe(200);
+    }
+
+    const limited = await submit({ model: 'qwen3-1.7b', prompt: 'hi' }, 'swarm-inference', ip);
+    expect(limited.status).toBe(429);
+    const body = (await limited.json()) as { error?: string };
+    expect(body.error).toBeTruthy();
+  });
+
+  it('returns 429 once POST /nodes/register exceeds the per-IP limit', async () => {
+    const ip = '198.51.100.12';
+    for (let i = 0; i < limit; i++) {
+      const res = await register(ip, `node-${i}`);
+      expect(res.status).toBe(200);
+    }
+
+    const limited = await register(ip, 'node-limited');
+    expect(limited.status).toBe(429);
+    const body = (await limited.json()) as { error?: string };
+    expect(body.error).toBeTruthy();
   });
 });

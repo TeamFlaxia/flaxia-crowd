@@ -137,9 +137,26 @@ function checkOrigin(c: any): boolean {
   return originAllowed(origin, c.env)
 }
 
+/**
+ * Apply the coordinator's storage-backed limiter to a write route. The keys
+ * (`rate:<kind>:<ip>`) and `RATE_LIMIT_MAX` live in the Durable Object, which is
+ * where `/ws` and `/subscribe` already check them.
+ */
+async function rateLimitExceeded(c: any, kind: string): Promise<boolean> {
+  const stub = getCoordinator(c)
+  const resp = await stub.fetch(new Request(`http://internal/rate-limit/${kind}`, {
+    headers: c.req.raw.headers,
+  }))
+  return resp.status === 429
+}
+
 // --- Node registration & signaling ---
 
 app.post('/nodes/register', async (c) => {
+  if (await rateLimitExceeded(c, 'register')) {
+    return c.json({ error: 'Rate limit exceeded' }, 429)
+  }
+
   let body: {
     siteId?: string
     nodeId?: string
@@ -263,6 +280,10 @@ app.get('/subscribe', async (c) => {
 app.post('/tasks', async (c) => {
   const auth = c.req.header('Authorization')
   if (!await validateApiKey(c.env, auth)) return c.json({ error: 'Unauthorized' }, 401)
+
+  if (await rateLimitExceeded(c, 'tasks')) {
+    return c.json({ error: 'Rate limit exceeded' }, 429)
+  }
 
   const rawBody = await c.req.text()
   if (!validatePayloadSize(c.env, rawBody)) return c.json({ error: 'Payload too large' }, 413)
