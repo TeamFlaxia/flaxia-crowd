@@ -49,6 +49,24 @@ async getTask<T = unknown>(taskId: string): Promise<TaskResult<T>> {
 }
 ```
 
+`GET /crowd/tasks/:id` は**タスクを投入した API キーのテナントのみ**が読める。
+別テナントのキーでは 404 が返る（存在を伏せる）。応答には
+`/crowd/subscribe` 用の短期 `subscribeToken` が含まれ、クライアントは
+それをキャッシュして `subscribe()` で自動使用する。
+
+## WebSocket 購読（推奨）
+
+```typescript
+const subscription = await client.subscribe(taskId) // トークンは自動取得
+subscription.onToken((token) => process.stdout.write(token))
+subscription.onDone((result) => console.log('done', result))
+subscription.onError((error) => console.error(error))
+```
+
+トークンが取得できない場合（サーバーが発行しない・期限切れ）は
+`SUBSCRIBE_UNAUTHORIZED` を投げるので、`waitForTask()` はポーリングへ
+フォールバックする。
+
 ## ポーリング間隔の設計方針
 
 デフォルト2秒。ユーザーが変更可能。

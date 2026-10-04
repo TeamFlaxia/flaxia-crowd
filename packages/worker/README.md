@@ -32,15 +32,17 @@ Cloudflare Workers + Durable Objects による**オーケストレーター**実
 
 ## エンドポイント
 
-| Method | Path | 説明 |
-|--------|------|------|
-| `GET` | `/health` | ヘルスチェック（`OK` を返す） |
-| `GET` | `/crowd/signal` | ノード接続用 WebSocket アップグレード |
-| `GET` | `/crowd/subscribe` | タスク状態購読用 WebSocket アップグレード |
-| `POST` | `/crowd/tasks` | タスク投入 |
-| `GET` | `/crowd/tasks/:id` | タスク状態取得 |
-| `POST` | `/crowd/tasks/:id/result` | ノードからの結果投稿 |
-| `GET` | `/crowd/nodes` | 接続中ノード一覧 |
+| Method | Path | 認証 | 説明 |
+|--------|------|------|------|
+| `GET` | `/health` | - | ヘルスチェック（`OK` を返す） |
+| `GET` | `/crowd/signal` | ノードトークン（`flaxia-node-v1` + `bearer.<token>`） | ノード接続用 WebSocket アップグレード |
+| `GET` | `/crowd/subscribe` | 購読トークン（`flaxia-subscribe-v1` + `bearer.<token>`） | タスク状態購読用 WebSocket アップグレード |
+| `POST` | `/crowd/tasks` | API キー | タスク投入（`subscribeToken` を返す） |
+| `GET` | `/crowd/tasks/:id` | API キー（所有者テナントのみ） | タスク状態取得 |
+| `POST` | `/crowd/nodes/register` | -（nodeId はサーバー発行） | ノード登録 |
+
+信頼境界の全体像（テナント分離・配信試行・サイト allow-list・上限値・
+Webhook 署名の意味）は `docs/07-trust-plane.md` を参照。
 
 ## Durable Objects
 
@@ -84,21 +86,27 @@ WebSocket 接続を管理し、タスク割り当てとノード健全性を監�
 | `status` | `'pending' \| 'assigning' \| 'processing' \| 'done' \| 'failed'` | 状態 |
 | `workload` | `WorkloadType` | ワークロード種別 |
 | `payload` | `TaskPayload` | 入力データ |
-| `retryCount` | `number` | リトライ回数 |
-| `timeoutMs` | `number` | タイムアウト（デフォルト30000） |
-| `callbackUrl` | `string?` | 完了時コールバックURL |
-| `result` | `unknown?` | 実行結果 |
+| `tenantId` | `string` | 所有テナント（API キーから解決） |
+| `allowedSites` | `string[]?` | 実行を許可するノードサイト |
+| `retryCount` | `number` | リトライ回数（最大 3） |
+| `timeoutMs` | `number` | タイムアウト（1s..1h） |
+| `callbackUrl` | `string?` | 完了時コールバックURL（要 `WEBHOOK_SIGNING_SECRET`） |
+| `result` | `unknown?` | 実行結果（プレーンオブジェクトのみ、4 MiB 以下） |
 | `error` | `string?` | エラーメッセージ |
+| `resultNodeId` | `string?` | 結果を受理したノード（監査用） |
+| `resultAttemptId` | `string?` | 結果を受理した配信試行（監査用） |
 
 ### NodeRecord
 
 | フィールド | 型 | 説明 |
 |-----------|-----|------|
-| `id` | `string` | ノードID |
-| `status` | `'idle' \| 'busy' \| 'disconnected'` | 状態 |
+| `id` | `string` | ノードID（サーバー発行、トークンに束縛） |
+| `status` | `'idle' \| 'busy'` | 状態 |
 | `capabilities` | `WorkloadType[]` | 対応ワークロード一覧 |
-| `cpuLoad` | `number` | CPU負荷（0-1） |
+| `cpuLoad` | `number` | 自己申告の CPU 負荷（0-1、有限数値のみ採用） |
+| `siteId` | `string?` | 署名済みトークン由来のサイト ID |
 | `currentTaskId` | `string?` | 実行中のタスクID |
+| `assignedCount` | `number?` | 累計割り当て数（公平性のタイブレーク） |
 
 ## WebSocket プロトコル
 
@@ -106,17 +114,22 @@ WebSocket 接続を管理し、タスク割り当てとノード健全性を監�
 
 | type | 説明 |
 |------|------|
-| `pong` | ハートビート応答（`cpuLoad` を含む） |
-| `progress` | 中間トークン（AI推論のストリーミング出力） |
-| `result` | タスク実行結果 |
-| `error` | タスク実行エラー |
+| `pong` | ハートビート応答（`cpuLoad` を含む。不正値は無視） |
+| `progress` | 中間トークン（`attemptId` 必須、4KB/秒間50件まで） |
+| `result` | タスク実行結果（`attemptId` 必須） |
+| `error` | タスク実行エラー（`attemptId` 必須。swarm はホストのみ） |
+| `swarm-plan` / `swarm-ready` | swarm セッション制御（ホスト / メンバー） |
+| `swarm-error` / `swarm-done` / `swarm-token` | swarm セッション（ホストのみ有効） |
 
 ### Worker → Node
 
 | type | 説明 |
 |------|------|
 | `ping` | ハートビート（30s間隔） |
-| `task` | タスク割り当て（`taskId`, `workload`, `payload`） |
+| `task` | タスク割り当て（`taskId`, `workload`, `payload`, `attemptId`） |
+| `swarm-init` | swarm セッション開始（ホストへ。`attemptId` 付き） |
+| `swarm-slice` / `swarm-start` | swarm スライス配布 / 開始 |
+| `abort` | セッション中断（タイムアウト・ピア失敗など） |
 
 ### Worker → SDK Client
 
@@ -152,6 +165,9 @@ npm run test
 必要に応じて `wrangler secret put` で環境変数を設定してください:
 
 ```bash
-npx wrangler secret put CROWD_API_SECRET
-npx wrangler secret put CROWD_HMAC_SECRET
+npx wrangler secret put NODE_TOKEN_SECRET       # ノード登録トークン署名
+npx wrangler secret put SUBSCRIBE_TOKEN_SECRET  # /crowd/subscribe トークン署名
+npx wrangler secret put WEBHOOK_SIGNING_SECRET  # Webhook 署名専用
 ```
+
+`API_KEYS` は `key` または `key:tenantId` を受け付ける（テナント単位の分離）。

@@ -19,11 +19,18 @@ PENDING → ASSIGNING → PROCESSING → DONE
 ### 内部ストレージ構造（DO Storage）
 
 ```typescript
-// キー設計
-`task:${taskId}`          → TaskRecord
-`queue:pending`           → taskId[] (JSON)
-`queue:processing`        → taskId[] (JSON)
+// キー設計（テナント分離: Issue #3）
+`task:${tenantId}:${taskId}` → TaskRecord
+`taskindex:${taskId}`        → tenantId（ノードメッセージ解決用の内部インデックス）
+`attempt:${taskId}`          → { attemptId, nodeId, tenantId }（現在の配信試行）
+`queue:pending`              → taskId[] (JSON, 全体の割り当て順)
+`queue:processing`           → taskId[] (JSON)
+`pending:${tenantId}`        → taskId[] (JSON, テナント別の上限判定用)
+`nodes:idle`                 → nodeId[] (JSON)
 ```
+
+読み取りは必ず `task:<tenantId>:<taskId>` を直接引き、他テナントのタスクは
+404 として扱う。`taskindex` は DO 内部の逆引き専用で、外部に公開しない。
 
 ### TaskRecord 型定義
 
@@ -38,14 +45,18 @@ type TaskRecord = {
   workload: WorkloadType
   payload: unknown
   createdAt: number       // unixtime ms
+  tenantId: string        // API キーから解決した所有テナント
+  allowedSites?: string[] // payload.allowedSites の写し（サイト allow-list）
   assignedAt?: number
   completedAt?: number
   assignedNodeId?: string
   retryCount: number      // max 3
-  timeoutMs: number       // デフォルト 30000
+  timeoutMs: number       // 1s..1h（デフォルトはワークロード依存）
   callbackUrl?: string    // 完了時にPOSTする先（SDK側）
   result?: unknown
   error?: string
+  resultNodeId?: string   // 結果を受理したノード（監査用）
+  resultAttemptId?: string// 結果を受理した配信試行（監査用）
 }
 ```
 
@@ -61,6 +72,20 @@ type TaskRecord = {
 | `getPending()` | PENDING一覧取得 |
 | `checkTimeouts()` | タイムアウト確認・再キュー |
 
+## キュー上限と pending TTL（Issue #6）
+
+| 上限 | 値 | 超過時 |
+|------|----|--------|
+| グローバル pending | 500 | `429` |
+| テナント別 pending | 50 | `429` |
+| テナント別 enqueue | 60/分 | `429` |
+| pending TTL | `createdAt + min(timeoutMs, 5分)` | `alarm()` が恒久失敗 |
+| `minNodes` / `maxNodes` | 1..16 | `400` |
+| 1 パスで見る pending | 32 件 | 残りは次回のパス |
+
+`tryAssignAll` はノードレコードを 1 回だけ読み込み、キュー先頭 32 件だけを
+対象にする（O(タスク×ノード) のストレージ読み取りを避ける）。
+
 ## タイムアウト処理
 
 Durable Objects の Alarm API を使用する：
@@ -71,8 +96,10 @@ await this.state.storage.setAlarm(Date.now() + task.timeoutMs)
 
 // alarm() ハンドラでタイムアウト確認
 async alarm() {
-  await this.checkTimeouts()
-  // 次のAlarmをセット（処理中タスクがあれば）
+  // 1. processing のタイムアウト（リトライ or 失敗）
+  // 2. pending の TTL 切れ（候補ノードが現れないまま残ったタスクを失敗）
+  // 3. ノードの ping / 死活 GC、レート制限エントリの GC
+  // 次のAlarmをセット（キューやノードが残っていれば）
 }
 ```
 
