@@ -129,32 +129,83 @@ function isPrivateIPv4(ip: number): boolean {
   );
 }
 
+/**
+ * Parse an IPv6 literal (brackets already stripped) into its eight 16-bit
+ * groups, or null when the text is not a valid address. Both the compressed
+ * (`::ffff:7f00:1`) and expanded (`0:0:0:0:0:0:0:1`) forms are accepted, as is
+ * an embedded dotted-quad tail.
+ */
+function parseIPv6(host: string): number[] | null {
+  const h = host.toLowerCase();
+  if (!h.includes(':')) return null;
+
+  const halves = h.split('::');
+  if (halves.length > 2) return null;
+
+  const groupsOf = (part: string): number[] | null => {
+    if (part === '') return [];
+    const out: number[] = [];
+    const groups = part.split(':');
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i];
+      if (group === '') return null;
+      if (group.includes('.')) {
+        // A dotted-quad tail is only legal as the last group.
+        if (i !== groups.length - 1) return null;
+        const ip = parseIPv4(group);
+        if (ip === null) return null;
+        out.push((ip >>> 16) & 0xffff, ip & 0xffff);
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+      out.push(parseInt(group, 16));
+    }
+    return out;
+  };
+
+  const head = groupsOf(halves[0]);
+  if (head === null) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+
+  const tail = groupsOf(halves[1]);
+  if (tail === null) return null;
+  const missing = 8 - head.length - tail.length;
+  // `::` has to stand for at least one zero group.
+  if (missing < 1) return null;
+  return [...head, ...new Array<number>(missing).fill(0), ...tail];
+}
+
 function isPrivateIPv6(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === '::1') return true;
-  // IPv4-mapped: ::ffff:a.b.c.d
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(h);
-  if (mapped) {
-    const ip = parseIPv4(mapped[1]);
-    return ip !== null && isPrivateIPv4(ip);
-  }
-  // fc00::/7 and fe80::/10 and ff00::/8
-  return /^(fc|fd)/.test(h) || /^fe[89ab]/.test(h) || /^ff/.test(h);
+  const groups = parseIPv6(host);
+  // An address we cannot parse is not known to be public.
+  if (!groups) return true;
+
+  const first = groups[0];
+  if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link local
+  if ((first & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+
+  // `::`, `::1` and the IPv4-mapped / IPv4-compatible forms share a zero
+  // prefix and end in an IPv4 address: that address decides.
+  const hasIPv4Tail =
+    groups.slice(0, 5).every((g) => g === 0) && (groups[5] === 0 || groups[5] === 0xffff);
+  if (!hasIPv4Tail) return false;
+  return isPrivateIPv4(((groups[6] << 16) | groups[7]) >>> 0);
 }
 
 function isSafeHostname(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/\.$/, '');
+  // `URL.hostname` keeps the brackets of an IPv6 literal (`[::1]`), so they have
+  // to go before anything looks at the address.
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
   if (!host || host === 'localhost' || host === '0.0.0.0') return false;
   if (/.+\.(local|internal)$/.test(host) || /\.internal\./.test(host)) return false;
   if (host.endsWith('.localhost')) return false;
-  if (/^::1$/.test(host)) return false;
 
   const ipv4 = parseIPv4(host);
   if (ipv4 !== null) return !isPrivateIPv4(ipv4);
 
-  if (/^[0-9a-f:]+$/i.test(host) && host.includes(':')) {
-    return !isPrivateIPv6(host);
-  }
+  // Only an IPv6 literal can contain a colon in a hostname.
+  if (host.includes(':')) return !isPrivateIPv6(host);
 
   return true;
 }
