@@ -216,7 +216,6 @@ describe('SignalingClient', () => {
 
   it('should skip consent UI if consent already given', async () => {
     seedGrantedConsent();
-    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
     const MockWebSocket = vi.fn();
     globalThis.WebSocket = MockWebSocket as any;
     mockFetchToken();
@@ -239,7 +238,6 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = MockWebSocket as any;
     mockFetchToken();
     seedGrantedConsent();
-    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -262,7 +260,6 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = MockWebSocket as any;
     mockFetchToken();
     seedGrantedConsent();
-    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -285,7 +282,6 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = MockWebSocket as any;
     mockFetchToken();
     seedGrantedConsent();
-    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -324,7 +320,6 @@ describe('SignalingClient', () => {
     (globalThis.WebSocket as any).OPEN = 1;
     mockFetchToken();
     seedGrantedConsent();
-    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -373,7 +368,6 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
     seedGrantedConsent();
-    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -407,7 +401,6 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
     seedGrantedConsent();
-    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -540,7 +533,6 @@ describe('SignalingClient', () => {
 
     mockFetchToken();
     seedGrantedConsent();
-    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
