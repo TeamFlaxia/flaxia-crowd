@@ -3,14 +3,17 @@ main = "src/index.ts"
 compatibility_date = "2024-04-03"
 
 [vars]
-API_KEYS = "fc_live_textanalyzer_example_key,fc_live_flaxia_dev_key"
 CORS_ORIGINS = "http://localhost:5173,http://localhost:5174,http://localhost:8787,https://flaxia.app"
 RATE_LIMIT_MAX = "100"
 MAX_PAYLOAD_SIZE = "1048576"
 
-# NODE_TOKEN_SECRET must be provided as a secret: `wrangler secret put NODE_TOKEN_SECRET`
-# (or `NODE_TOKEN_SECRET` in .dev.vars for local development).
-# Without it, /crowd/nodes/register returns 503 and nodes cannot connect.
+# API_KEYS and NODE_TOKEN_SECRET are secrets and must never be committed here.
+# Configure production values with:
+#   wrangler secret put API_KEYS
+#   wrangler secret put NODE_TOKEN_SECRET
+# Use .dev.vars for local development (the file is gitignored).
+# Without API_KEYS, task submission/polling fails closed with 401.
+# Without NODE_TOKEN_SECRET, /crowd/nodes/register returns 503.
 
 [[durable_objects.bindings]]
 name = "COORDINATOR"

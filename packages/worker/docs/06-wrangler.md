@@ -44,11 +44,13 @@ id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # wrangler kv:namespace create CROWD_KV
 以下は `wrangler secret put` で設定する（wrangler.tomlには書かない）：
 
 ```bash
+wrangler secret put API_KEYS                # タスクAPI用。カンマ区切りで複数キーをローテーション可能
 wrangler secret put NODE_TOKEN_SECRET       # ノード登録トークンの署名（必須）
 wrangler secret put SUBSCRIBE_TOKEN_SECRET  # /crowd/subscribe トークンの署名（必須）
 wrangler secret put WEBHOOK_SIGNING_SECRET  # Webhook 署名専用（callbackUrl を使うなら必須）
 ```
 
+- `API_KEYS` は `wrangler.toml` に書かない。未設定ならタスク投入・取得は401でfail closedする。
 - `NODE_TOKEN_SECRET` を設定しない場合、`/crowd/nodes/register` は503を返し、ノードは接続できない。
 - `SUBSCRIBE_TOKEN_SECRET` を設定しない場合、`/crowd/subscribe` は503を返す。
 - `WEBHOOK_SIGNING_SECRET` を設定しない場合、`callbackUrl` 付きのタスク投入は
@@ -65,6 +67,16 @@ wrangler secret put WEBHOOK_SIGNING_SECRET  # Webhook 署名専用（callbackUrl
 API_KEYS = "fc_live_flaxia:tenant-a,fc_live_partner:tenant-b"
 # テナント省略時は key-<sha256先頭16hex> が自動で割り当てられる（後方互換）
 ```
+
+### APIキーのローテーション
+
+既存キーがリポジトリやブラウザbundleへ露出した場合は、その値を再利用しない。
+
+1. 新しい高エントロピーなキーを生成する。
+2. 移行期間だけ `API_KEYS=new_key,old_key` を Secret として設定する。
+3. サーバー側クライアント／プロキシを `new_key` に切り替える。
+4. 動作確認後、`API_KEYS=new_key` に更新して旧キーを失効させる。
+5. `VITE_*` 等、ブラウザbundleへ展開される環境変数にAPIキーを置かない。
 
 ## ノード登録フロー（HMACトークン）
 

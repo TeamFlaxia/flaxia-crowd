@@ -155,12 +155,15 @@ npm run test
 | Durable Object | `COORDINATOR` (Coordinator) |
 | 互換性日付 | 2024-04-03 |
 
-必要に応じて `wrangler secret put` で環境変数を設定してください:
+認証情報は `wrangler.toml` に書かず、Cloudflare Secrets で設定してください:
 
 ```bash
-npx wrangler secret put NODE_TOKEN_SECRET       # ノード登録トークン署名
-npx wrangler secret put SUBSCRIBE_TOKEN_SECRET  # /crowd/subscribe トークン署名
-npx wrangler secret put WEBHOOK_SIGNING_SECRET  # Webhook 署名専用
+npx wrangler secret put API_KEYS                # タスクAPI用。カンマ区切りで複数キーをローテーション可能
+npx wrangler secret put NODE_TOKEN_SECRET       # ノード登録トークン署名（必須）
+npx wrangler secret put SUBSCRIBE_TOKEN_SECRET  # /crowd/subscribe トークン署名（必須）
+npx wrangler secret put WEBHOOK_SIGNING_SECRET  # Webhook 署名専用（callbackUrl を使うなら必須）
 ```
 
-`API_KEYS` は `key` または `key:tenantId` を受け付ける（テナント単位の分離）。
+`API_KEYS` はカンマ区切りで複数キーを受け付けるため、`new,old` → `new` の2段階で無停止ローテーションできます。公開されたキーは必ず失効させ、ブラウザ向けの `VITE_*` 環境変数には秘密を入れないでください。
+
+`API_KEYS` は `key` または `key:tenantId` 形式でテナント単位に分離できます（テナント省略時はキーごとの派生 ID が割り当てられる）。3 つの secret は用途ごとに分離し、詳細は [docs/07-trust-plane.md](docs/07-trust-plane.md) を参照してください。

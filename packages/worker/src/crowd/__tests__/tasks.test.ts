@@ -13,9 +13,22 @@ import { describe, it, expect } from 'vitest';
 import { crowdApp } from '../index';
 import type { Env } from '../../index';
 
-const API_KEY = 'fc_live_flaxia_dev_key';
+const API_KEY = 'test-api-key';
 
-function submit(payload: unknown, workload = 'swarm-inference'): Promise<Response> {
+function envWithApiKey(apiKey: string): Env {
+  return new Proxy(testEnv as unknown as Env, {
+    get(target, prop, receiver) {
+      if (prop === 'API_KEYS') return apiKey;
+      return Reflect.get(target as object, prop, receiver);
+    },
+  });
+}
+
+function submit(
+  payload: unknown,
+  workload = 'swarm-inference',
+  apiKey = API_KEY,
+): Promise<Response> {
   return Promise.resolve(
     crowdApp.request(
       '/tasks',
@@ -27,12 +40,17 @@ function submit(payload: unknown, workload = 'swarm-inference'): Promise<Respons
         },
         body: JSON.stringify({ workload, payload }),
       },
-      testEnv as unknown as Env,
+      envWithApiKey(apiKey),
     ),
   );
 }
 
 describe('POST /tasks swarm payload validation', () => {
+  it('fails closed when the API_KEYS secret is not configured', async () => {
+    const res = await submit({ model: 'qwen3-1.7b', prompt: 'hi' }, 'swarm-inference', '');
+    expect(res.status).toBe(401);
+  });
+
   it('accepts a payload without swarm options', async () => {
     const res = await submit({ model: 'qwen3-1.7b', prompt: 'hi' });
     expect(res.status).toBe(200);
