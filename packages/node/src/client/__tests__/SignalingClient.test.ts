@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initFlaxiaNode } from '../SignalingClient';
 import { encodeSwarmEnvelope } from '@flaxia/sdk';
+import { __consentTestHooks } from '../../consent/storage';
+import { setFlaxiaNodeHostManagedConsent } from '../../index';
 
 // Swarm capability advertisement is driven by the WebGPU probe; mock it so
 // tests never touch a real adapter.
@@ -30,6 +32,15 @@ function mockFetchToken() {
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+/**
+ * Seed a valid, HMAC-sealed consent record. Tests used to write the legacy
+ * plaintext `flaxia_consent_granted` flag, which no longer counts as consent
+ * (issue #7) — only a banner-minted gesture or a host opt-in can grant.
+ */
+function seedGrantedConsent() {
+  __consentTestHooks.seedGrantedConsent();
+}
+
 describe('SignalingClient', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
@@ -37,6 +48,8 @@ describe('SignalingClient', () => {
     vi.restoreAllMocks();
     probeWebGpuMock.mockClear();
     vi.useRealTimers();
+    __consentTestHooks.reset();
+    setFlaxiaNodeHostManagedConsent(false);
     // Reset node init idempotency flags and any leaked Worker global between tests.
     delete (window as any).__flaxia_node_init_started;
     delete (window as any).__flaxia_node_signal_client;
@@ -46,12 +59,27 @@ describe('SignalingClient', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    setFlaxiaNodeHostManagedConsent(false);
   });
 
   it('should register the node and connect with a token after consent', async () => {
     const MockWebSocket = vi.fn();
     globalThis.WebSocket = MockWebSocket as any;
     mockFetchToken();
+
+    // The banner lives in a closed shadow root (issue #8), so capture the root
+    // through `attachShadow` and wait out the minimum-visible gate (issue #9)
+    // before clicking the real accept button.
+    const roots: ShadowRoot[] = [];
+    const attachShadow = Element.prototype.attachShadow;
+    vi.spyOn(Element.prototype, 'attachShadow').mockImplementation(function (
+      this: Element,
+      init: ShadowRootInit,
+    ) {
+      const root = attachShadow.call(this, init);
+      roots.push(root);
+      return root;
+    });
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -62,8 +90,11 @@ describe('SignalingClient', () => {
       },
     });
 
-    const overlay = document.body.firstElementChild?.shadowRoot?.querySelector('#consent-btn') as HTMLButtonElement;
-    overlay.click();
+    const accept = roots[0]?.querySelector('#consent-btn') as HTMLButtonElement;
+    expect(accept).toBeDefined();
+    expect(accept.disabled).toBe(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1600));
+    accept.click();
     await flush();
     await flush();
 
@@ -77,7 +108,7 @@ describe('SignalingClient', () => {
   it('should send siteId and capabilities when registering', async () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -100,7 +131,7 @@ describe('SignalingClient', () => {
   it('advertises swarm-inference with WebGPU details when the host opts in', async () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     probeWebGpuMock.mockResolvedValue({
       webgpu: true,
       gpuArchitecture: 'apple m1',
@@ -130,7 +161,7 @@ describe('SignalingClient', () => {
   it('drops swarm-inference when the device has no WebGPU adapter', async () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     probeWebGpuMock.mockResolvedValue({ webgpu: false });
 
     initFlaxiaNode({
@@ -152,7 +183,7 @@ describe('SignalingClient', () => {
   it('never probes WebGPU without the model-download opt-in', async () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -184,7 +215,7 @@ describe('SignalingClient', () => {
   });
 
   it('should skip consent UI if consent already given', async () => {
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
     const MockWebSocket = vi.fn();
     globalThis.WebSocket = MockWebSocket as any;
@@ -207,7 +238,7 @@ describe('SignalingClient', () => {
     const MockWebSocket = vi.fn();
     globalThis.WebSocket = MockWebSocket as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
@@ -230,7 +261,7 @@ describe('SignalingClient', () => {
     });
     globalThis.WebSocket = MockWebSocket as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
@@ -253,7 +284,7 @@ describe('SignalingClient', () => {
     });
     globalThis.WebSocket = MockWebSocket as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
@@ -292,7 +323,7 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = MockWebSocket as any;
     (globalThis.WebSocket as any).OPEN = 1;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
@@ -341,7 +372,7 @@ describe('SignalingClient', () => {
     (globalThis as any).Worker = MockWorker as any;
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
@@ -375,7 +406,7 @@ describe('SignalingClient', () => {
     (globalThis as any).Worker = MockWorker as any;
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
@@ -406,6 +437,9 @@ describe('SignalingClient', () => {
     mockFetchToken();
 
     const onConsentRequired = vi.fn();
+    // Host-managed consent is opt-in: without this the accept() below is
+    // refused and the state stays not-granted (issue #9).
+    setFlaxiaNodeHostManagedConsent(true);
     const controller = initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
       siteId: 'test-site',
@@ -454,7 +488,8 @@ describe('SignalingClient', () => {
     expect(controller.isRunning()).toBe(false);
     expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
 
-    // Settings toggles it back on.
+    // Settings toggles it back on (the host owns this UI, so it opted in).
+    setFlaxiaNodeHostManagedConsent(true);
     controller.grant();
     controller.start();
     await flush();
@@ -504,7 +539,7 @@ describe('SignalingClient', () => {
     (globalThis as any).Worker = MockWorker as any;
 
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
+    seedGrantedConsent();
     localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
