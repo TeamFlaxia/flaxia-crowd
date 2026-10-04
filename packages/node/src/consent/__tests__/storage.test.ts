@@ -159,6 +159,29 @@ describe('consent/storage', () => {
     expect(record?.expiry).toBe((record?.grantedAt as number) + CONSENT_MAX_TTL_MS);
   });
 
+  it('persists a non-extractable HMAC key', async () => {
+    let stored: CryptoKey | null = null;
+    __consentTestHooks.setKeyStore({
+      load: async () => stored,
+      save: async (key) => {
+        stored = key;
+      },
+      clear: async () => {
+        stored = null;
+      },
+    });
+
+    markUserGestureConsent();
+    await grantConsent();
+
+    expect(stored).not.toBeNull();
+    // Non-extractable: the raw key bytes can never leave the browser, so a
+    // script that can only write localStorage strings cannot re-sign a record.
+    expect(stored?.extractable).toBe(false);
+    expect(stored?.type).toBe('secret');
+    expect(stored?.algorithm?.name).toBe('HMAC');
+  });
+
   it('does not treat a legacy plaintext flag as consent', async () => {
     localStorage.setItem('flaxia_consent_granted', 'true');
     await initConsentIntegrity();

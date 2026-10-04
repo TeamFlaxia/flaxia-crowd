@@ -427,7 +427,9 @@ export class ConsentUI {
       decide(onReject);
     });
 
-    overlay.append(hint, acceptBtn, rejectBtn);
+    // The gate hint is only meaningful while the button is disabled.
+    if (!acceptEnabled) overlay.appendChild(hint);
+    overlay.append(acceptBtn, rejectBtn);
     this.root.append(style, overlay);
   }
 }
