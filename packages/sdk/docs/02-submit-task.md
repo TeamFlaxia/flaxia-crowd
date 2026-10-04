@@ -99,17 +99,32 @@ async submitAsync(options: TaskSubmitAsyncOptions): Promise<{ id: string }> {
 ## Webhookペイロード（コールバック受信側）
 
 ```typescript
-// callbackUrl に届くPOSTのbody
+// callbackUrl に届くPOSTのbody（parseCrowdWebhook() が正規化する形）
 type WebhookPayload = {
   taskId: string
   status: 'done' | 'failed'
-  result?: unknown
+  result?: { output?: unknown; [key: string]: unknown }
   error?: string
-  processingMs: number
-  retryCount: number
 }
-
-// 検証用ヘッダー
-// X-Flaxia-Signature: sha256=<hmac>
-// ⇒ HMAC-SHA256(webhookSecret, JSON.stringify(body))
 ```
+
+### 署名ヘッダー
+
+```
+X-Flaxia-Signature: sha256=<hmac>
+X-Flaxia-Timestamp: <unix秒>
+X-Flaxia-Nonce:     <推測不能な一意値>
+```
+
+`<hmac>` は `HMAC-SHA256(webhookSecret, "<timestamp>.<nonce>.<rawBody>")` の
+16進表記。`rawBody` は受信した生のリクエストボディであり、再シリアライズした
+JSON ではない。
+
+### 受信側の実装
+
+`@flaxia/sdk` の `verifyCrowdWebhook()`（PR "worker trust plane" で追加）で
+署名・タイムスタンプ許容幅（例: ±5分）・nonce のリプレイガードをまとめて検証し、
+成功したボディだけを `parseCrowdWebhook()` に渡す。`taskId` はホストが投入時に
+永続化した対応表をサーバー側で引くために使い、リクエストで渡された ID を
+そのまま信用しない。未認証の呼び出し元には `204 No Content` などの最小限の
+応答だけを返す。

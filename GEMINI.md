@@ -96,129 +96,68 @@ workerとnodeは`@flaxia/sdk`を依存に追加して型だけ参照する。
 - 必ず完了報告をするときはテストにパスしてなくてはならない
 - 常にパスするようにズルをしたテストを作成してはならない。
 
-## TODO: Webhook / HTTP Callback 対応
+## Webhook / HTTP Callback 統合ガイド
 
 ### 背景
-Flaxia SNS の `waitUntil` 内で `waitForTask()`（最大30秒ポーリング）がタイムアウトする。
-解決策として、タスク完了をHTTP Callback（Webhook）で受け取る方式に移行する。
+長時間かかるタスクの完了を HTTP Callback（Webhook）で受け取るための契約。
+ホストは `callbackUrl` を渡し、ワーカーは完了・失敗時にその URL へ結果を POST する。
 
-### 1. `packages/worker` — Coordinator に callback delivery を実装
+### 送信側（`@flaxia/worker`）
 
-**ファイル**: `packages/worker/src/worker/Coordinator.ts`
+`Coordinator` の `deliverCallback()` が `Content-Type: application/json` で POST する。
 
-**`completeTask()`** と **`failTask()`** の末尾で `task.callbackUrl` が存在する場合、HTTP POST で結果を送信する：
+- タイムアウトは 5 秒程度。コールバックが遅くてもタスク自体の完了は阻害しない
+- 失敗時のリトライは行わない（結果は REST API からも取得できる）
+- DO 内からは通常の `fetch()` が使える（100ms 制限はない）
+- 署名 secret が未設定のまま署名なしで送信してはならない
 
-```typescript
-// completeTask() の WebSocket通知後:
-if (task.callbackUrl) {
-  await this.deliverCallback(task.callbackUrl, {
-    taskId,
-    status: 'done',
-    result: task.result,
-  });
-}
+### 署名の契約（`@flaxia/sdk` が単一の真実の源泉）
 
-// failTask() の WebSocket通知後:
-if (task.callbackUrl) {
-  await this.deliverCallback(task.callbackUrl, {
-    taskId,
-    status: 'failed',
-    error: task.error,
-  });
-}
+```
+X-Flaxia-Signature: sha256=<hmac>
+X-Flaxia-Timestamp: <unix秒>
+X-Flaxia-Nonce:     <推測不能な一意値>
 ```
 
-**注意点**:
-- `deliverCallback()` は `fetch()` で `POST` + `Content-Type: application/json`
-- タイムアウトは 5秒程度に設定（callbackが遅くてもタスク自体の完了は阻害しない）
-- 失敗時のリトライは初回実装ではスキップ（callback先が落ちていてもタスク結果はREST APIから取得可能）
-- DO の `fetch()` には 100ms の制限がない（DO内からは通常の `fetch()` が使える）
+HMAC-SHA256 の対象は `<timestamp>.<nonce>.<raw body>`（生のリクエストボディ）。
 
-### 2. `packages/sdk` — SubmitTaskOptions に callbackUrl が既にあることを確認（済）
-`callbackUrl?: string` は既に `SubmitTaskOptions` に定義済み。変更不要。
+### 受信側（ホスト）の必須要件
 
-### 3. `flaxia` 側 — analyzeSentiment の callbackUrl 対応
+1. **署名検証を最優先する**。`@flaxia/sdk` の `verifyCrowdWebhook()`
+   （PR "worker trust plane" で追加）を使い、生のリクエストボディで検証する。
+   検証に成功するまでボディを信用してはならない（JSON パース・DB 更新・ログ出力も検証後）。
+2. **タイムスタンプ許容幅**を設ける（例: ±5 分）。許容幅を外れたリクエストは拒否する。
+3. **リプレイガード**を入れる。nonce を TTL 付きで記録し、同じ nonce の再送は拒否する。
+4. **`taskId` → 自ドメインのエンティティの対応はサーバー側で解決する**。
+   リクエストで渡された ID をそのまま信用せず、タスク投入時にホスト自身が
+   永続化した対応表を、認可されたコンテキストから引く。
+5. **未認証の呼び出し元に詳細を返さない**。応答は `204 No Content`（または最小限の
+   `200`）に留め、DB の状態・対応表の内容・エラー詳細を返さない。
+6. 署名 secret は環境変数／シークレットストアで管理し、ローテーション可能にする。
+7. ペイロードには利用者のコンテンツが含まれ得るため、生のボディをログに残さない。
 
-**ファイル**: `functions/api/[[route]].ts`
+### ペイロードの形
 
-`analyzeSentiment()` を以下のように修正：
+`parseCrowdWebhook()`（`@flaxia/sdk`）が検証済みボディをこの形に正規化する。
+`result.output` の取り出しは `extractCallbackOutput()` を使う。
 
 ```typescript
-async function analyzeSentiment(c: any, postId: string, text: string): Promise<void> {
-  if (processingPosts.has(postId)) return
-  processingPosts.add(postId)
-  try {
-    const client = getCrowdClient(c)
-    if (!client) return
-
-    const callbackUrl = `${c.env.BASE_URL}/api/crowd/webhook`
-    await client.submit({
-      workload: 'ai-inference',
-      payload: {
-        task: 'text-classification',
-        model: 'Xenova/bert-base-multilingual-uncased-sentiment',
-        input: text,
-      },
-      callbackUrl,  // ← 追加
-    })
-    // waitForTask は呼ばない（waitUntil のタイムアウト回避）
-  } catch (err) {
-    console.error(`Sentiment analysis submission failed for post ${postId}:`, err)
-  } finally {
-    processingPosts.delete(postId)
-  }
+type CrowdWebhookEvent = {
+  taskId: string
+  status: 'done' | 'failed'
+  result?: { output?: unknown; [key: string]: unknown }
+  error?: string
 }
 ```
 
-### 4. `flaxia` 側 — Webhook受信エンドポイントを新設
+### タスク投入側
 
-**ファイル**: `functions/api/[[route]].ts`
-
-`POST /api/crowd/webhook` を Hono ルーターに追加：
-
-```typescript
-app.post('/api/crowd/webhook', async (c) => {
-  const { taskId, status, result, error } = await c.req.json()
-  if (!taskId) return c.text('Bad Request', 400)
-
-  // taskId から postId を引く（後述の補完テーブルが必要）
-  // 現状は taskId→postId のマッピングがないので、
-  // posts テーブルの sentiment_task_id カラムで管理する
-
-  if (status === 'done' && result?.output?.[0]) {
-    const output = result.output[0]
-    const labelScoreMap = {
-      very_negative: 0.0, negative: 0.25,
-      neutral: 0.5, positive: 0.75, very_positive: 1.0,
-    }
-    const score = labelScoreMap[output.label] ?? output.score
-    // postId が必要
-    await c.env.DB.prepare(
-      'UPDATE posts SET sentiment_score = ? WHERE id = ?'
-    ).bind(score, postId).run()
-  }
-
-  return c.json({ received: true })
-})
-```
-
-**課題**: 現状 `taskId → postId` のマッピングがない。以下のいずれかで解決：
-
-- **案A**: `posts` テーブルに `sentiment_task_id TEXT` カラムを追加（マイグレーション）
-- **案B**: 新テーブル `sentiment_tasks(task_id TEXT, post_id TEXT, created_at INT)` を作成
-
-### 5. `flaxia` 側 — マイグレーション
-
-`migrations/0034_add_sentiment_task_id.sql`:
-```sql
-ALTER TABLE posts ADD COLUMN sentiment_task_id TEXT;
-```
-
-または案Bのテーブルを作成。
-
-### 6. `flaxia` 側 — `wrangler.toml` に BASE_URL の確認
-
-`BASE_URL` 環境変数が `https://flaxia.app` に設定されていることを確認。
+- `callbackUrl?: string` は `SubmitTaskOptions` に定義済み。URL は
+  `buildCallbackUrl()`（`@flaxia/sdk`）で組み立て、ホストのベース URL は
+  環境変数から注入する（本番 URL をソースにハードコードしない）。
+- `submitAsync()` で投入し、`taskId` と自ドメインのエンティティの対応は
+  **投入時にサーバー側で永続化**しておく。クライアントから渡された `taskId` を
+  信頼する設計にしない。
 
 ---
 
