@@ -568,6 +568,15 @@ const INIT_FLAG = '__flaxia_node_init_started';
 const CONTROLLER_KEY = '__flaxia_node_controller';
 
 const startNode = (config: NodeConfig) => {
+  // Defence in depth for issue #7/#9: whatever path got here, the device only
+  // joins the crowd with a granted consent record. A host-managed accept() that
+  // the consent store refused (no real user gesture) therefore leaves the node
+  // idle instead of connecting for this page view.
+  if (getConsentState() !== 'granted') {
+    logError('refusing to start the node without a granted consent record');
+    return;
+  }
+
   const prev: SignalingClient | undefined = (window as any)[WINDOW_KEY];
   if (prev) {
     prev.disconnect();
