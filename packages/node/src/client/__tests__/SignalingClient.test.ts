@@ -78,6 +78,7 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
     localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -101,6 +102,7 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
     localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
     probeWebGpuMock.mockResolvedValue({
       webgpu: true,
       gpuArchitecture: 'apple m1',
@@ -131,6 +133,7 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
     localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
     probeWebGpuMock.mockResolvedValue({ webgpu: false });
 
     initFlaxiaNode({
@@ -153,6 +156,7 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
     localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -424,6 +428,141 @@ describe('SignalingClient', () => {
 
     expect(controller.isRunning()).toBe(true);
     expect(controller.getConsentState()).toBe('granted');
+  });
+
+  it('refuses to start the node without a recorded consent', async () => {
+    class MockWorker {
+      terminate = vi.fn();
+      postMessage = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    const MockWebSocket = vi.fn();
+    globalThis.WebSocket = MockWebSocket as any;
+    globalThis.fetch = vi.fn();
+
+    // The controller is reachable as `window.__flaxia_node_controller`, so a
+    // script on the page must not be able to register or connect the visitor's
+    // device by calling start() on it.
+    const controller = initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right', onConsentRequired: () => {} },
+    });
+
+    controller.start();
+    await flush();
+    await flush();
+
+    expect(controller.isRunning()).toBe(false);
+    expect(controller.getConsentState()).toBe('unset');
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(MockWebSocket).not.toHaveBeenCalled();
+  });
+
+  it('refuses to start the node once the recorded consent has expired', async () => {
+    class MockWorker {
+      terminate = vi.fn();
+      postMessage = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    const MockWebSocket = vi.fn();
+    globalThis.WebSocket = MockWebSocket as any;
+    globalThis.fetch = vi.fn();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() - 1000));
+
+    const controller = initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right', onConsentRequired: () => {} },
+    });
+
+    controller.start();
+    await flush();
+    await flush();
+
+    expect(controller.isRunning()).toBe(false);
+    expect(controller.getConsentState()).toBe('unset');
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(MockWebSocket).not.toHaveBeenCalled();
+  });
+
+  it('does not activate the node on grant() alone', async () => {
+    class MockWorker {
+      terminate = vi.fn();
+      postMessage = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    const MockWebSocket = vi.fn();
+    globalThis.WebSocket = MockWebSocket as any;
+    globalThis.fetch = vi.fn();
+
+    const controller = initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right', onConsentRequired: () => {} },
+    });
+
+    controller.grant();
+    await flush();
+    await flush();
+
+    // grant() only records consent; start() is the single activation path and
+    // re-checks it (TTL included) at call time.
+    expect(controller.getConsentState()).toBe('granted');
+    expect(controller.isRunning()).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(MockWebSocket).not.toHaveBeenCalled();
+  });
+
+  it('stops a suspended node whose consent lapsed before it reconnects', async () => {
+    class MockWorker {
+      terminate = vi.fn();
+      postMessage = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
+
+    const controller = initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    await flush();
+    await flush();
+    expect(controller.isRunning()).toBe(true);
+
+    // A backgrounded tab suspends the node; by the time it comes back the grant
+    // is gone, so resuming must not silently reopen the socket.
+    const client = (window as any).__flaxia_node_signal_client;
+    client.suspend();
+    localStorage.removeItem('flaxia_consent_granted');
+    localStorage.removeItem('flaxia_consent_expiry');
+    client.resume();
+    await flush();
+
+    expect((client as any).destroyed).toBe(true);
+    expect(controller.isRunning()).toBe(false);
+    expect((window as any).__flaxia_node_signal_client).toBeUndefined();
   });
 
   it('revokes and re-grants consent from the controller (settings toggle)', async () => {

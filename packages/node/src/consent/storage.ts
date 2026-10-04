@@ -39,15 +39,16 @@ export const hasConsent = (): boolean => {
   const granted = safeGet(STORAGE_KEY) === 'true';
   if (!granted) return false;
 
+  // The expiry is not optional: a grant without one is legacy (or tampered)
+  // data, and honouring it would leave the node opted in forever. Fail closed on
+  // a missing or unparseable expiry and clear the grant so the host has to ask
+  // again through the consent UI.
   const expiry = safeGet(STORAGE_EXPIRY_KEY);
-  if (expiry) {
-    const expiryMs = parseInt(expiry, 10);
-    // Treat a missing/garbage expiry as expired (and clean up).
-    if (!Number.isFinite(expiryMs) || Date.now() > expiryMs) {
-      safeRemove(STORAGE_KEY);
-      safeRemove(STORAGE_EXPIRY_KEY);
-      return false;
-    }
+  const expiryMs = expiry === null ? Number.NaN : Number(expiry);
+  if (!Number.isFinite(expiryMs) || Date.now() > expiryMs) {
+    safeRemove(STORAGE_KEY);
+    safeRemove(STORAGE_EXPIRY_KEY);
+    return false;
   }
 
   return true;

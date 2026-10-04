@@ -2,6 +2,7 @@ import { ConsentUI } from '../consent/ConsentUI';
 import {
   clearConsent as clearPersistedConsent,
   getConsentState,
+  hasConsent,
   saveConsent,
   saveDenial,
   safeLocalStorageGet,
@@ -64,6 +65,19 @@ class SignalingClient {
 
   async connect() {
     if (this.destroyed) return;
+    // Consent can lapse (TTL) or be revoked while the node is suspended or
+    // between reconnect attempts; a socket must never be opened without it.
+    // Stopping here also releases the worker instead of leaving an idle node.
+    if (!hasConsent()) {
+      logError('connect refused: consent has not been granted');
+      this.disconnect();
+      // An inert client must not look like a live node: without this,
+      // isRunning() would stay true and a host could never start it again.
+      try {
+        delete (window as any)[WINDOW_KEY];
+      } catch {}
+      return;
+    }
     log(`connect nodeId=${this.nodeId}`);
 
     if (this.ws) {
@@ -457,6 +471,13 @@ const INIT_FLAG = '__flaxia_node_init_started';
 const CONTROLLER_KEY = '__flaxia_node_controller';
 
 const startNode = (config: NodeConfig) => {
+  // Defense in depth: `start()` already gates on consent, but nothing that
+  // registers the node, opens a socket or spawns a worker may run without it.
+  if (!hasConsent()) {
+    logError('node start refused: consent has not been granted');
+    return;
+  }
+
   const prev: SignalingClient | undefined = (window as any)[WINDOW_KEY];
   if (prev) {
     prev.disconnect();
@@ -485,6 +506,13 @@ class NodeController implements FlaxiaNodeController {
 
   start(): void {
     if (this.isRunning()) return;
+    // Consent is the gate for the whole node. The controller is reachable as
+    // `window.__flaxia_node_controller`, so without this check any script on the
+    // page could register the visitor's device and start taking tasks.
+    if (!hasConsent()) {
+      logError('refusing to start: consent has not been granted');
+      return;
+    }
     startNode(this.config);
   }
 
@@ -508,6 +536,10 @@ class NodeController implements FlaxiaNodeController {
   }
 
   grant(): void {
+    // Persisting consent must not activate the node by itself. `start()` is the
+    // only activation path and it re-checks `hasConsent()` (TTL included) at call
+    // time, so neither this handle nor a stale grant can put a node online
+    // without a recorded, unexpired consent.
     saveConsent();
   }
 

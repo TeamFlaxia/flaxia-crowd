@@ -97,4 +97,35 @@ describe('consent/storage', () => {
     expect(localStorage.getItem('flaxia_consent_denied')).toBeNull();
     expect(getConsentState()).toBe('unset');
   });
+
+  it('treats a flag-only legacy grant as expired and asks for consent again', () => {
+    // Pre-TTL builds stored only the flag. Honouring it would keep the node
+    // opted in forever, so it must fail closed and be cleared for re-consent.
+    localStorage.setItem('flaxia_consent_granted', 'true');
+
+    expect(hasConsent()).toBe(false);
+    expect(getConsentState()).toBe('unset');
+    expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
+    expect(localStorage.getItem('flaxia_consent_expiry')).toBeNull();
+  });
+
+  it('treats an unparseable or empty expiry as expired', () => {
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', 'not-a-number');
+    expect(hasConsent()).toBe(false);
+
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', '');
+    expect(hasConsent()).toBe(false);
+  });
+
+  it('honours a grant until its expiry passes, then drops it', () => {
+    localStorage.setItem('flaxia_consent_granted', 'true');
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 60000));
+    expect(hasConsent()).toBe(true);
+
+    localStorage.setItem('flaxia_consent_expiry', String(Date.now() - 1));
+    expect(hasConsent()).toBe(false);
+    expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
+  });
 });
