@@ -498,6 +498,29 @@ describe('SignalingClient', () => {
     expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
   });
 
+  it('never connects when controller.start() is called without verified consent', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    const controller = initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right', onConsentRequired: () => {} },
+    });
+
+    controller.start();
+    await flush();
+    expect(controller.isRunning()).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(globalThis.WebSocket).not.toHaveBeenCalled();
+
+    controller.deny();
+    controller.start();
+    await flush();
+    expect(controller.getConsentState()).toBe('denied');
+    expect(controller.isRunning()).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   /**
    * Boot a node against a fake socket and worker, and expose the hooks a test
    * needs to feed coordinator messages in and worker reports back.
