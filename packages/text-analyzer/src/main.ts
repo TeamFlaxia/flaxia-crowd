@@ -1,5 +1,5 @@
 import './index.css';
-import { FlaxiaClient } from '@flaxia/sdk';
+import { submitCrowdTask, getCrowdTask } from './crowd-client';
 import { initFlaxiaNode } from '@flaxia/node';
 
 const LABELS = ['1 star', '2 stars', '3 stars', '4 stars', '5 stars'] as readonly string[];
@@ -22,13 +22,10 @@ const defaultOrchestrator = window.location.hostname === 'localhost' || window.l
 
 const savedOrchestrator = localStorage.getItem('flaxia_orchestrator_url');
 const displayOrchestratorUrl = savedOrchestrator || defaultOrchestrator;
-const useViteProxy = !savedOrchestrator && window.location.hostname === 'localhost';
-const orchestratorUrl = useViteProxy ? window.location.origin : displayOrchestratorUrl;
-
-const client = new FlaxiaClient({
-  apiKey: import.meta.env.VITE_FLAXIA_API_KEY || 'fc_live_textanalyzer_example_key',
-  baseUrl: `${orchestratorUrl}/crowd`
-});
+// Node signaling may connect directly to the orchestrator. Authenticated task
+// API calls are intentionally separate and always go through same-origin
+// /crowd/* so the browser never receives the API key.
+const orchestratorUrl = displayOrchestratorUrl;
 
 // UI Elements
 const analysisInput = document.getElementById('analysis-input') as HTMLTextAreaElement;
@@ -247,7 +244,7 @@ async function submitAnalysis() {
     resetVisualizer();
     updateVisualizer('pending', 'Submitting...');
 
-    const taskRecord = await client.submit({
+    const taskRecord = await submitCrowdTask({
       workload: 'ai-inference',
       payload: {
         task: 'text-classification',
@@ -280,7 +277,7 @@ async function submitAnalysis() {
         break;
       }
 
-      const currentTask = await client.getTask(taskId);
+      const currentTask = await getCrowdTask(taskId);
 
       if (currentTask.status === 'processing') {
         updateVisualizer('processing', taskId, currentTask.assignedNodeId || 'Assigned Node', elapsed);

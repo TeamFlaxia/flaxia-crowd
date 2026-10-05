@@ -21,6 +21,24 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
 
+      - name: Reject committed live API keys
+        shell: bash
+        run: |
+          # Documentation and tests legitimately show placeholders such as
+          # `fc_live_xxxxxxxxxxxx`, so only flag values that do not look like a
+          # placeholder. The workflow file itself is excluded because it has to
+          # name the very patterns it rejects.
+          placeholder='fc_live_(x{4,}|X{4,}|your|example|sample|test|dummy|fake|placeholder|redacted|\.\.\.|<|\$\{)'
+          if git grep -n -E 'fc_live_[A-Za-z0-9_-]+' -- ':!package-lock.json' ':!.github/workflows/ci.yml' \
+              | grep -v -E "$placeholder"; then
+            echo "::error::Live-looking Crowd API key committed to the repository"
+            exit 1
+          fi
+          if git grep -n 'VITE_FLAXIA_API_KEY' -- ':!.github/workflows/ci.yml'; then
+            echo "::error::Crowd API keys must not be exposed through VITE_* variables"
+            exit 1
+          fi
+
       - name: Install dependencies
         run: npm ci
 
