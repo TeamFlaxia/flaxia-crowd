@@ -5,11 +5,21 @@ export { Coordinator } from './worker/Coordinator'
 
 export interface Env {
   COORDINATOR: DurableObjectNamespace
+  /** Comma-separated API keys: `key` or `key:tenantId`. */
   API_KEYS: string
   CORS_ORIGINS: string
   RATE_LIMIT_MAX: string
   MAX_PAYLOAD_SIZE: string
+  /** Signs node registration tokens. */
   NODE_TOKEN_SECRET: string
+  /**
+   * Signs webhook deliveries. Dedicated so a leak in one plane does not forge
+   * the other; when unset, tasks with a `callbackUrl` are rejected at submit
+   * time instead of being delivered unsigned.
+   */
+  WEBHOOK_SIGNING_SECRET: string
+  /** Signs short-lived `/crowd/subscribe` tokens (separate from node tokens). */
+  SUBSCRIBE_TOKEN_SECRET: string
 }
 
 const app = new Hono<{ Bindings: Env }>()

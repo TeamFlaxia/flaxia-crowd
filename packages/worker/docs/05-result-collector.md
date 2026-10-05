@@ -20,18 +20,44 @@
 ## コールバック方式（SDKがcallbackUrlを指定した場合）
 
 ```typescript
-// TaskQueue.complete() 内で実行
+// completeTask() / failTask() 内で実行
+const body = JSON.stringify({
+  taskId: task.id,
+  status: 'done',            // or 'failed'
+  result: task.result,       // failed のときは error
+  nodeId: task.resultNodeId, // 監査用: 結果を出したノード
+  attemptId: task.resultAttemptId, // 監査用: 受理した配信試行
+});
+const timestamp = String(Math.floor(Date.now() / 1000));
+const nonce = crypto.randomUUID();
+const signature = await createWebhookSignature(env.WEBHOOK_SIGNING_SECRET, timestamp, nonce, body);
+
 await fetch(task.callbackUrl, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    taskId: task.id,
-    status: 'done',
-    result: task.result,
-    processingMs: task.completedAt - task.assignedAt,
-  })
-})
+  headers: {
+    'Content-Type': 'application/json',
+    'X-Flaxia-Signature': signature, // sha256=<base64url HMAC-SHA256>
+    'X-Flaxia-Timestamp': timestamp, // unix 秒
+    'X-Flaxia-Nonce': nonce,
+  },
+  body,
+  signal: AbortSignal.timeout(5000),
+});
 ```
+
+- 署名対象は `<timestamp>.<nonce>.<raw body>`。
+- secret は **`WEBHOOK_SIGNING_SECRET` 専用**（`NODE_TOKEN_SECRET` と共用しない）。
+- `callbackUrl` 付きタスクは secret 未設定なら投入時に 400 で拒否する（fail closed）。
+- 受信側の検証は SDK の `verifyCrowdWebhook()` を使う
+  （定数時間比較・許容 300 秒・nonce 必須・任意のリプレイガード）。
+
+### 署名が保証する範囲
+
+署名は「コーディネーターがその本文を送った」こと（配送の真正性）を示すだけで、
+**結果の正しさは保証しない**。ノードは実行した値をそのまま報告するため、
+悪意あるノードの出力にも同じ署名が付く。意思決定に使う場合は
+再実行・サンプリング検証などを組み合わせ、`nodeId` / `attemptId` を
+監査ログに残すこと。
 
 ## ポーリング方式（SDKがcallbackUrlを指定しない場合）
 

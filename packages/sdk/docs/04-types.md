@@ -84,6 +84,64 @@ type FileConvertPayload = {
 }
 ```
 
+## ルーティングヒント（全ペイロード共通）
+
+`TaskPayload` は全ワークロード共通で以下のフィールドを受け付ける
+（`TaskPayloadRouting`）。
+
+```typescript
+type TaskPayloadRouting = {
+  /**
+   * 実行を許可するノードサイト ID の allow-list。
+   * 指定時は署名済みノードトークンの siteId が一致するノードだけに割り当て、
+   * 期限までに候補が現れなければタスクを失敗させる。
+   *
+   * 注意: 実行するノードはペイロードそのものを読める。allow-list は
+   * 「どのサイトに渡すか」を絞るだけで、内容の秘匿は保証しない。
+   */
+  allowedSites?: string[]
+}
+```
+
+## TaskRecord（API 応答）
+
+| フィールド | 型 | 説明 |
+|-----------|-----|------|
+| `tenantId` | `string` | 所有テナント（API キーから解決）。他テナントからは 404 |
+| `allowedSites` | `string[]?` | サイト allow-list の写し |
+| `resultNodeId` | `string?` | 結果を受理したノード（監査用） |
+| `resultAttemptId` | `string?` | 結果を受理した配信試行（監査用） |
+| `subscribeToken` | `string?` | API 応答のみ。`/crowd/subscribe` 用の短期トークン |
+| `subscribeTokenExpiresAt` | `number?` | 上記の有効期限（unix ms） |
+
+## WebSocket ハンドシェイク（`handshake.ts`）
+
+ブラウザの `WebSocket` はヘッダを設定できないため、トークンは
+サブプロトコル一覧で運ぶ。worker と node はこのモジュールだけを契約として使う。
+
+```typescript
+const NODE_SIGNAL_PROTOCOL = 'flaxia-node-v1'
+const SUBSCRIBE_PROTOCOL = 'flaxia-subscribe-v1'
+const BEARER_SUBPROTOCOL_PREFIX = 'bearer.'
+
+buildNodeSignalProtocols(token) // ['flaxia-node-v1', 'bearer.<token>']
+buildSubscribeProtocols(token)  // ['flaxia-subscribe-v1', 'bearer.<token>']
+parseBearerSubprotocol(header, protocol) // サーバー側の検証（重複・未知・過大を拒否）
+buildWsUrl(baseUrl, path, params)
+```
+
+## swarm 計画の上限
+
+```typescript
+const MIN_SWARM_NODES = 2
+const MAX_SWARM_NODES = 16
+const MAX_SWARM_LAYERS = 1024        // 総層数の上限
+const MAX_SWARM_SLICE_LAYERS = 256   // 1 ノードあたりの上限
+```
+
+`isValidSwarmChain()` は連続性・全被覆に加えてこれらの上限と
+整数スライスを検査する（`end: 1e9` のような計画を拒否する）。
+
 ## 型のバージョン管理方針
 
 型定義に破壊的変更が生じた場合：

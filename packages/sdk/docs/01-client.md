@@ -35,9 +35,20 @@ class FlaxiaClient {
   async submitAsync(options: TaskSubmitAsyncOptions): Promise<{ id: string }>
 
   /**
-   * タスクの現在の状態を取得する
+   * タスクの現在の状態を取得する（所有者テナントのみ。他テナントは 404）
+   * 応答の subscribeToken はクライアント内にキャッシュされる
    */
   async getTask<T = unknown>(taskId: string): Promise<TaskResult<T>>
+
+  /**
+   * タスクの進捗トークンと完了結果を WebSocket で購読する
+   *
+   * `/crowd/subscribe` はテナント + タスク + 期限に束縛された購読トークンが
+   * 必須。クライアントは submit() の応答、キャッシュ、または
+   * GET /crowd/tasks/:id から自動で取得する（options.subscribeToken で上書き可）。
+   * トークンはサブプロトコル `flaxia-subscribe-v1, bearer.<token>` で送る。
+   */
+  async subscribe(taskId: string, options?: SubscribeOptions): Promise<TaskSubscription>
 }
 ```
 

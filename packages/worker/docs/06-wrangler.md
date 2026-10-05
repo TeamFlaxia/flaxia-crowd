@@ -44,13 +44,29 @@ id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # wrangler kv:namespace create CROWD_KV
 以下は `wrangler secret put` で設定する（wrangler.tomlには書かない）：
 
 ```bash
-wrangler secret put API_KEYS           # タスクAPI用。カンマ区切りで複数キーをローテーション可能
-wrangler secret put NODE_TOKEN_SECRET   # ノード登録トークン署名・コールバック署名用（必須）
+wrangler secret put API_KEYS                # タスクAPI用。カンマ区切りで複数キーをローテーション可能
+wrangler secret put NODE_TOKEN_SECRET       # ノード登録トークンの署名（必須）
+wrangler secret put SUBSCRIBE_TOKEN_SECRET  # /crowd/subscribe トークンの署名（必須）
+wrangler secret put WEBHOOK_SIGNING_SECRET  # Webhook 署名専用（callbackUrl を使うなら必須）
 ```
 
 - `API_KEYS` は `wrangler.toml` に書かない。未設定ならタスク投入・取得は401でfail closedする。
 - `NODE_TOKEN_SECRET` を設定しない場合、`/crowd/nodes/register` は503を返し、ノードは接続できない。
-- ローカル開発時は `wrangler.toml` と同じディレクトリに `.dev.vars` を作成し、`API_KEYS=...` と `NODE_TOKEN_SECRET=...` を記述する。
+- `SUBSCRIBE_TOKEN_SECRET` を設定しない場合、`/crowd/subscribe` は503を返す。
+- `WEBHOOK_SIGNING_SECRET` を設定しない場合、`callbackUrl` 付きのタスク投入は
+  400 で拒否される（無署名 Webhook を黙って送らないため）。
+- 3 つの secret は用途ごとに分離する（1 つの漏洩が他へ波及しないように）。
+- ローカル開発時は `wrangler.toml` と同じディレクトリに `.dev.vars` を作成し
+  `API_KEYS=...` や `NODE_TOKEN_SECRET=...` などを記述する。
+
+`API_KEYS` はテナント単位のアクセス制御に対応する:
+
+```toml
+[vars]
+# 明示テナント: このキーは tenant-a のタスクだけを読み書きできる
+API_KEYS = "fc_live_example_a:tenant-a,fc_live_example_b:tenant-b"
+# テナント省略時は key-<sha256先頭16hex> が自動で割り当てられる（後方互換）
+```
 
 ### APIキーのローテーション
 
@@ -66,8 +82,12 @@ wrangler secret put NODE_TOKEN_SECRET   # ノード登録トークン署名・�
 
 ノード認証はKV不要のHMAC-SHA256署名トークン方式。
 
-1. `POST /crowd/nodes/register` に `{ siteId, nodeId, capabilities }` を送信 → `{ token, nodeId, expiresAt }` を返却（有効期限24時間）。
-2. `WS /crowd/signal?token=<token>` で接続。署名と期限を検証し、`nodeId` はトークン内の値を使用する（クライアント指定不可）。
+1. `POST /crowd/nodes/register` に `{ siteId, capabilities }` を送信 →
+   `{ token, nodeId, expiresAt }` を返却（有効期限2時間）。
+   リクエストの `nodeId` は**無視**され、常にサーバーが新しい UUID を発行する。
+2. `WS /crowd/signal` に
+   `Sec-WebSocket-Protocol: flaxia-node-v1, bearer.<token>` で接続。
+   署名と期限を検証し、`nodeId` / `siteId` はトークン内の値のみを使う。
 
 ## KV Namespace の作成コマンド
 
@@ -97,5 +117,7 @@ wrangler dev   # Durable Objects・KVともにローカルエミュレートさ�
 WebSocketのテスト：
 
 ```bash
-npx wscat -c "ws://localhost:8787/crowd/signal?token=test-token"
+# クエリのトークンは拒否される。サブプロトコルで渡すこと。
+npx wscat -c "ws://localhost:8787/crowd/signal" \
+  -s flaxia-node-v1 -s "bearer.<node-token>"
 ```

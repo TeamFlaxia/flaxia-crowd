@@ -1,5 +1,6 @@
 import type { TaskPayload, WorkloadType, TaskRecord, SubmitTaskResponse } from './types';
 import { AuthenticationError, FlaxiaError, TaskNotFoundError, ValidationError } from './errors';
+import { SUBSCRIBE_PROTOCOL, buildSubscribeProtocols, buildWsUrl } from './handshake';
 
 export interface FlaxiaClientConfig {
   apiKey: string;
@@ -21,6 +22,17 @@ export interface TaskSubscription {
   close: () => void;
 }
 
+export interface SubscribeOptions {
+  /**
+   * Pre-fetched subscribe token. When omitted the client reuses the token from
+   * `submit()` or fetches one with `GET /crowd/tasks/:id` (owner-only).
+   */
+  subscribeToken?: string;
+}
+
+/** How long before expiry a cached subscribe token is refreshed. */
+const SUBSCRIBE_TOKEN_SKEW_MS = 30_000;
+
 /**
  * Normalizes a base URL so the SDK can be configured with either the host root
  * ('https://host') or a '/crowd'-prefixed URL, while all requests consistently
@@ -34,13 +46,10 @@ function normalizeBaseUrl(raw: string): string {
   return base;
 }
 
-function toWsUrl(baseUrl: string): string {
-  return baseUrl.replace(/^http/, 'ws');
-}
-
 export class FlaxiaClient {
   private apiKey: string;
   private baseUrl: string;
+  private subscribeTokens = new Map<string, { token: string; expiresAt: number }>();
 
   constructor(config: FlaxiaClientConfig) {
     if (!config.apiKey) {
@@ -76,7 +85,9 @@ export class FlaxiaClient {
       throw new FlaxiaError(message, 'SUBMIT_ERROR', response.status);
     }
 
-    return response.json() as Promise<SubmitTaskResponse>;
+    const result = await response.json() as SubmitTaskResponse;
+    this.rememberSubscribeToken(result.taskId ?? result.id, result.subscribeToken, result.subscribeTokenExpiresAt);
+    return result;
   }
 
   async getTask(taskId: string): Promise<TaskRecord> {
@@ -95,7 +106,9 @@ export class FlaxiaClient {
       throw new FlaxiaError(message, 'FETCH_ERROR', response.status);
     }
 
-    return response.json() as Promise<TaskRecord>;
+    const task = await response.json() as TaskRecord;
+    this.rememberSubscribeToken(taskId, task.subscribeToken, task.subscribeTokenExpiresAt);
+    return task;
   }
 
   async waitForTask(taskId: string, intervalMs = 2000, timeoutMs = 60000): Promise<TaskRecord> {
@@ -150,8 +163,26 @@ export class FlaxiaClient {
     throw new FlaxiaError('Task polling timed out', 'POLLING_TIMEOUT', 408);
   }
 
-  async subscribe(taskId: string): Promise<TaskSubscription> {
-    const ws = new WebSocket(`${toWsUrl(this.baseUrl)}/crowd/subscribe?taskId=${taskId}`);
+  /**
+   * Stream a task's tokens and terminal result.
+   *
+   * `/crowd/subscribe` requires a short-lived token bound to the task, so the
+   * client resolves one automatically: the token returned by `submit()`, the
+   * cached one from a previous `getTask()`, or a fresh `GET /crowd/tasks/:id`
+   * with the API key. Pass `options.subscribeToken` to override.
+   */
+  async subscribe(taskId: string, options: SubscribeOptions = {}): Promise<TaskSubscription> {
+    const token = options.subscribeToken ?? await this.resolveSubscribeToken(taskId);
+    if (!token) {
+      throw new FlaxiaError(
+        'A subscribe token is required for /crowd/subscribe',
+        'SUBSCRIBE_UNAUTHORIZED',
+        401,
+      );
+    }
+
+    const url = buildWsUrl(this.baseUrl, '/crowd/subscribe', { taskId });
+    const ws = new WebSocket(url, buildSubscribeProtocols(token));
 
     let tokenCallback: ((token: string) => void) | null = null;
     let doneCallback: ((result: unknown) => void) | null = null;
@@ -184,6 +215,26 @@ export class FlaxiaClient {
         reject(new FlaxiaError('WebSocket connection failed', 'WS_CONNECT_ERROR', 0));
       };
     });
+  }
+
+  /** Cached-or-fetched subscribe token; `null` when the server did not issue one. */
+  private async resolveSubscribeToken(taskId: string): Promise<string | null> {
+    const cached = this.subscribeTokens.get(taskId);
+    if (cached && cached.expiresAt - SUBSCRIBE_TOKEN_SKEW_MS > Date.now()) {
+      return cached.token;
+    }
+    const task = await this.getTask(taskId);
+    return task.subscribeToken ?? null;
+  }
+
+  private rememberSubscribeToken(taskId: string | undefined, token?: string, expiresAt?: number): void {
+    if (!taskId || !token) return;
+    // Without a server-provided expiry, assume the documented 10 minute TTL.
+    this.subscribeTokens.set(taskId, { token, expiresAt: expiresAt ?? Date.now() + 10 * 60_000 });
+    if (this.subscribeTokens.size > 64) {
+      const oldest = this.subscribeTokens.keys().next().value;
+      if (oldest !== undefined) this.subscribeTokens.delete(oldest);
+    }
   }
 
   private async extractError(response: Response): Promise<string> {

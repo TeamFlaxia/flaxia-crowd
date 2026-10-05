@@ -150,9 +150,9 @@ export interface MoENodeConfig {
 
 /** Room-sizing and scheduling hints for a swarm inference job. */
 export interface SwarmOptions {
-  /** Minimum nodes the job needs before it may start (default: 1). */
+  /** Minimum nodes the job needs before it may start (default: 2, max: 16). */
   minNodes?: number;
-  /** Maximum nodes the coordinator may reserve (default: 4). */
+  /** Maximum nodes the coordinator may reserve (default: 4, max: 16). */
   maxNodes?: number;
   /** Prefer nodes whose layer range is already cached (default: true). */
   preferWarm?: boolean;
@@ -378,7 +378,20 @@ export interface NudeNetResult {
 
 // --- Core Task Types ---
 
-export type TaskPayload =
+/** Scheduling hints any workload payload may carry. */
+export interface TaskPayloadRouting {
+  /**
+   * Optional allow-list of node site ids. When set, the coordinator only hands
+   * the task to nodes whose signed registration token carries one of these
+   * site ids, and fails the task if no such node appears before its deadline.
+   *
+   * Note: a volunteer node necessarily sees the payload it executes, so this
+   * restricts *which* sites see it, not whether a node can read it.
+   */
+  allowedSites?: string[];
+}
+
+export type TaskPayload = (
   | AiInferencePayload
   | ImageProcessPayload
   | FileConvertPayload
@@ -388,7 +401,8 @@ export type TaskPayload =
   | VectorQueryPayload
   | MoEInferencePayload
   | NudeNetPayload
-  | SwarmInferencePayload;
+  | SwarmInferencePayload
+) & TaskPayloadRouting;
 
 export interface TaskRecord {
   id: string;
@@ -396,6 +410,16 @@ export interface TaskRecord {
   workload: WorkloadType;
   payload: TaskPayload;
   createdAt: number;
+  /**
+   * Tenant that submitted the task (derived from the API key). Every read path
+   * is scoped to it: another tenant's key gets a 404, never this record.
+   */
+  tenantId: string;
+  /**
+   * Optional site allow-list copied from `payload.allowedSites`. When present,
+   * only nodes whose signed token carries a matching `siteId` may run the task.
+   */
+  allowedSites?: string[];
   assignedAt?: number;
   completedAt?: number;
   assignedNodeId?: string;
@@ -408,6 +432,17 @@ export interface TaskRecord {
   swarmSession?: SwarmSessionPlan;
   result?: unknown;
   error?: string;
+  /** Node that produced the accepted result (audit trail). */
+  resultNodeId?: string;
+  /** Delivery attempt that produced the accepted result (audit trail). */
+  resultAttemptId?: string;
+  /**
+   * Short-lived token for `GET /crowd/subscribe`, present only on API responses
+   * (`POST /crowd/tasks`, `GET /crowd/tasks/:id`). Never stored on the task.
+   */
+  subscribeToken?: string;
+  /** Unix ms expiry of {@link TaskRecord.subscribeToken}. */
+  subscribeTokenExpiresAt?: number;
 }
 
 /** Response returned by POST /crowd/tasks (a partial snapshot, not a full TaskRecord). */
@@ -417,6 +452,9 @@ export interface SubmitTaskResponse {
   id: string;
   status: TaskStatus;
   createdAt: number;
+  /** Short-lived token required by `GET /crowd/subscribe` for this task. */
+  subscribeToken?: string;
+  subscribeTokenExpiresAt?: number;
 }
 
 /**
@@ -535,10 +573,19 @@ export interface WarmModelRange {
  */
 export interface NodeRegisterRequest {
   siteId: string;
+  /**
+   * Ignored. The coordinator always issues a fresh random node id and binds the
+   * token to it, so a node can never claim (and displace) another node's
+   * identity. Kept for wire compatibility with older clients.
+   */
   nodeId?: string;
   capabilities?: WorkloadType[];
   deviceMemory?: number | null;
-  /** Measured WASM memory the device could commit, in bytes. */
+  /**
+   * Measured WASM memory the device could commit, in bytes. Clamped by the
+   * coordinator to a sane maximum; the value is self-reported and only used to
+   * order candidate nodes, never as a trust decision.
+   */
   wasmMemoryBytes?: number;
   /** WebGPU capabilities, when the node has been probed for swarm inference. */
   swarm?: SwarmNodeCapabilities;
@@ -547,7 +594,9 @@ export interface NodeRegisterRequest {
 }
 
 export interface NodeRegisterResponse {
+  /** Base64url node token; bound to the returned `nodeId` and `siteId`. */
   token: string;
+  /** Server-issued node id. Always use this, never a locally chosen id. */
   nodeId: string;
   expiresAt: number;
   lowMemory: boolean;

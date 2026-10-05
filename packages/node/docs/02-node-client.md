@@ -11,14 +11,31 @@ WebRTC（DataChannel / offer / answer / ICE）は使用しない。
 ## 接続フロー
 
 ```
-1. POST /crowd/nodes/register → ノードトークン取得（24時間有効）
-   body: { siteId, nodeId, capabilities, wasmMemoryBytes, deviceMemory, swarm? }
-2. WS  /crowd/signal?token=xxx → Signaling接続確立
-3. ping / pong でハートビート
-4. { type: 'task', taskId, workload, payload, timeoutMs? } を受信
-5. WorkerPool で実行し { type: 'progress', taskId, token } を随時送信
-6. { type: 'result', taskId, payload } または { type: 'error', taskId, error } を送信
+1. POST /crowd/nodes/register { siteId, capabilities, wasmMemoryBytes, swarm }
+   → { token, nodeId, expiresAt }（nodeId はサーバー発行。リクエストの nodeId は無視される）
+2. WS /crowd/signal
+   Sec-WebSocket-Protocol: flaxia-node-v1, bearer.<token>
+   → 101 Switching Protocols（Sec-WebSocket-Protocol: flaxia-node-v1）
+3. タスク待機状態へ（task/attemptId を含む配信制御メッセージを受け取る）
 ```
+
+### トークン輸送（Issue #20）
+
+ブラウザの `WebSocket` はリクエストヘッダを設定できないため、トークンは
+**サブプロトコル一覧**で送る。`?token=` はアクセスログ・Referer に残るので
+worker が 401 で拒否する。
+
+```typescript
+import { buildNodeSignalProtocols } from '@flaxia/sdk'
+
+const ws = new WebSocket('wss://host/crowd/signal', buildNodeSignalProtocols(token))
+```
+
+- トークンは `localStorage` に保存しない（メモリのみ）。ページ再読み込みや
+  再接続のたびに再登録するため、TTL 2 時間のトークンが自然にローテーションされる。
+- 旧バンドルが保存した `flaxia_node_token` は起動時に削除する。
+- ハンドシェイクが完了する前に切断された場合（401 等）はキャッシュを捨て、
+  次回は再登録する。
 
 ## SignalingClient 実装方針
 
@@ -39,28 +56,8 @@ class SignalingClient {
 
 ## 再接続ロジック
 
-指数バックオフ（最大30秒）で再接続を試みる：
-
-```
-1回目: 1秒後
-2回目: 2秒後
-3回目: 4秒後
-…上限 30秒
-```
-
-ページのvisibility変化にも対応する：
-
-```typescript
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    // バックグラウンドになったら停止（CPU・バッテリー節約）
-    this.suspend()
-  } else {
-    // フォアグラウンドに戻ったら再開
-    this.resume()
-  }
-})
-```
+指数バックオフ（最大30秒）で再接続を試みる（1秒、2秒、4秒…上限30秒）。
+ページのvisibility変化にも対応し、バックグラウンド時は停止、復帰時に再接続する。
 
 ## メッセージ種別
 
@@ -74,27 +71,17 @@ document.addEventListener('visibilitychange', () => {
 | `abort` | 受信 | 協調側からのタスク中断指示 |
 | `swarm-init` / `swarm-slice` / `swarm-start` / `swarm-error` | 双方向 | swarm-inference のセッション制御 |
 
-## タスク受信から実行までの流れ
+## 配信試行（attemptId）は必須（Issue #4）
 
-```
-SignalingClient: { type: 'task', taskId, workload, payload, timeoutMs } 受信
-    ↓
-WorkerPool.run(taskId, workload, payload, timeoutMs, onProgress)
-    ↓
-{ type: 'progress', taskId, token } 送信（onProgress 経由）
-    ↓
-{ type: 'result', taskId, payload } 送信
-```
-
-同一 `taskId` の重複配信（at-least-once）は `inflightTasks` で排除し、
-二重実行しない。協調側から `abort` を受けたタスクは失敗として返送しない。
+コーディネーターは配信ごとに新しい `attemptId` を発行し、現在の ID と配信を受けた
+ソケットから届くメッセージだけを受理する。欠落・旧試行の `result` / `progress` / `error`
+は状態を変えずに破棄される。swarm 制御メッセージもセッションの attempt に束縛される。
 
 ## エラーハンドリング
 
-- トークン取得失敗 → 指数バックオフで再接続
-- 実行タイムアウト → `{ type: 'error', taskId, error: 'TIMEOUT' }` を送信
-- 実行例外 → `{ type: 'error', taskId, error: message }` を送信
-- いずれの場合も協調側がリトライを判断する
+- 処理失敗・タイムアウトは `{ type: 'error', taskId, error, attemptId }` として報告する。
+- `{ type: 'abort' }` を受信したタスクはローカルで停止し、失敗を報告しない。
+- いずれの場合も Worker 側がリトライ（最大 3 回）を判断する。
 
 ## 同意との関係
 
