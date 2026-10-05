@@ -18,7 +18,7 @@ import { env as testEnv, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 import { crowdApp } from '../index';
 import type { Env } from '../../index';
-import { createNodeToken, createSubscribeToken } from '../../security';
+import { createNodeToken, createSubscribeToken, validateCallbackUrl } from '../../security';
 import {
   NODE_SIGNAL_PROTOCOL,
   SUBSCRIBE_PROTOCOL,
@@ -376,6 +376,16 @@ describe('#6 swarm sizing bounds at the API boundary', () => {
 });
 
 describe('#13 webhook signing fails closed', () => {
+  it('rejects localhost and non-HTTPS webhook destinations', () => {
+    for (const url of [
+      'http://localhost/callback',
+      'http://127.0.0.1/callback',
+      'http://[::1]/callback',
+      'https://169.254.169.254/latest/meta-data',
+    ]) expect(validateCallbackUrl(url)).toBeNull();
+    expect(validateCallbackUrl('https://hooks.example/callback')).toBe('https://hooks.example/callback');
+  });
+
   it('rejects a callbackUrl when the signing secret is not configured', async () => {
     const env = makeEnv({ API_KEYS: 'key-hook:tenant-hook', WEBHOOK_SIGNING_SECRET: '' });
     const resp = await submitTask(

@@ -327,14 +327,8 @@ export function validateCallbackUrl(raw: string): string | null {
   } catch {
     return null;
   }
-  if (url.protocol === 'https:') {
-    return isSafeHostname(url.hostname) ? url.toString() : null;
-  }
-  if (url.protocol === 'http:') {
-    const host = url.hostname.toLowerCase();
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
-      return url.toString();
-    }
-  }
-  return null;
+  // Webhooks are always HTTPS and must never target a literal private host.
+  // This validation is repeated at delivery time because stored task records
+  // can outlive submission and may have been created by an older deployment.
+  return url.protocol === 'https:' && isSafeHostname(url.hostname) ? url.toString() : null;
 }

@@ -18,7 +18,7 @@ import {
   MIN_SWARM_NODES,
   MAX_SWARM_NODES,
 } from "@flaxia/sdk";
-import { clampByteCapacity, createSwarmHopKey, createWebhookSignature } from "../security";
+import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
@@ -932,13 +932,19 @@ export class Coordinator extends DurableObject<Env> {
     // an unsigned webhook that a receiver would have to trust blindly.
     const secret = this.env.WEBHOOK_SIGNING_SECRET;
     if (!secret) return;
+    // Revalidate persisted URLs; never follow a webhook response to a new host
+    // or scheme, otherwise a public HTTPS endpoint can redirect the signed POST
+    // into a private network address despite the submit-time check.
+    const safeUrl = validateCallbackUrl(url);
+    if (!safeUrl) return;
     try {
       const payload = JSON.stringify(body);
       const timestamp = String(Math.floor(Date.now() / 1000));
       const nonce = crypto.randomUUID();
       const signature = await createWebhookSignature(secret, timestamp, nonce, payload);
-      await fetch(url, {
+      await fetch(safeUrl, {
         method: 'POST',
+        redirect: 'manual',
         headers: {
           'Content-Type': 'application/json',
           'X-Flaxia-Signature': signature,
@@ -948,8 +954,9 @@ export class Coordinator extends DurableObject<Env> {
         body: payload,
         signal: AbortSignal.timeout(5000),
       });
-    } catch {
-      // Callback failure is non-critical; task result remains available via REST API
+    } catch (error) {
+      // Callback failure is non-critical; task result remains available via REST API.
+      console.warn('Webhook delivery failed:', error);
     }
   }
 

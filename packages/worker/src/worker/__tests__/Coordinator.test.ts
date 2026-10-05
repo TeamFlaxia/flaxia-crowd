@@ -645,6 +645,30 @@ describe('Coordinator', () => {
 
   // --- #13: signed webhook deliveries ---
 
+  it('never follows a webhook redirect into a private service', async () => {
+    stub = newStub();
+    const { task, node } = await connectAndAssign('node-redirect');
+    const attemptId = jsonFrames(node).find(f => f.type === 'task')!.attemptId as string;
+    await withStorage(async (storage) => {
+      const record = await storage.get<TaskRecord>(`task:${TENANT}:${task.id}`);
+      record!.callbackUrl = 'https://hooks.example/redirect';
+      await storage.put(`task:${TENANT}:${task.id}`, record!);
+    });
+    fetchMock.activate();
+    fetchMock.disableNetConnect();
+    fetchMock.get('https://hooks.example')
+      .intercept({ path: '/redirect', method: 'POST' })
+      .reply(302, '', { headers: { location: 'http://127.0.0.1/admin' } });
+    node.socket.send(JSON.stringify({ type: 'result', taskId: task.id, payload: { output: 'ok' }, attemptId }));
+    await new Promise(r => setTimeout(r, 100));
+    try {
+      fetchMock.assertNoPendingInterceptors();
+      expect((await getTask(task.id)).status).toBe('done');
+    } finally {
+      fetchMock.deactivate();
+    }
+  });
+
   it('signs a webhook delivery with the dedicated secret and the audit ids', async () => {
     stub = newStub();
     const { task, node } = await connectAndAssign('node-1');
