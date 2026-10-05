@@ -961,6 +961,24 @@ describe('Coordinator swarm sessions', () => {
     expect(jsonFrames(n2).some((f) => f.type === 'swarm-start')).toBe(true);
   });
 
+  it('ignores a non-host plan without allowing a member to fail the task', async () => {
+    const { task, n1, n2 } = await setup();
+    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
+
+    n1.socket.send(JSON.stringify({
+      type: 'swarm-plan', sessionId: init.sessionId,
+      chain: [{ nodeId: 'n1', role: 'host', slice: { start: 0, end: 1e9, hasEmbed: true, hasHead: true } }],
+    }));
+    await new Promise((r) => setTimeout(r, 30));
+    expect((await getTask(task.id)).status).toBe('processing');
+    expect(jsonFrames(n2).some((f) => f.type === 'swarm-error')).toBe(false);
+
+    // The authenticated host can still submit the valid plan after the attack.
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    await new Promise((r) => setTimeout(r, 30));
+    expect((await getTask(task.id)).swarmSession?.chain.map((entry) => entry.nodeId)).toEqual(['n2', 'n1']);
+  });
+
   it('rejects a plan whose slice exceeds the layer bounds instead of crashing a node', async () => {
     const { task, n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;

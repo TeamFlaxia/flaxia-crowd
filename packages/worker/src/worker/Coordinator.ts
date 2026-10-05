@@ -443,10 +443,9 @@ export class Coordinator extends DurableObject<Env> {
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
     if (!swarm) return;
     if (data.sessionId !== swarm.sessionId) return;
-    if (swarm.hostNodeId !== nodeId) {
-      await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan was sent by a node that is not the host");
-      return;
-    }
+    // The plan is host-authoritative. A non-host member may be malicious or
+    // stale; ignore its message without letting it fail the shared task.
+    if (swarm.hostNodeId !== nodeId) return;
     if (swarm.plan) return;
 
     const chain = data.chain as SwarmChainNode[] | undefined;
