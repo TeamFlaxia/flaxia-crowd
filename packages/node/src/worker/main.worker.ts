@@ -155,14 +155,14 @@ async function runWorkload(
 }
 
 /** Start a swarm session and resolve when it finishes or fails. */
-function startSwarmTask(id: string, initial: SwarmInitMessage | SwarmSliceMessage): Promise<unknown> {
+function startSwarmTask(id: string, initial: SwarmInitMessage | SwarmSliceMessage, emitToken: (token: string) => Promise<void>): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const controller = new SwarmController({
       initial,
       runtime: createSwarmRuntime(),
       sendControl: (message) => (self as any).postMessage({ id, type: 'swarm-message', message }),
       sendFrame: (frame) => (self as any).postMessage({ id, type: 'swarm-frame', frame }, [frame]),
-      emitToken: (token) => (self as any).postMessage({ id, type: 'token', token }),
+      emitToken,
       onDone: (result) => {
         if (activeSwarm === controller) {
           activeSwarm = null;
@@ -264,7 +264,7 @@ self.onmessage = async (e: MessageEvent) => {
     try {
       const emitToken = createTokenSink(id);
       const result = workload === 'swarm-inference'
-        ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage)
+        ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage, emitToken)
         : await runWorkload(workload as WorkloadType, payload, emitToken);
 
       self.postMessage({ id, type: 'done', result });

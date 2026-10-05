@@ -50,29 +50,52 @@ export const releaseCache = (): void => {
 const createBufferedTokenCallback = (
   onToken: (token: string) => void | Promise<void>,
   options: AiInferenceOptions,
-): ((text: string) => void) => {
-  if (!options.tokenBuffer) return onToken;
-
+): { callback: (text: string) => void; finish: () => Promise<void>; cancel: () => Promise<void> } => {
   let buffer = '';
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const interval = options.tokenBufferIntervalMs ?? 50;
+  let pending: Promise<void> = Promise.resolve();
+  let failure: unknown;
+  let failed = false;
+  let closed = false;
 
-  const flush = () => {
-    if (buffer) {
-      // The callback may yield for CPU throttling; a failed yield (abort) must
-      // surface as an unhandled rejection instead of being silently swallowed.
-      void onToken(buffer);
-      buffer = '';
-    }
+  const dispatch = (text: string): void => {
+    // TextStreamer invokes callbacks synchronously. Queue each async sink call
+    // in order, retaining failures for the inference promise instead of leaving
+    // a rejected promise behind in a timer callback.
+    pending = pending.then(() => {
+      if (!failed) return onToken(text);
+    }).then(
+      () => undefined,
+      (error: unknown) => { failed = true; failure = error; },
+    );
+  };
+  const flush = (): void => {
+    if (timer !== null) clearTimeout(timer);
     timer = null;
+    const text = buffer;
+    buffer = '';
+    if (text && !failed) dispatch(text);
   };
-
-  return (text: string) => {
-    buffer += text;
-    if (!timer) {
-      timer = setTimeout(flush, interval);
+  const callback = (text: string): void => {
+    if (closed) return;
+    if (failed) throw failure;
+    if (!options.tokenBuffer) {
+      dispatch(text);
+      return;
     }
+    buffer += text;
+    if (timer === null) timer = setTimeout(flush, options.tokenBufferIntervalMs ?? 50);
   };
+  const settle = async (emitTail: boolean): Promise<void> => {
+    closed = true;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (emitTail && !failed) flush();
+    else buffer = '';
+    await pending;
+    if (failed) throw failure;
+  };
+  return { callback, finish: () => settle(true), cancel: () => settle(false) };
 };
 
 /**
@@ -174,17 +197,28 @@ export const handleAiInference = async (
     genOptions[key] = value;
   }
 
-  if (onToken && generator.tokenizer) {
-    const streamer = new TextStreamer(generator.tokenizer, {
+  const tokens = onToken && generator.tokenizer
+    ? createBufferedTokenCallback(onToken, options)
+    : null;
+  if (tokens) {
+    genOptions.streamer = new TextStreamer(generator.tokenizer, {
       skip_prompt: true,
       skip_special_tokens: true,
-      callback_function: createBufferedTokenCallback(onToken, options),
+      callback_function: tokens.callback,
     });
-    genOptions.streamer = streamer;
   }
 
   const inputStart = performance.now();
-  const output = await generator(safeInput, genOptions);
+  let output: any;
+  try {
+    output = await generator(safeInput, genOptions);
+  } catch (error) {
+    // Drain in-flight sink calls, but do not emit a partial tail after a failed
+    // generation. A sink failure takes precedence over a generator failure.
+    if (tokens) await tokens.cancel();
+    throw error;
+  }
+  await tokens?.finish();
   console.log(
     `[flaxia-node] ai-inference: done task=${task} model=${definition.repo} execMs=${Math.round(performance.now() - inputStart)} inputLen=${String(safeInput).length}`,
   );

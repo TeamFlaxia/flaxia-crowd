@@ -172,6 +172,109 @@ describe('AI Inference Workload', () => {
   });
 });
 
+describe('AI Inference streaming sink', () => {
+  const payload = (tokenBuffer: boolean) => ({
+    task: 'text-generation', model: TEST_MODEL, input: 'hello',
+    options: { tokenBuffer, tokenBufferIntervalMs: 1000 },
+  });
+  const emit = (options: any, ...texts: string[]) => {
+    for (const text of texts) options.streamer.config.callback_function(text);
+  };
+
+  it.each([false, true])('awaits async sink calls and propagates rejection (buffer=%s)', async (buffered) => {
+    let rejectSink!: (error: Error) => void;
+    const sink = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectSink = reject; }));
+    mockGenerate.mockImplementationOnce(async (_input, options) => {
+      emit(options, 'token');
+      return 'generated';
+    });
+    const result = handleAiInference(payload(buffered), sink);
+    await vi.waitFor(() => expect(sink).toHaveBeenCalledWith('token'));
+    let settled = false;
+    void result.finally(() => { settled = true; }).catch(() => undefined);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    rejectSink(new Error('sink aborted'));
+    await expect(result).rejects.toThrow('sink aborted');
+  });
+
+  it('does not emit queued chunks after an earlier async sink failure', async () => {
+    let rejectFirst!: (error: Error) => void;
+    const sink = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectFirst = reject; }))
+      .mockResolvedValue(undefined);
+    mockGenerate.mockImplementationOnce(async (_input, options) => {
+      emit(options, 'first', 'queued');
+      return 'generated';
+    });
+    const result = handleAiInference(payload(false), sink);
+    await vi.waitFor(() => expect(sink).toHaveBeenCalledTimes(1));
+    rejectFirst(new Error('first failed'));
+    await expect(result).rejects.toThrow('first failed');
+    expect(sink).toHaveBeenCalledTimes(1);
+  });
+
+  it('flushes a buffered tail immediately when generation finishes', async () => {
+    const sink = vi.fn();
+    mockGenerate.mockImplementationOnce(async (_input, options) => {
+      emit(options, 'hello', ' world');
+      return 'generated';
+    });
+    await expect(handleAiInference(payload(true), sink)).resolves.toEqual({ output: 'generated' });
+    expect(sink).toHaveBeenCalledTimes(1);
+    expect(sink).toHaveBeenCalledWith('hello world');
+  });
+
+  it('serializes timer flushes with the tail and waits for both', async () => {
+    vi.useFakeTimers();
+    try {
+      const delivered: string[] = [];
+      let releaseFirst!: () => void;
+      const sink = vi.fn((text: string) => {
+        delivered.push(text);
+        if (text === 'first') return new Promise<void>((resolve) => { releaseFirst = resolve; });
+      });
+      let finishGeneration!: (output: string) => void;
+      let streamerOptions!: any;
+      mockGenerate.mockImplementationOnce((_input, options) => {
+        streamerOptions = options;
+        emit(options, 'first');
+        const result = new Promise<string>((resolve) => { finishGeneration = resolve; });
+        return result;
+      });
+      const result = handleAiInference(payload(true), sink);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(delivered).toEqual(['first']);
+      emit(streamerOptions, ' second');
+      finishGeneration('generated');
+      await Promise.resolve();
+      expect(delivered).toEqual(['first']);
+      releaseFirst();
+      await expect(result).resolves.toEqual({ output: 'generated' });
+      expect(delivered).toEqual(['first', ' second']);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cleans the timer and drops a partial tail when generation fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const sink = vi.fn();
+      mockGenerate.mockImplementationOnce(async (_input, options) => {
+        emit(options, 'partial');
+        throw new Error('generator failed');
+      });
+      await expect(handleAiInference(payload(true), sink)).rejects.toThrow('generator failed');
+      expect(vi.getTimerCount()).toBe(0);
+      expect(sink).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('AI Inference model allowlist (#11)', () => {
   it('exposes the registered models for operator tooling', () => {
     expect(listAiModels()).toContain(TEST_MODEL);

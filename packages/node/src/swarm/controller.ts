@@ -32,7 +32,7 @@ export interface SwarmControllerOptions {
   /** Worker -> main: a binary hidden-state frame for the coordinator. */
   sendFrame: (frame: ArrayBuffer) => void;
   /** Worker -> main: a streamed token. */
-  emitToken: (token: string) => void;
+  emitToken: (token: string) => unknown;
   onDone: (result: unknown) => void;
   onError: (error: string) => void;
 }

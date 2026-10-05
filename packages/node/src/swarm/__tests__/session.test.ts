@@ -105,6 +105,44 @@ describe('runSwarmHost (single node)', () => {
     expect(result.tokens).toEqual([6]);
   });
 
+  it('awaits an async token sink and propagates its failure', async () => {
+    const { hostLink } = makePair();
+    hostLink.send = vi.fn();
+    let rejectToken!: (error: Error) => void;
+    const sink = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectToken = reject; }));
+    const result = runSwarmHost({
+      chainLength: 1,
+      promptTokens: [5],
+      maxNewTokens: 2,
+      engine: hostEngine(),
+      link: hostLink,
+      semantics,
+      onToken: sink,
+    });
+    await vi.waitFor(() => expect(sink).toHaveBeenCalledTimes(1));
+    rejectToken(new Error('token aborted'));
+    await expect(result).rejects.toThrow('token aborted');
+    expect(sink).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for async token backpressure before generating the next token', async () => {
+    const { hostLink } = makePair();
+    hostLink.send = vi.fn();
+    const engine = hostEngine();
+    let release!: () => void;
+    const sink = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const result = runSwarmHost({
+      chainLength: 1, promptTokens: [5], maxNewTokens: 2,
+      engine, link: hostLink, semantics, onToken: sink,
+    });
+    await vi.waitFor(() => expect(sink).toHaveBeenCalledTimes(1));
+    expect(engine.embedRun).toHaveBeenCalledTimes(1);
+    release();
+    await vi.waitFor(() => expect(sink).toHaveBeenCalledTimes(2));
+    release();
+    await expect(result).resolves.toEqual({ tokens: [6, 7] });
+  });
+
   it('rejects an empty prompt', async () => {
     const { hostLink } = makePair();
     await expect(
