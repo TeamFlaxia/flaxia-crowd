@@ -365,6 +365,22 @@ describe('consent/storage', () => {
     expect(hasConsent()).toBe(false);
   });
 
+  it('does not resurrect a grant when clearConsent races storage verification', async () => {
+    markUserGestureConsent();
+    await grantConsent();
+    expect(hasConsent()).toBe(true);
+
+    // Begin an async re-verification of the still-valid stored grant, then
+    // revoke before WebCrypto finishes. The stale result must not restore it.
+    window.dispatchEvent(new StorageEvent('storage', { key: RECORD_KEY }));
+    clearConsent();
+    await settle();
+
+    expect(getConsentState()).toBe('unset');
+    expect(hasConsent()).toBe(false);
+    expect(localStorage.getItem(RECORD_KEY)).toBeNull();
+  });
+
   it('picks up a grant made by another tab', async () => {
     const keyStore = createMemoryKeyStore();
     __consentTestHooks.setKeyStore(keyStore);

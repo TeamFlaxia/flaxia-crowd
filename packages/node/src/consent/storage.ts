@@ -673,6 +673,7 @@ export const safeLocalStorageRemove = safeRemove;
  * never by trusting the raw value.
  */
 async function refreshConsentFromStorage(): Promise<void> {
+  const epoch = stateEpoch;
   const stored = readRecord();
   if (!stored) {
     activeGrant = null;
@@ -686,8 +687,12 @@ async function refreshConsentFromStorage(): Promise<void> {
     await initConsentIntegrity();
     return;
   }
-  const verified =
-    (await verifyRecordMac(stored)) && isRecordFresh(stored, Date.now()) && isRecordBound(stored);
+  const validMac = await verifyRecordMac(stored);
+  // A clear/revoke or a later storage event may have happened while WebCrypto
+  // was pending. Never let this stale verification restore a previous grant.
+  const current = readRecord();
+  if (epoch !== stateEpoch || !current || JSON.stringify(current) !== JSON.stringify(stored)) return;
+  const verified = validMac && isRecordFresh(stored, Date.now()) && isRecordBound(stored);
   activeGrant = verified ? stored : null;
   activeGrantTrusted = verified;
 }
@@ -696,6 +701,7 @@ try {
   if (typeof globalThis.addEventListener === 'function') {
     globalThis.addEventListener('storage', (event: StorageEvent) => {
       if (event.key !== null && event.key !== RECORD_KEY && event.key !== DENIAL_KEY) return;
+      stateEpoch += 1;
       void refreshConsentFromStorage();
     });
   }
