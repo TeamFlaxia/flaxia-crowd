@@ -49,10 +49,10 @@ describe('memoryProbe', () => {
     (globalThis as any).WebAssembly = { Memory: MockMemory as any };
   }
 
-  it('returns the committed bytes when the engine can grow past the target', () => {
+  it('stops after proving the bounded target even if the engine supports more', () => {
     installMock(4 * GB);
     const bytes = probeMaxWasmMemoryBytes();
-    expect(bytes).toBeGreaterThanOrEqual(HEAVY_WORKLOAD_WASM_MEMORY_BYTES);
+    expect(bytes).toBe(HEAVY_WORKLOAD_WASM_MEMORY_BYTES);
     expect(hasEnoughWasmMemoryForHeavy()).toBe(true);
   });
 
@@ -103,16 +103,17 @@ describe('memoryProbe', () => {
     expect(getWasmMemoryProbeRuns()).toBe(1);
   });
 
-  it('serves a smaller target from a completed larger probe', () => {
+  it('reuses the bounded lower bound for later smaller or larger requests', () => {
     installMock(4 * GB);
-    expect(probeMaxWasmMemoryBytes(2 * GB)).toBe(4 * GB);
-    expect(probeMaxWasmMemoryBytes(512 * 1024 * 1024)).toBe(4 * GB);
+    expect(probeMaxWasmMemoryBytes(2 * GB)).toBe(2 * GB);
+    expect(probeMaxWasmMemoryBytes(512 * 1024 * 1024)).toBe(2 * GB);
+    expect(probeMaxWasmMemoryBytes(3 * GB)).toBe(2 * GB);
     expect(getWasmMemoryProbeRuns()).toBe(1);
   });
 
-  it('finds the engine maximum beyond the requested target', () => {
+  it('never probes beyond the requested target to discover the engine maximum', () => {
     installMock(3 * GB);
-    expect(probeMaxWasmMemoryBytes(1 * GB)).toBe(3 * GB);
+    expect(probeMaxWasmMemoryBytes(1 * GB)).toBe(1 * GB);
     expect(getWasmMemoryProbeRuns()).toBe(1);
   });
 });

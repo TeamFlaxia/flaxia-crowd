@@ -1,30 +1,18 @@
-// Probes the real amount of WebAssembly linear memory the runtime can actually
+// Probes a bounded lower bound of WebAssembly linear memory the runtime can
 // commit, rather than trusting navigator.deviceMemory (which mobile Chrome
-// reports as a quantized value and is therefore useless for gating heavy WASM
-// workloads). We grow a WebAssembly.Memory in chunks and write into every page
-// so the engine is forced to actually commit physical memory. If the runtime
-// cannot grow far enough it throws a RangeError, which we catch cleanly — no
-// OOM crash, unlike actually loading a multi-GB model on an underpowered phone.
-//
-// The probe commits up to 2 GiB, so it must never run more than once per page.
-// The result is memoized here: callers use `getWasmMemoryBytes()` /
-// `hasEnoughWasmMemoryForHeavy()` and get the cached value for free (no second
-// 2 GiB allocation, including on every reconnect attempt).
+// reports as a quantized value). It grows and touches pages only up to the
+// requested target; it must never probe the engine's full maximum because that
+// can commit several GiB during startup. Results are memoized so the probe runs
+// at most once per page.
 
 export const HEAVY_WORKLOAD_WASM_MEMORY_BYTES = 2 * 1024 ** 3;
 const WASM_PAGE_SIZE = 65536;
 const PROBE_CHUNK_BYTES = 16 * 1024 * 1024;
-/** The most we ever ask for: wasm32 cannot exceed 4 GiB anyway. */
-const PROBE_CEILING_BYTES = 8 * 1024 ** 3;
 /** Hard cap on grow() calls so a tiny `chunkBytes` cannot spin for minutes. */
 const MAX_PROBE_STEPS = 4096;
 
-/**
- * Cache keyed by chunk size. A completed probe returns the engine's real
- * maximum, so it is final (that maximum cannot shrink) and is never repeated.
- */
+/** A bounded probe result is a known lower bound, not the engine maximum. */
 interface ProbeEntry {
-  chunkBytes: number;
   bytes: number;
 }
 let cachedProbe: ProbeEntry | null = null;
@@ -46,80 +34,42 @@ function tryGrow(memory: WebAssembly.Memory, bytes: number): boolean {
 }
 
 /**
- * Measure the real amount of WebAssembly linear memory this runtime can commit.
- *
- * `targetBytes` is the amount the probe is required to reach; past it the probe
- * keeps doubling (bounded by `PROBE_CEILING_BYTES`) until the engine refuses.
- * Finding the true maximum is what makes the value cacheable: a later request
- * for more memory cannot invalidate it, so the multi-GB probe runs at most once
- * per page.
- *
- * Prefer `getWasmMemoryBytes()`: this function performs the real (multi-GB)
- * allocation, so calling it more than once per page is wasteful.
+ * Probe a bounded lower bound of memory this runtime can commit. The function
+ * stops at `targetBytes`; it deliberately does not explore the engine maximum.
+ * Only the first call per page allocates/touches memory. If a later caller asks
+ * for a higher target, return the already-proven lower bound instead of
+ * committing more memory during startup.
  */
 export function probeMaxWasmMemoryBytes(
   targetBytes: number = HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
   chunkBytes: number = PROBE_CHUNK_BYTES,
 ): number {
-  const cached = cachedProbe;
-  if (cached && cached.chunkBytes === chunkBytes) return cached.bytes;
+  if (cachedProbe) return cachedProbe.bytes;
 
   probeRuns++;
   let memory: WebAssembly.Memory;
   try {
     memory = new WebAssembly.Memory({ initial: 0 });
   } catch {
-    // Environment without growable memory (or memory creation blocked).
-    cachedProbe = { chunkBytes, bytes: 0 };
+    cachedProbe = { bytes: 0 };
     return 0;
   }
 
+  const target = Math.max(0, Math.floor(targetBytes));
   const chunk = Math.max(WASM_PAGE_SIZE, Math.floor(chunkBytes));
-  // 1. Grow in chunks until the target is reached, or the engine refuses.
   let grown = 0;
   let steps = 0;
-  while (grown < targetBytes && steps < MAX_PROBE_STEPS) {
-    const step = Math.min(chunk, targetBytes - grown);
+  while (grown < target && steps < MAX_PROBE_STEPS) {
+    const step = Math.min(chunk, target - grown);
     if (!tryGrow(memory, step)) break;
     grown += step;
     steps++;
   }
 
-  // 2. Target reached: double until the engine refuses, then bisect the last
-  // gap so the cached value is the engine's real maximum (a later request for
-  // more memory can then never invalidate it).
-  if (grown >= targetBytes) {
-    let step = Math.max(chunk, targetBytes);
-    let failedStep: number | null = null;
-    while (grown < PROBE_CEILING_BYTES && steps < MAX_PROBE_STEPS) {
-      const next = Math.min(step, PROBE_CEILING_BYTES - grown);
-      if (next < WASM_PAGE_SIZE || !tryGrow(memory, next)) {
-        failedStep = next;
-        break;
-      }
-      grown += next;
-      step *= 2;
-      steps++;
-    }
-    if (failedStep !== null) {
-      let low = 0;
-      let high = failedStep;
-      while (high - low > chunk && steps < MAX_PROBE_STEPS) {
-        const mid = Math.floor((low + high) / 2 / WASM_PAGE_SIZE) * WASM_PAGE_SIZE;
-        if (mid <= low) break;
-        if (tryGrow(memory, mid)) {
-          grown += mid;
-          low = 0;
-          high -= mid;
-        } else {
-          high = mid;
-        }
-        steps++;
-      }
-    }
-  }
-
-  cachedProbe = { chunkBytes, bytes: grown };
+  // Drop the last local reference promptly; the runtime may reclaim committed
+  // pages after GC, but they are never retained by the node.
+  memory = undefined as unknown as WebAssembly.Memory;
+  cachedProbe = { bytes: grown };
   return grown;
 }
 

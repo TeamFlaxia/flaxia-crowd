@@ -186,8 +186,8 @@ export function resolveMemoryLimitMb(requested?: number): number {
 
 /**
  * Enforce the payload's memory cap against the module's declared memory limits.
- * Rejects a module that could grow past the cap, or that needs more than the
- * cap just to start.
+ * Rejects a module without an explicit maximum, one that could grow past the
+ * cap, or one that needs more than the cap just to start.
  */
 export function assertWasmMemoryWithinLimit(binary: Uint8Array, limitMb: number): WasmMemoryLimits {
   const limitBytes = limitMb * 1024 * 1024;
@@ -197,7 +197,10 @@ export function assertWasmMemoryWithinLimit(binary: Uint8Array, limitMb: number)
       `Container image declares ${Math.round(limits.initialBytes / 1024 / 1024)}MB of initial memory, above memoryLimitMb=${limitMb}`,
     );
   }
-  if (limits.maximumBytes !== null && limits.maximumBytes > limitBytes) {
+  if (limits.maximumBytes === null) {
+    throw new Error('Container image has no declared maximum memory; memoryLimitMb cannot be enforced');
+  }
+  if (limits.maximumBytes > limitBytes) {
     throw new Error(
       `Container image may grow to ${Math.round(limits.maximumBytes / 1024 / 1024)}MB, above memoryLimitMb=${limitMb}`,
     );

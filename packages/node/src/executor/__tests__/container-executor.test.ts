@@ -108,10 +108,12 @@ describe('container memoryLimitMb enforcement (#10-4)', () => {
     expect(limits.maximumBytes).toBe(32 * WASM_PAGE_SIZE);
   });
 
-  it('reports a module without a declared maximum', () => {
-    const limits = parseWasmMemoryLimits(wasmWithMemory(1, null));
+  it('reports and rejects a module without a declared maximum', () => {
+    const binary = wasmWithMemory(1, null);
+    const limits = parseWasmMemoryLimits(binary);
     expect(limits.initialBytes).toBe(WASM_PAGE_SIZE);
     expect(limits.maximumBytes).toBeNull();
+    expect(() => assertWasmMemoryWithinLimit(binary, 32)).toThrow(/no declared maximum memory/);
   });
 
   it('rejects a module that may grow past memoryLimitMb', () => {
