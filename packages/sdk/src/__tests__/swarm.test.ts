@@ -286,7 +286,7 @@ describe('swarm frame codec', () => {
     expect(decodeSwarmFrame(buffer)).toBeNull();
   });
 
-  it('distinguishes stop frames from hidden frames', () => {
+  it('distinguishes exact stop frames from hidden and oversized frames', () => {
     const stop = encodeSwarmStopFrame(5);
     expect(isSwarmStopFrame(stop)).toBe(true);
     expect(decodeSwarmFrame(stop)).toBeNull();
@@ -294,6 +294,14 @@ describe('swarm frame codec', () => {
     const hidden = encodeSwarmFrame({ requestId: 1, pos: 0, tokens: 1 }, new Uint8Array([1]));
     expect(isSwarmStopFrame(hidden)).toBe(false);
     expect(isSwarmStopFrame(new ArrayBuffer(4))).toBe(false);
+
+    const oversizedStop = new Uint8Array(SWARM_FRAME_HEADER_BYTES + 4);
+    oversizedStop.set(new Uint8Array(stop));
+    expect(isSwarmStopFrame(oversizedStop.buffer)).toBe(false);
+
+    const malformedStop = new Uint8Array(stop.slice(0));
+    malformedStop[3] = 1; // reserved byte
+    expect(isSwarmStopFrame(malformedStop.buffer)).toBe(false);
   });
 });
 

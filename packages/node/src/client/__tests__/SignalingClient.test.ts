@@ -509,6 +509,41 @@ describe('SignalingClient', () => {
     expect(localStorage.getItem('flaxia_consent_granted')).toBeNull();
   });
 
+  it('does not open a socket if consent is revoked while token registration is pending', async () => {
+    class MockWorker {
+      terminate = vi.fn();
+      postMessage = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+      onerror = null;
+      onmessageerror = null;
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    globalThis.WebSocket = vi.fn() as any;
+    seedGrantedConsent();
+
+    let resolveRegistration!: (value: any) => void;
+    global.fetch = vi.fn(() => new Promise((resolve) => { resolveRegistration = resolve; })) as any;
+    const controller = initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    await flush();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    controller.clearConsent();
+    resolveRegistration({
+      ok: true,
+      json: async () => ({ token: 'late-token', nodeId: 'node-late', expiresAt: Date.now() + 60_000 }),
+    });
+    await flush();
+    await flush();
+
+    expect(controller.getConsentState()).toBe('unset');
+    expect(globalThis.WebSocket).not.toHaveBeenCalled();
+  });
+
   it('never connects when controller.start() is called without verified consent', async () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();

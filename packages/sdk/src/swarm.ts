@@ -265,13 +265,24 @@ export function encodeSwarmStopFrame(requestId = 0): ArrayBuffer {
   dv.setUint8(2, SWARM_FRAME_KIND_STOP);
   dv.setUint8(3, 0);
   dv.setUint32(4, requestId >>> 0, true);
+  // Remaining header fields stay zero: a stop carries no position or payload.
   return buffer;
 }
 
 export function isSwarmStopFrame(buffer: ArrayBuffer): boolean {
-  if (buffer.byteLength < SWARM_FRAME_HEADER_BYTES) return false;
+  // Stop is a header-only control frame, not a prefix marker: accepting trailing
+  // bytes lets an oversized hidden-state frame masquerade as stop and bypass
+  // payload validation in the worker's fast path.
+  if (buffer.byteLength !== SWARM_FRAME_HEADER_BYTES) return false;
   const dv = new DataView(buffer);
-  return dv.getUint16(0, true) === SWARM_FRAME_MAGIC && dv.getUint8(2) === SWARM_FRAME_KIND_STOP;
+  return (
+    dv.getUint16(0, true) === SWARM_FRAME_MAGIC &&
+    dv.getUint8(2) === SWARM_FRAME_KIND_STOP &&
+    dv.getUint8(3) === 0 &&
+    dv.getUint32(8, true) === 0 &&
+    dv.getUint16(12, true) === 0 &&
+    dv.getUint16(14, true) === 0
+  );
 }
 
 export function decodeSwarmFrame(

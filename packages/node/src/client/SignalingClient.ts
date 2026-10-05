@@ -100,6 +100,10 @@ class SignalingClient {
 
   async connect() {
     if (this.destroyed) return;
+    if (getConsentState() !== 'granted') {
+      this.disconnect();
+      return;
+    }
     log(`connect nodeId=${this.nodeId}`);
 
     if (this.ws) {
@@ -114,6 +118,10 @@ class SignalingClient {
     this.setupVisibilityHandler();
 
     const token = await this.obtainToken();
+    if (getConsentState() !== 'granted') {
+      log('connect cancelled because consent was revoked while obtaining a token');
+      return;
+    }
     if (!token) {
       logError('token acquisition failed; scheduling reconnect');
       this.scheduleReconnect();
@@ -335,6 +343,11 @@ class SignalingClient {
   }
 
   private async obtainToken(): Promise<NodeToken | null> {
+    // Re-check consent after every await. Revocation can happen while a cached
+    // token is being refreshed or while the capability probes/register request
+    // are pending; a returned token must never establish a post-revoke socket.
+    const consentStillGranted = () => getConsentState() === 'granted';
+    if (!consentStillGranted()) return null;
     try {
       // Memory-only cache: the token is not written to localStorage, so a host
       // XSS cannot lift a node identity out of persistent storage.
@@ -361,6 +374,7 @@ class SignalingClient {
       let swarm: SwarmNodeCapabilities | undefined;
       if (capable && requested.includes('swarm-inference') && this.config.allowModelDownload === true) {
         swarm = await probeWebGpu();
+        if (!consentStillGranted()) return null;
         if (!swarm.webgpu) {
           capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
           swarm = undefined;
@@ -374,6 +388,7 @@ class SignalingClient {
       );
 
       const base = this.config.orchestratorUrl.replace(/\/+$/, '');
+      if (!consentStillGranted()) return null;
       const response = await fetch(`${base}/crowd/nodes/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -396,12 +411,14 @@ class SignalingClient {
           swarm,
         }),
       });
+      if (!consentStillGranted()) return null;
       if (!response.ok) {
         logError(`node register failed HTTP ${response.status} (${base}/crowd/nodes/register)`);
         return null;
       }
 
       const data = (await response.json()) as NodeToken;
+      if (!consentStillGranted()) return null;
       if (!data.token) {
         logError('node register returned no token');
         return null;

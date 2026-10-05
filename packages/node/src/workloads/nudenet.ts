@@ -10,6 +10,9 @@ const NMS_MODEL_URL = 'https://huggingface.co/deepghs/nudenet_onnx/resolve/main/
 
 /** Hard caps for the inputs this workload accepts. */
 export const MAX_NUDENET_IMAGE_BYTES = 16 * 1024 * 1024;
+/** Bound decoded pixels before allocating preprocessing canvases (RGBA ~4 bytes/pixel). */
+export const MAX_NUDENET_IMAGE_PIXELS = 32 * 1024 * 1024;
+export const MAX_NUDENET_IMAGE_SIDE = 8192;
 export const MAX_NUDENET_MODEL_BYTES = 512 * 1024 * 1024;
 /** Content types accepted for a customer-supplied image URL. */
 export const NUDENET_IMAGE_CONTENT_TYPES = ['image/*', 'application/octet-stream'] as const;
@@ -91,9 +94,27 @@ function getSession(url: string): Promise<ort.InferenceSession> {
 async function loadImage(payload: NudeNetPayload): Promise<ImageBitmap> {
   let blob: Blob;
   if (payload.imageBase64) {
+    const imageBase64 = payload.imageBase64;
+    const maxEncodedChars = Math.floor((MAX_NUDENET_IMAGE_BYTES + 2) / 3) * 4;
+    if (
+      typeof imageBase64 !== 'string' ||
+      imageBase64.length > maxEncodedChars ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(imageBase64) ||
+      imageBase64.length % 4 !== 0
+    ) {
+      throw new Error(`NudeNet image has invalid base64 or exceeds ${MAX_NUDENET_IMAGE_BYTES} byte limit`);
+    }
+    const padding = imageBase64.endsWith('==') ? 2 : imageBase64.endsWith('=') ? 1 : 0;
+    const decodedBytes = imageBase64.length / 4 * 3 - padding;
+    if (decodedBytes > MAX_NUDENET_IMAGE_BYTES) {
+      throw new Error(`NudeNet image exceeds ${MAX_NUDENET_IMAGE_BYTES} byte limit`);
+    }
     const mimeType = payload.mimeType || 'image/jpeg';
-    const res = await fetch(`data:${mimeType};base64,${payload.imageBase64}`);
+    const res = await fetch(`data:${mimeType};base64,${imageBase64}`);
     blob = await res.blob();
+    if (blob.size > MAX_NUDENET_IMAGE_BYTES) {
+      throw new Error(`NudeNet image exceeds ${MAX_NUDENET_IMAGE_BYTES} byte limit`);
+    }
   } else if (payload.imageUrl) {
     // Customer-supplied URL: only https, public hosts, default port, a real
     // image content type and a bounded body may be fetched (SSRF guard).
@@ -107,7 +128,22 @@ async function loadImage(payload: NudeNetPayload): Promise<ImageBitmap> {
   } else {
     throw new Error('NudeNet payload requires either imageUrl or imageBase64');
   }
-  return createImageBitmap(blob);
+  const bitmap = await createImageBitmap(blob);
+  if (
+    !Number.isSafeInteger(bitmap.width) ||
+    !Number.isSafeInteger(bitmap.height) ||
+    bitmap.width < 1 ||
+    bitmap.height < 1 ||
+    bitmap.width > MAX_NUDENET_IMAGE_SIDE ||
+    bitmap.height > MAX_NUDENET_IMAGE_SIDE ||
+    bitmap.width * bitmap.height > MAX_NUDENET_IMAGE_PIXELS
+  ) {
+    bitmap.close();
+    throw new Error(
+      `NudeNet image dimensions ${bitmap.width}x${bitmap.height} exceed image limits (${MAX_NUDENET_IMAGE_SIDE}px side, ${MAX_NUDENET_IMAGE_PIXELS} pixels)`,
+    );
+  }
+  return bitmap;
 }
 
 /**
