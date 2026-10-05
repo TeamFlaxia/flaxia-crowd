@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { initFlaxiaNode } from '../SignalingClient';
+import { __consentTestHooks } from '../../consent/storage';
 
 // Simulates an INCAPABLE device: the memory probe reports it cannot commit the
 // memory a multi-GB model needs, so the node must advertise empty capabilities.
@@ -22,12 +23,18 @@ function mockFetchToken() {
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+/** Seed a valid, HMAC-sealed consent record (the legacy flag no longer counts). */
+function seedGrantedConsent() {
+  __consentTestHooks.seedGrantedConsent();
+}
+
 describe('SignalingClient (incapable device)', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
     localStorage.clear();
     vi.restoreAllMocks();
     vi.useRealTimers();
+    __consentTestHooks.reset();
     delete (window as any).__flaxia_node_init_started;
     delete (window as any).__flaxia_node_signal_client;
     delete (window as any).__flaxia_node_controller;
@@ -37,8 +44,7 @@ describe('SignalingClient (incapable device)', () => {
   it('should send empty capabilities when the memory probe fails', async () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
-    localStorage.setItem('flaxia_consent_granted', 'true');
-    localStorage.setItem('flaxia_consent_expiry', String(Date.now() + 100000));
+    seedGrantedConsent();
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',

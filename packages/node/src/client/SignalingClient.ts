@@ -2,6 +2,7 @@ import { ConsentUI } from '../consent/ConsentUI';
 import {
   clearConsent as clearPersistedConsent,
   getConsentState,
+  hasConsent,
   saveConsent,
   saveDenial,
   safeLocalStorageGet,
@@ -484,7 +485,7 @@ class NodeController implements FlaxiaNodeController {
   constructor(private config: NodeConfig) {}
 
   start(): void {
-    if (this.isRunning()) return;
+    if (this.isRunning() || !hasConsent()) return;
     startNode(this.config);
   }
 

@@ -37,11 +37,11 @@ packages/node/
 └── src/
     ├── index.ts
     ├── consent/
-    │   ├── ConsentUI.ts
-    │   └── storage.ts
+    │   ├── ConsentUI.ts      # closed Shadow DOM バナー（サニタイズ + 最低表示時間）
+    │   ├── storage.ts        # HMAC署名付き同意レコード・オリジン/開示版/期限の検証
+    │   └── notice.ts         # 開示文と CONSENT_NOTICE_VERSION
     ├── client/
-    │   ├── SignalingClient.ts
-    │   └── WebRTCPeer.ts
+    │   └── SignalingClient.ts
     ├── executor/
     │   ├── WorkerPool.ts
     │   └── throttle.ts
@@ -93,9 +93,33 @@ initFlaxiaNode({
 })
 ```
 
+同意まわりの追加エクスポート:
+
+```typescript
+import {
+  getFlaxiaNodeConsentState,        // 同期・fail closed
+  initFlaxiaNodeConsent,            // HMAC鍵の読み込みとレコード検証を await
+  setFlaxiaNodeHostManagedConsent,  // ホスト独自UIを使う場合の明示オプトイン
+} from '@flaxia/node'
+```
+
 ## コーディング規約
 
 - DOM操作はすべてShadow DOM内（サイトCSSと干渉させない）
 - WebWorkerコードは `src/worker/` 以下に分離
 - Transformer.jsは動的importで遅延ロード（同意後のみ）
 - グローバル汚染禁止（`window`への代入禁止）
+
+## 同意（consent）の不変条件
+
+- **同意はユーザー操作でのみ成立する**: `saveConsent()` は同意バナーのクリックで
+  発行されるジェスチャトークン、または `setFlaxiaNodeHostManagedConsent(true)` の
+  明示的オプトインが無ければ拒否する（`console.warn` + 状態は `unset` のまま）。
+- **fail closed**: `getConsentState()` / `hasConsent()` は HMAC 検証が済むまで
+  `'granted'` を返さない。検証を待てる呼び出し元は `initConsentIntegrity()` を await する。
+- **レコードは束縛される**: ページオリジン・開示文バージョン・必須の `expiry`
+  （上限180日）・HMAC-SHA-256（非抽出 `CryptoKey` を IndexedDB に保存）の
+  すべてが一致しなければ「同意なし」。
+- **開示文を変えたら `CONSENT_NOTICE_VERSION` を上げる**。上げると既存の同意は
+  すべて無効になり、バナーが再表示される。
+- 詳細と残存脅威モデルは `docs/01-consent-ui.md` を参照。
