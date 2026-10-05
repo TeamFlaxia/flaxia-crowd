@@ -192,7 +192,7 @@ describe('SwarmController worker', () => {
       role: 'worker',
       slice: { start: 6, end: 8, hasEmbed: false, hasHead: false },
     };
-    const { controller, controls, frames, done } = makeOptions(slice, runtime);
+    const { controller, controls, frames, done, error } = makeOptions(slice, runtime);
 
     await controller.start();
     expect(controls[0]).toMatchObject({ type: 'swarm-ready', sessionId: 's' });
@@ -203,9 +203,15 @@ describe('SwarmController worker', () => {
     expect(frames).toHaveLength(1);
     expect(decodeSwarmFrame(frames[0])).not.toBeNull();
 
-    controller.handleFrame(encodeSwarmStopFrame());
+    const oversizedStop = new Uint8Array(encodeSwarmStopFrame());
+    const withTrailingData = new Uint8Array(oversizedStop.length + 1);
+    withTrailingData.set(oversizedStop);
+    withTrailingData[oversizedStop.length] = 1;
+    controller.handleFrame(withTrailingData.buffer);
     await new Promise((r) => setTimeout(r, 10));
-    expect(done).toHaveBeenCalledTimes(1);
+    expect(done).not.toHaveBeenCalled();
+    expect(frames).toHaveLength(1);
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/malformed frame header/));
   });
 });
 
