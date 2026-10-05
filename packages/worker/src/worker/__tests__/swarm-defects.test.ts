@@ -31,6 +31,8 @@ function newStub(): DurableObjectStub {
   return env.COORDINATOR.get(env.COORDINATOR.idFromName(`defect-coordinator-${coordinatorCounter}`));
 }
 
+const TENANT = 'tenant-test';
+
 function makeTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
     id: crypto.randomUUID(),
@@ -38,18 +40,28 @@ function makeTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
     workload: 'ai-inference',
     payload: { task: 'text-generation', model: 'test-model', input: 'hi' },
     createdAt: Date.now(),
+    tenantId: TENANT,
     retryCount: 0,
     timeoutMs: 60000,
     ...overrides,
   } as TaskRecord;
 }
 
-async function withStorage<T>(fn: (storage: DurableObjectStorage) => Promise<T>): Promise<T> {
-  return runInDurableObject(stub, (instance) => fn((instance as any).ctx.storage));
+/** Tenant-scoped task lookup (records are stored per tenant). */
+async function getTask(id: string, tenantId = TENANT): Promise<TaskRecord> {
+  return stub.fetch(`http://internal/task/${tenantId}/${id}`).then((r) => r.json() as Promise<TaskRecord>);
 }
 
-async function getTask(id: string): Promise<TaskRecord> {
-  return stub.fetch(`http://internal/task/${id}`).then((r) => r.json() as Promise<TaskRecord>);
+/** Seed task records under their tenant-scoped keys plus the id -> tenant index. */
+async function seedTasks(storage: DurableObjectStorage, tasks: TaskRecord[]) {
+  for (const task of tasks) {
+    await storage.put(`task:${task.tenantId}:${task.id}`, task);
+    await storage.put(`taskindex:${task.id}`, task.tenantId);
+  }
+}
+
+async function withStorage<T>(fn: (storage: DurableObjectStorage) => Promise<T>): Promise<T> {
+  return runInDurableObject(stub, (instance) => fn((instance as any).ctx.storage));
 }
 
 interface SwarmSocket {
@@ -92,7 +104,7 @@ async function seed(nodes: Array<{ id: string; query: string }>, tasks: TaskReco
   stub = newStub();
   for (const n of nodes) await connectNode(n.id, n.query);
   await withStorage(async (storage) => {
-    for (const task of tasks) await storage.put(`task:${task.id}`, task);
+    await seedTasks(storage, tasks);
     await storage.put('queue:pending', tasks.map((t) => t.id));
     await storage.put('queue:processing', []);
     await storage.put('nodes:idle', nodes.map((n) => n.id));
@@ -171,7 +183,7 @@ describe('M2: a rejected host plan must not stall the session silently', () => {
     const n2 = await connectNode('n2', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
     const task = makeTask({ workload: 'swarm-inference', payload: { model: 'qwen3.5-2b', prompt: 'hi' } });
     await withStorage(async (storage) => {
-      await storage.put(`task:${task.id}`, task);
+      await seedTasks(storage, [task]);
       await storage.put('queue:pending', [task.id]);
       await storage.put('queue:processing', []);
       await storage.put('nodes:idle', ['n1', 'n2']);
@@ -222,7 +234,7 @@ describe('M5: warm nodes must be preferred', () => {
       payload: { model: 'qwen3.5-2b', prompt: 'hi', swarm: { maxNodes: 2 } } as any,
     });
     await withStorage(async (storage) => {
-      await storage.put(`task:${task.id}`, task);
+      await seedTasks(storage, [task]);
       await storage.put('queue:pending', [task.id]);
       await storage.put('queue:processing', []);
       await storage.put('nodes:idle', ['big1', 'big2', 'mid', 'cold', 'warm']);
@@ -250,7 +262,7 @@ describe('M9: swarmSession must not outlive the session', () => {
     const n2 = await connectNode('n2', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
     const task = makeTask({ workload: 'swarm-inference', payload: { model: 'qwen3.5-2b', prompt: 'hi' } });
     await withStorage(async (storage) => {
-      await storage.put(`task:${task.id}`, task);
+      await seedTasks(storage, [task]);
       await storage.put('queue:pending', [task.id]);
       await storage.put('queue:processing', []);
       await storage.put('nodes:idle', ['n1', 'n2']);
@@ -267,7 +279,9 @@ describe('M9: swarmSession must not outlive the session', () => {
     n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
     n2.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
     await sleep(30);
-    n2.socket.send(JSON.stringify({ type: 'result', taskId: task.id, sessionId: init.sessionId, payload: { output: 'ok' } }));
+    n2.socket.send(JSON.stringify({
+      type: 'result', taskId: task.id, sessionId: init.sessionId, payload: { output: 'ok' }, attemptId: init.attemptId,
+    }));
     await sleep(30);
 
     const stored = await getTask(task.id);

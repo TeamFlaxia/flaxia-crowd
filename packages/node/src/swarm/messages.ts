@@ -1,4 +1,13 @@
-import type { SwarmErrorMessage, SwarmInitMessage, SwarmSliceMessage, SwarmStartMessage } from '@flaxia/sdk';
+import {
+  isSwarmErrorMessage,
+  isSwarmInitMessage,
+  isSwarmSliceMessage,
+  isSwarmStartMessage,
+  type SwarmErrorMessage,
+  type SwarmInitMessage,
+  type SwarmSliceMessage,
+  type SwarmStartMessage,
+} from '@flaxia/sdk';
 
 /** Swarm control messages the coordinator sends to a node. */
 export type SwarmControlMessage = SwarmInitMessage | SwarmSliceMessage | SwarmStartMessage | SwarmErrorMessage;
@@ -13,10 +22,19 @@ export type SwarmWorkerOutbound =
   | { id: string; type: 'swarm-message'; message: unknown }
   | { id: string; type: 'swarm-frame'; frame: ArrayBuffer };
 
+/**
+ * Structural validation for every control message a node accepts. The SDK
+ * validators check the fields the node relies on (slice bounds, chain position,
+ * hop keys, ids), so a malformed or hostile message is dropped before it can
+ * reach the engine or the layer loader.
+ */
 export function isSwarmControlMessage(value: unknown): value is SwarmControlMessage {
-  if (!value || typeof value !== 'object') return false;
-  const type = (value as { type?: unknown }).type;
-  return type === 'swarm-init' || type === 'swarm-slice' || type === 'swarm-start' || type === 'swarm-error';
+  return (
+    isSwarmInitMessage(value) ||
+    isSwarmSliceMessage(value) ||
+    isSwarmStartMessage(value) ||
+    isSwarmErrorMessage(value)
+  );
 }
 
 export function isSwarmFrameMessage(value: unknown): value is { id: string; type: 'swarm-frame'; frame: ArrayBuffer } {

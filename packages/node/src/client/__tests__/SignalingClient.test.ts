@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initFlaxiaNode } from '../SignalingClient';
-import { encodeSwarmEnvelope } from '@flaxia/sdk';
+import {
+  decodeSwarmEnvelope,
+  encodeSwarmEnvelope,
+  encodeSwarmFrame,
+  signSwarmEnvelope,
+  verifySwarmEnvelope,
+} from '@flaxia/sdk';
 import { __consentTestHooks } from '../../consent/storage';
 import { setFlaxiaNodeHostManagedConsent } from '../../index';
 
@@ -102,7 +108,11 @@ describe('SignalingClient', () => {
       'https://flaxia.app/crowd/nodes/register',
       expect.objectContaining({ method: 'POST' }),
     );
-    expect(MockWebSocket).toHaveBeenCalledWith('wss://flaxia.app/crowd/signal?token=test-token');
+    // The token travels in the subprotocol list, never in the query string.
+    expect(MockWebSocket).toHaveBeenCalledWith(
+      'wss://flaxia.app/crowd/signal',
+      ['flaxia-node-v1', 'bearer.test-token'],
+    );
   });
 
   it('should send siteId and capabilities when registering', async () => {
@@ -119,9 +129,10 @@ describe('SignalingClient', () => {
     await flush();
 
     const [, init] = (global.fetch as any).mock.calls[0];
+    // No client-chosen nodeId: the coordinator issues one and binds the token
+    // to it, so a node cannot claim another node's identity.
     expect(JSON.parse(init.body)).toEqual({
       siteId: 'test-site',
-      nodeId: expect.any(String),
       capabilities: ['ai-inference', 'image-process'],
       wasmMemoryBytes: 4 * 1024 ** 3,
       deviceMemory: null, // jsdom / mobile WebViews do not expose navigator.deviceMemory
@@ -572,12 +583,84 @@ describe('SignalingClient', () => {
       coordinator: (message: Record<string, unknown>) => onmessage({ data: JSON.stringify(message) } as MessageEvent),
       workerReports: (id: string, type: string, error: string) =>
         workerHandler!({ data: { id, type, error } }),
+      workerTokens: (id: string, token: string) =>
+        workerHandler!({ data: { id, type: 'token', token } }),
+      workerFrames: (id: string, frame: ArrayBuffer) =>
+        workerHandler!({ data: { id, type: 'swarm-frame', frame } }),
+      sentRaw: () => send.mock.calls.map(([m]) => m),
       sent: () =>
         send.mock.calls
           .map(([m]) => JSON.parse(m as string))
           .filter((m: Record<string, unknown>) => m.type !== 'pong'),
     };
   }
+
+  it('never persists the node token and purges a legacy cached one', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    // A token cached by an older bundle must not survive startup.
+    localStorage.setItem('flaxia_node_token', JSON.stringify({ token: 'stale', nodeId: 'n', expiresAt: Date.now() + 100000 }));
+    seedGrantedConsent();
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    await flush();
+    await flush();
+    // The bearer lives in memory only: an XSS on the host page cannot lift a
+    // node identity out of persistent storage.
+    expect(localStorage.getItem('flaxia_node_token')).toBeNull();
+  });
+
+  it('echoes the delivery attempt id on progress and result', async () => {
+    const { coordinator, workerReports, workerTokens, sent } = await bootNode();
+
+    coordinator({
+      type: 'task',
+      taskId: 'task-att-1',
+      workload: 'ai-inference',
+      payload: { task: 'text-generation', model: 'm', input: 'hi' },
+      attemptId: 'attempt-1',
+    });
+    await flush();
+
+    // A progress token is transport metadata plus payload: the attempt id must
+    // ride along or the coordinator drops the message.
+    workerTokens('task-att-1', 'hi');
+    await flush();
+    expect(sent()).toContainEqual(
+      expect.objectContaining({ type: 'progress', taskId: 'task-att-1', token: 'hi', attemptId: 'attempt-1' }),
+    );
+
+    workerReports('task-att-1', 'done', '');
+    await flush();
+    await flush();
+    expect(sent()).toContainEqual(
+      expect.objectContaining({ type: 'result', taskId: 'task-att-1', attemptId: 'attempt-1' }),
+    );
+  });
+
+  it('echoes the attempt id when reporting a task failure', async () => {
+    const { coordinator, workerReports, sent } = await bootNode();
+
+    coordinator({
+      type: 'task',
+      taskId: 'task-att-2',
+      workload: 'ai-inference',
+      payload: { task: 'text-generation', model: 'm', input: 'hi' },
+      attemptId: 'attempt-2',
+    });
+    await flush();
+
+    workerReports('task-att-2', 'error', 'boom');
+    await flush();
+    await flush();
+
+    expect(sent()).toContainEqual(
+      expect.objectContaining({ type: 'error', taskId: 'task-att-2', error: 'boom', attemptId: 'attempt-2' }),
+    );
+  });
 
   it('stops an aborted task locally and does not report its failure back', async () => {
     const { coordinator, postMessage, workerReports, sent } = await bootNode();
@@ -623,6 +706,68 @@ describe('SignalingClient', () => {
     expect(sent()).toContainEqual(
       expect.objectContaining({ type: 'error', taskId: 'task-err-1', error: 'boom' }),
     );
+  });
+
+  it('signs swarm frames per hop and drops unsigned or tampered inbound frames', async () => {
+    const { coordinator, onmessage, postMessage, sentRaw, workerFrames } = await bootNode();
+
+    // A two-node session where this node is the host (index 0).
+    coordinator({
+      type: 'swarm-init',
+      taskId: 'swarm-mac',
+      sessionId: 'sess-mac',
+      model: 'm',
+      members: [],
+      timeoutMs: 1000,
+    });
+    coordinator({
+      type: 'swarm-slice',
+      taskId: 'swarm-mac',
+      sessionId: 'sess-mac',
+      index: 0,
+      chainLength: 2,
+      role: 'host',
+      slice: { start: 0, end: 4, hasEmbed: true, hasHead: true },
+      inboundKey: 'in-key',
+      outboundKey: 'out-key',
+    });
+    await flush();
+
+    // Outbound: what the engine hands over is signed with the outbound hop key.
+    const outboundFrame = encodeSwarmFrame({ requestId: 1, pos: 1, tokens: 1 }, new Uint8Array(8));
+    workerFrames('sess-mac', outboundFrame);
+    await flush();
+    await flush();
+
+    const binary = sentRaw().find((m) => typeof m !== 'string') as ArrayBuffer | undefined;
+    expect(binary).toBeDefined();
+    const envelope = decodeSwarmEnvelope(binary!);
+    expect(envelope?.sessionId).toBe('sess-mac');
+    expect(envelope?.mac).not.toBeNull();
+    expect(await verifySwarmEnvelope('out-key', 'sess-mac', envelope!.frame, envelope!.mac!)).toBe(true);
+
+    // Inbound: a frame signed with our inbound key reaches the engine...
+    const inboundFrame = encodeSwarmFrame({ requestId: 2, pos: 2, tokens: 1 }, new Uint8Array(8));
+    onmessage({ data: await signSwarmEnvelope('in-key', 'sess-mac', inboundFrame) } as MessageEvent);
+    await flush();
+    await flush();
+    expect(postMessage.mock.calls.some(([m]) => m?.type === 'swarm-frame' && m?.id === 'sess-mac')).toBe(true);
+
+    // ...an unsigned frame is dropped...
+    postMessage.mockClear();
+    onmessage({ data: encodeSwarmEnvelope('sess-mac', inboundFrame) } as MessageEvent);
+    await flush();
+    await flush();
+    expect(postMessage).not.toHaveBeenCalled();
+
+    // ...and so is a frame signed with the wrong key.
+    postMessage.mockClear();
+    onmessage({
+      data: encodeSwarmEnvelope('sess-mac', inboundFrame, new Uint8Array(16).fill(9)),
+    } as MessageEvent);
+    await flush();
+    await flush();
+    expect(postMessage).not.toHaveBeenCalled();
   });
 
   it('queues a fresh session behind an abort and ignores the retired attempt', async () => {
