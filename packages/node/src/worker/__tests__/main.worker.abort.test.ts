@@ -26,10 +26,13 @@ describe('main.worker abort', () => {
     Object.defineProperty(globalThis, 'self', { value: selfObj, configurable: true });
 
     handleAiInference.mockImplementation(
-      async (_payload: unknown, emitToken: (token: string) => void) => {
-        emitToken('before');
+      async (_payload: unknown, emitToken: (token: string) => void | Promise<void>) => {
+        // The worker's token sink is async (it yields for CPU throttling), so a
+        // real streaming workload awaits it: that is what makes the abort
+        // surface as a rejected token emit instead of an unhandled rejection.
+        await emitToken('before');
         await new Promise((resolve) => setTimeout(resolve, 20));
-        emitToken('after');
+        await emitToken('after');
         return { output: 'should not be reached' };
       },
     );

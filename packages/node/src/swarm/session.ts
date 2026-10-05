@@ -107,7 +107,7 @@ export interface SwarmHostOptions {
   /** Stop as soon as this id is sampled (it is not emitted). */
   eosIds?: Set<number>;
   /** Called with each generated token id as it is produced. */
-  onToken?: (id: number) => void;
+  onToken?: (id: number) => unknown;
 }
 
 export interface SwarmHostResult {
@@ -168,7 +168,7 @@ export async function runSwarmHost(options: SwarmHostOptions): Promise<SwarmHost
   while (tokens.length < maxNewTokens) {
     if (options.eosIds?.has(next)) break;
     tokens.push(next);
-    options.onToken?.(next);
+    await options.onToken?.(next);
     if (tokens.length >= maxNewTokens) break;
     const hidden = await chainOne(next, pos++);
     logits = await engine.headFromHidden(hidden);

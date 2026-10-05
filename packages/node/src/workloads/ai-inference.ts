@@ -1,5 +1,29 @@
 import { env, pipeline, TextStreamer } from '@huggingface/transformers';
 import type { AiInferencePayload, AiInferenceResult, AiInferenceOptions } from '@flaxia/sdk';
+import {
+  MAX_AI_MODEL_MAX_BYTES,
+  applyGenerationOptions,
+  assertAiInput,
+  resolveAiDevice,
+  resolveAiDtype,
+  resolveAiModel,
+  type AiModelDefinition,
+} from './ai-model-registry';
+
+// Re-exported so hosts configure the allowlist through the workload module they
+// already import (`@flaxia/node`'s public entry point stays untouched).
+export {
+  DEFAULT_AI_MODEL_MAX_BYTES,
+  MAX_AI_MODEL_MAX_BYTES,
+  MAX_AI_INPUT_CHARS,
+  MAX_AI_INPUT_ITEMS,
+  ALLOWED_AI_DEVICES,
+  ALLOWED_AI_DTYPES,
+  listAiModels,
+  registerAiModels,
+  unregisterAiModel,
+  type AiModelDefinition,
+} from './ai-model-registry';
 
 const SUPPORTED_TASKS = [
   'text-classification', 'token-classification', 'question-answering', 'fill-mask',
@@ -24,30 +48,81 @@ export const releaseCache = (): void => {
 };
 
 const createBufferedTokenCallback = (
-  onToken: (token: string) => void,
+  onToken: (token: string) => void | Promise<void>,
   options: AiInferenceOptions,
-): ((text: string) => void) => {
-  if (!options.tokenBuffer) return onToken;
-
+): { callback: (text: string) => void; finish: () => Promise<void>; cancel: () => Promise<void> } => {
   let buffer = '';
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const interval = options.tokenBufferIntervalMs ?? 50;
+  let pending: Promise<void> = Promise.resolve();
+  let failure: unknown;
+  let failed = false;
+  let closed = false;
 
-  const flush = () => {
-    if (buffer) {
-      onToken(buffer);
-      buffer = '';
-    }
+  const dispatch = (text: string): void => {
+    // TextStreamer invokes callbacks synchronously. Queue each async sink call
+    // in order, retaining failures for the inference promise instead of leaving
+    // a rejected promise behind in a timer callback.
+    pending = pending.then(() => {
+      if (!failed) return onToken(text);
+    }).then(
+      () => undefined,
+      (error: unknown) => { failed = true; failure = error; },
+    );
+  };
+  const flush = (): void => {
+    if (timer !== null) clearTimeout(timer);
     timer = null;
+    const text = buffer;
+    buffer = '';
+    if (text && !failed) dispatch(text);
   };
-
-  return (text: string) => {
-    buffer += text;
-    if (!timer) {
-      timer = setTimeout(flush, interval);
+  const callback = (text: string): void => {
+    if (closed) return;
+    if (failed) throw failure;
+    if (!options.tokenBuffer) {
+      dispatch(text);
+      return;
     }
+    buffer += text;
+    if (timer === null) timer = setTimeout(flush, options.tokenBufferIntervalMs ?? 50);
   };
+  const settle = async (emitTail: boolean): Promise<void> => {
+    closed = true;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (emitTail && !failed) flush();
+    else buffer = '';
+    await pending;
+    if (failed) throw failure;
+  };
+  return { callback, finish: () => settle(true), cancel: () => settle(false) };
 };
+
+/**
+ * Hosts on the download path of a registered model are the only ones the node
+ * will talk to, and a single file may never exceed the registry's `maxBytes`.
+ * transformers.js honours `env.fetch`, so this wrapper bounds what a load can
+ * pull even if a repository grows after it was allowlisted.
+ */
+function installModelFetchGuard(): void {
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  env.fetch = async (input: string | URL, init?: any): Promise<Response> => {
+    const url = new URL(String(input));
+    if (!/(^|\.)huggingface\.co$/.test(url.hostname) && !/(^|\.)hf\.co$/.test(url.hostname)) {
+      throw new Error(`ai-inference: model download blocked from ${url.hostname}`);
+    }
+    const response = await nativeFetch(url, init);
+    const declared = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > MAX_AI_MODEL_MAX_BYTES) {
+      throw new Error(
+        `ai-inference: model file too large (${declared} bytes > ${MAX_AI_MODEL_MAX_BYTES})`,
+      );
+    }
+    return response;
+  };
+}
+
+installModelFetchGuard();
 
 // Always run single-threaded. Multithreaded wasm (only active when the page is
 // crossOriginIsolated, via SharedArrayBuffer) spawns one internal Web Worker
@@ -62,7 +137,7 @@ if (env.backends?.onnx?.wasm) {
 
 export const handleAiInference = async (
   payload: AiInferencePayload,
-  onToken?: (token: string) => void,
+  onToken?: (token: string) => void | Promise<void>,
 ): Promise<AiInferenceResult> => {
   const { task, model, input, options = {} } = payload;
 
@@ -70,7 +145,16 @@ export const handleAiInference = async (
     throw new Error(`Invalid or unsupported task: ${task}. Supported tasks are: ${SUPPORTED_TASKS.join(', ')}`);
   }
 
-  const cacheKey = `${task}:${model}`;
+  // Fail closed before any download: the payload's model id must resolve to a
+  // node-side registry entry, and its options must be safe combinations.
+  const definition: AiModelDefinition = resolveAiModel(model);
+  const device = resolveAiDevice(options.device);
+  const dtype = resolveAiDtype(options.dtype);
+  const safeInput = assertAiInput(input);
+  const generationOptions: Record<string, unknown> = {};
+  applyGenerationOptions(generationOptions, options as Record<string, unknown>);
+
+  const cacheKey = `${task}:${definition.repo}:${dtype ?? 'q4f16'}:${device ?? 'wasm'}`;
   let generator = pipelineCache.get(cacheKey);
   if (!generator) {
     // Bound the cache so a stream of distinct models cannot grow without limit.
@@ -79,56 +163,64 @@ export const handleAiInference = async (
       pipelineCache.delete(oldestKey);
     }
     const pipelineOpts: Record<string, unknown> = {
-      dtype: options.dtype ?? 'q4f16',
-      device: options.device,
+      dtype: dtype ?? 'q4f16',
+      device,
     };
     const loadStartedAt = performance.now();
-    console.log(`[flaxia-node] ai-inference: loading pipeline task=${task} model=${model} dtype=${pipelineOpts.dtype} device=${pipelineOpts.device ?? 'wasm'}`);
+    console.log(`[flaxia-node] ai-inference: loading pipeline task=${task} model=${definition.repo} revision=${definition.revision} dtype=${pipelineOpts.dtype} device=${device ?? 'wasm'}`);
     try {
-      generator = await pipeline(task as any, model, pipelineOpts);
+      generator = await pipeline(task as any, definition.repo, pipelineOpts);
     } catch (err) {
-      if (options.device && options.device !== 'wasm') {
-        console.warn(`[AiInference] ${options.device} failed, falling back to wasm:`, err);
+      if (device && device !== 'wasm') {
+        console.warn(`[AiInference] ${device} failed, falling back to wasm:`, err);
         pipelineOpts.device = 'wasm';
-        generator = await pipeline(task as any, model, pipelineOpts);
+        generator = await pipeline(task as any, definition.repo, pipelineOpts);
       } else {
         console.error(
-          `[flaxia-node] ai-inference: pipeline load FAILED task=${task} model=${model} error=${err instanceof Error ? err.message : String(err)}`,
+          `[flaxia-node] ai-inference: pipeline load FAILED task=${task} model=${definition.repo} error=${err instanceof Error ? err.message : String(err)}`,
         );
         throw err;
       }
     }
     console.log(
-      `[flaxia-node] ai-inference: pipeline ready task=${task} model=${model} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
+      `[flaxia-node] ai-inference: pipeline ready task=${task} model=${definition.repo} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
     );
     pipelineCache.set(cacheKey, generator);
   }
 
   const genOptions: Record<string, unknown> = {
-    max_new_tokens: options.max_new_tokens ?? 128,
-    do_sample: options.do_sample ?? false,
+    max_new_tokens: (generationOptions.max_new_tokens as number | undefined) ?? 128,
+    do_sample: (generationOptions.do_sample as boolean | undefined) ?? false,
   };
+  for (const [key, value] of Object.entries(generationOptions)) {
+    if (key === 'max_new_tokens' || key === 'do_sample') continue;
+    genOptions[key] = value;
+  }
 
-  if (options.temperature != null) genOptions.temperature = options.temperature;
-  if (options.top_p != null) genOptions.top_p = options.top_p;
-  if (options.top_k != null) genOptions.top_k = options.top_k;
-  if (options.repetition_penalty != null) genOptions.repetition_penalty = options.repetition_penalty;
-  if (options.src_lang != null) genOptions.src_lang = options.src_lang;
-  if (options.tgt_lang != null) genOptions.tgt_lang = options.tgt_lang;
-
-  if (onToken && generator.tokenizer) {
-    const streamer = new TextStreamer(generator.tokenizer, {
+  const tokens = onToken && generator.tokenizer
+    ? createBufferedTokenCallback(onToken, options)
+    : null;
+  if (tokens) {
+    genOptions.streamer = new TextStreamer(generator.tokenizer, {
       skip_prompt: true,
       skip_special_tokens: true,
-      callback_function: createBufferedTokenCallback(onToken, options),
+      callback_function: tokens.callback,
     });
-    genOptions.streamer = streamer;
   }
 
   const inputStart = performance.now();
-  const output = await generator(input, genOptions);
+  let output: any;
+  try {
+    output = await generator(safeInput, genOptions);
+  } catch (error) {
+    // Drain in-flight sink calls, but do not emit a partial tail after a failed
+    // generation. A sink failure takes precedence over a generator failure.
+    if (tokens) await tokens.cancel();
+    throw error;
+  }
+  await tokens?.finish();
   console.log(
-    `[flaxia-node] ai-inference: done task=${task} model=${model} execMs=${Math.round(performance.now() - inputStart)} inputLen=${String(input).length}`,
+    `[flaxia-node] ai-inference: done task=${task} model=${definition.repo} execMs=${Math.round(performance.now() - inputStart)} inputLen=${String(safeInput).length}`,
   );
   return { output };
 };

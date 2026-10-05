@@ -1,48 +1,107 @@
-// Probes the real amount of WebAssembly linear memory the runtime can actually
+// Probes a bounded lower bound of WebAssembly linear memory the runtime can
 // commit, rather than trusting navigator.deviceMemory (which mobile Chrome
-// reports as a quantized value and is therefore useless for gating heavy WASM
-// workloads). We grow a WebAssembly.Memory in chunks and write into every page
-// so the engine is forced to actually commit physical memory. If the runtime
-// cannot grow far enough it throws a RangeError, which we catch cleanly — no
-// OOM crash, unlike actually loading a multi-GB model on an underpowered phone.
+// reports as a quantized value). It grows and touches pages only up to the
+// requested target; it must never probe the engine's full maximum because that
+// can commit several GiB during startup. Results are memoized so the probe runs
+// at most once per page.
 
 export const HEAVY_WORKLOAD_WASM_MEMORY_BYTES = 2 * 1024 ** 3;
 const WASM_PAGE_SIZE = 65536;
 const PROBE_CHUNK_BYTES = 16 * 1024 * 1024;
+/** Hard cap on grow() calls so a tiny `chunkBytes` cannot spin for minutes. */
+const MAX_PROBE_STEPS = 4096;
 
+/** A bounded probe result is a known lower bound, not the engine maximum. */
+interface ProbeEntry {
+  bytes: number;
+}
+let cachedProbe: ProbeEntry | null = null;
+let probeRuns = 0;
+
+/** Grow `memory` by `bytes`, touching every page so the RAM is really committed. */
+function tryGrow(memory: WebAssembly.Memory, bytes: number): boolean {
+  const pages = Math.ceil(bytes / WASM_PAGE_SIZE);
+  try {
+    memory.grow(pages);
+  } catch {
+    return false;
+  }
+  const view = new Uint8Array(memory.buffer);
+  for (let p = 0; p < pages; p++) {
+    view[p * WASM_PAGE_SIZE] = 0;
+  }
+  return true;
+}
+
+/**
+ * Probe a bounded lower bound of memory this runtime can commit. The function
+ * stops at `targetBytes`; it deliberately does not explore the engine maximum.
+ * Only the first call per page allocates/touches memory. If a later caller asks
+ * for a higher target, return the already-proven lower bound instead of
+ * committing more memory during startup.
+ */
 export function probeMaxWasmMemoryBytes(
   targetBytes: number = HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
   chunkBytes: number = PROBE_CHUNK_BYTES,
 ): number {
+  if (cachedProbe) return cachedProbe.bytes;
+
+  probeRuns++;
   let memory: WebAssembly.Memory;
   try {
     memory = new WebAssembly.Memory({ initial: 0 });
   } catch {
-    // Environment without growable memory (or memory creation blocked).
+    cachedProbe = { bytes: 0 };
     return 0;
   }
 
+  const target = Math.max(0, Math.floor(targetBytes));
+  const chunk = Math.max(WASM_PAGE_SIZE, Math.floor(chunkBytes));
   let grown = 0;
-  while (grown < targetBytes) {
-    const remaining = targetBytes - grown;
-    const pages = Math.ceil(Math.min(chunkBytes, remaining) / WASM_PAGE_SIZE);
-    try {
-      memory.grow(pages);
-    } catch {
-      // Cannot grow any further: stop. The bytes already committed are the max.
-      break;
-    }
-    // Touch every newly grown page so the OS/engine actually commits RAM
-    // instead of reporting success on lazily-backed virtual memory.
-    const view = new Uint8Array(memory.buffer);
-    for (let p = 0; p < pages; p++) {
-      view[grown + p * WASM_PAGE_SIZE] = 0;
-    }
-    grown += pages * WASM_PAGE_SIZE;
+  let steps = 0;
+  while (grown < target && steps < MAX_PROBE_STEPS) {
+    const step = Math.min(chunk, target - grown);
+    if (!tryGrow(memory, step)) break;
+    grown += step;
+    steps++;
   }
+
+  // Drop the last local reference promptly; the runtime may reclaim committed
+  // pages after GC, but they are never retained by the node.
+  memory = undefined as unknown as WebAssembly.Memory;
+  cachedProbe = { bytes: grown };
   return grown;
 }
 
+/**
+ * The device's committed WebAssembly memory, probed at most once per page.
+ * This is the cheap accessor every call site (registration, reconnect,
+ * capability reporting) should use instead of `probeMaxWasmMemoryBytes()`.
+ */
+export function getWasmMemoryBytes(): number {
+  if (!cachedProbe) return probeMaxWasmMemoryBytes();
+  return cachedProbe.bytes;
+}
+
+/**
+ * Whether the device can commit the memory a heavy (multi-GB model) workload
+ * needs. Uses the cached probe, so it never re-allocates.
+ */
 export function hasEnoughWasmMemoryForHeavy(): boolean {
-  return probeMaxWasmMemoryBytes() >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
+  return getWasmMemoryBytes() >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
+}
+
+/**
+ * Drop the memoized probe and reset the run counter. Only for tests that
+ * install a fake WebAssembly implementation; production code never needs to
+ * reset the cache.
+ */
+export function resetWasmMemoryProbeCache(): void {
+  cachedProbe = null;
+  probeRuns = 0;
+}
+
+/** How many times the real probe ran (diagnostics / tests). */
+export function getWasmMemoryProbeRuns(): number {
+  return probeRuns;
 }
