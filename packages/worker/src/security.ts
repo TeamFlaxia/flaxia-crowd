@@ -122,6 +122,8 @@ export interface NodeTokenPayload {
   siteId: string;
   nodeId: string;
   capabilities: string[];
+  /** Node can fetch scoped file-source URLs for container payloads. */
+  fileSources?: boolean;
   exp: number;
   /** Device RAM in GB as reported by the browser; `null`/missing on mobile WebViews. */
   deviceMemory?: number | null;

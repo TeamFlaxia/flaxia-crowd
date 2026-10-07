@@ -13,6 +13,7 @@ interface NodeRecord {
   cpuLoad: number;
   connectedAt: number;
   lastPongAt: number;
+  fileSources?: boolean;
   currentTaskId?: string;
   siteId?: string;
   assignedCount?: number;
@@ -114,6 +115,54 @@ describe('Coordinator', () => {
     expect(stored.status).toBe('pending');
     expect(stored.workload).toBe('ai-inference');
     expect(stored.tenantId).toBe(TENANT);
+  });
+
+  it('routes file-source container tasks only to nodes that advertised support', async () => {
+    stub = newStub();
+    const legacyNode = await connectNode('container-legacy', 'capabilities=container');
+    const capableNode = await connectNode('container-files', 'capabilities=container&fileSources=true');
+    const task = makeTask({
+      workload: 'container',
+      payload: {
+        image: 'https://scanner.example/clamav.wasm',
+        command: ['clamscan', 'input.jpg'],
+        fileSources: {
+          'input.jpg': {
+            url: 'https://flaxia.app/api/crowd/scan-file',
+            token: `${'a'.repeat(32)}.${'b'.repeat(64)}`,
+            size: 4,
+            sha256: 'a'.repeat(64),
+          },
+        },
+      },
+    });
+    await seedPending([task], ['container-legacy', 'container-files']);
+    await runAssign();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const assigned = await getTask(task.id);
+    expect(assigned.assignedNodeId).toBe('container-files');
+    expect(jsonFrames(capableNode).some((frame) => frame.type === 'task')).toBe(true);
+    expect(jsonFrames(legacyNode).some((frame) => frame.type === 'task')).toBe(false);
+  });
+
+  it('keeps legacy inline container tasks routable to older nodes', async () => {
+    stub = newStub();
+    const legacyNode = await connectNode('container-legacy-inline', 'capabilities=container');
+    const task = makeTask({
+      workload: 'container',
+      payload: {
+        image: 'https://scanner.example/clamav.wasm',
+        command: ['clamscan', 'input.jpg'],
+        files: { 'input.jpg': 'AQIDBA==' },
+      },
+    });
+    await seedPending([task], ['container-legacy-inline']);
+    await runAssign();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect((await getTask(task.id)).assignedNodeId).toBe('container-legacy-inline');
+    expect(jsonFrames(legacyNode).some((frame) => frame.type === 'task')).toBe(true);
   });
 
   it('rejects malformed JSON on enqueue', async () => {

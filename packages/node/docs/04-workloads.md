@@ -51,6 +51,23 @@ export async function handleContainer(payload: ContainerPayload): Promise<Contai
 - 処理速度はネイティブ WASM に劣るが、柔軟性が極めて高い
 - カーネルレベルでの強力なサンドボックス化
 
+利用するホストは `capabilities: ['container']` に加え、実行する WASM
+イメージの正確な HTTPS origin を `containerImageOrigins` に明示します。
+デフォルトは空で、未設定ノードは `container` を広告せず、タスクを受け取りません。
+署名付きファイル参照を使う場合は、取得先 API の origin を
+`fileSourceOrigins` に設定します。ノードは送信元のHTTPS・公開ホスト・許可origin、
+サイズ、SHA-256を検証してからファイルをWASIへ渡します。Coordinatorも
+`fileSources` 対応を広告したノードだけに参照タスクを割り当てます。
+
+```typescript
+initFlaxiaNode({
+  ...config,
+  capabilities: ['container'],
+  containerImageOrigins: ['https://scanner.example'],
+  fileSourceOrigins: ['https://flaxia.app'],
+})
+```
+
 ---
 
 ## ワークロード追加時のルール

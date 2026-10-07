@@ -22,7 +22,7 @@ export interface Env {
   SUBSCRIBE_TOKEN_SECRET: string
 }
 
-const app = new Hono<{ Bindings: Env }>()
+const app: Hono<{ Bindings: Env }> = new Hono<{ Bindings: Env }>()
 
 const getOrigins = (env: Env | undefined): string[] => {
   if (!env) return ['*']

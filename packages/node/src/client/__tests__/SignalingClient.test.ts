@@ -134,9 +134,53 @@ describe('SignalingClient', () => {
     expect(JSON.parse(init.body)).toEqual({
       siteId: 'test-site',
       capabilities: ['ai-inference', 'image-process'],
+      fileSources: false,
       wasmMemoryBytes: 4 * 1024 ** 3,
       deviceMemory: null, // jsdom / mobile WebViews do not expose navigator.deviceMemory
     });
+  });
+
+  it('advertises file-source and container support only with explicit HTTPS origin allowlists', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    seedGrantedConsent();
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['container'],
+      containerImageOrigins: ['https://scanner.example'],
+      fileSourceOrigins: ['https://flaxia.app'],
+    });
+    await flush();
+    await flush();
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.capabilities).toEqual(['container']);
+    expect(body.fileSources).toBe(true);
+  });
+
+  it('does not advertise container without a configured image origin', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    seedGrantedConsent();
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['container'],
+      fileSourceOrigins: ['https://flaxia.app'],
+    });
+    await flush();
+    await flush();
+
+    const [, init] = (global.fetch as any).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.capabilities).toEqual([]);
+    expect(body.fileSources).toBe(true);
   });
 
   it('advertises swarm-inference with WebGPU details when the host opts in', async () => {

@@ -121,6 +121,7 @@ async function runWorkload(
   workload: WorkloadType,
   payload: unknown,
   emitToken: (token: string) => void | Promise<void>,
+  hostConfig?: { fileSourceOrigins?: string[]; containerImageOrigins?: string[] },
 ): Promise<unknown> {
   switch (workload) {
     case 'ai-inference':
@@ -132,7 +133,11 @@ async function runWorkload(
       return await image.handleImageProcess(payload as any);
     case 'container':
       const container = await import('../workloads/container');
-      return await container.handleContainer(payload as any);
+      return await container.handleContainer(
+        payload as any,
+        hostConfig?.fileSourceOrigins ?? [],
+        hostConfig?.containerImageOrigins ?? [],
+      );
     case 'vector-embed':
       const embed = await import('../workloads/vector-embed');
       cacheReleasers.set(workload, embed.releaseCache);
@@ -263,9 +268,15 @@ self.onmessage = async (e: MessageEvent) => {
     const taskStart = performance.now();
     try {
       const emitToken = createTokenSink(id);
+      const fileSourceOrigins = Array.isArray(config?.fileSourceOrigins)
+        ? config.fileSourceOrigins.filter((origin: unknown): origin is string => typeof origin === 'string')
+        : [];
+      const containerImageOrigins = Array.isArray(config?.containerImageOrigins)
+        ? config.containerImageOrigins.filter((origin: unknown): origin is string => typeof origin === 'string')
+        : [];
       const result = workload === 'swarm-inference'
         ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage, emitToken)
-        : await runWorkload(workload as WorkloadType, payload, emitToken);
+        : await runWorkload(workload as WorkloadType, payload, emitToken, { fileSourceOrigins, containerImageOrigins });
 
       self.postMessage({ id, type: 'done', result });
       console.log(
