@@ -3,11 +3,13 @@ import {
   DEFAULT_CONTAINER_MEMORY_MB,
   MAX_CONTAINER_MEMORY_MB,
   MAX_CONTAINER_IMAGE_BYTES,
+  MAX_CONTAINER_INPUT_BYTES,
   MIN_CONTAINER_MEMORY_MB,
   assertWasmMemoryWithinLimit,
   configureContainerImageOrigins,
   getAllowedContainerImageOrigins,
   parseWasmMemoryLimits,
+  resolveContainerFiles,
   resolveMemoryLimitMb,
   runContainer,
   validateImageUrl,
@@ -38,6 +40,11 @@ function wasmWithMemory(initialPages: number, maxPages: number | null): Uint8Arr
 }
 
 const MB = 1024 * 1024;
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes.slice().buffer);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 
 afterEach(() => {
   configureContainerImageOrigins([]);
@@ -171,5 +178,102 @@ describe('container memoryLimitMb enforcement (#10-4)', () => {
 
   it('caps the container image download size', () => {
     expect(MAX_CONTAINER_IMAGE_BYTES).toBe(128 * 1024 * 1024);
+  });
+
+  it('keeps legacy inline files and mounts only verified file-source bytes', async () => {
+    const inline = await resolveContainerFiles({ files: { 'small.txt': btoa('inline') } });
+    expect(new TextDecoder().decode(inline.get('small.txt'))).toBe('inline');
+
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const token = `${'a'.repeat(32)}.${'b'.repeat(64)}`;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(bytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } }),
+    );
+    try {
+      const resolved = await resolveContainerFiles(
+        {
+          fileSources: {
+            'input.bin': {
+              url: 'https://flaxia.app/api/crowd/scan-file',
+              token,
+              size: bytes.byteLength,
+              sha256: await sha256Hex(bytes),
+            },
+          },
+        },
+        ['https://flaxia.app'],
+      );
+      expect(resolved.get('input.bin')).toEqual(bytes);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+      expect(init.headers).toEqual({ Authorization: `Bearer ${token}` });
+      expect(init.credentials).toBe('omit');
+      expect(init.referrerPolicy).toBe('no-referrer');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('fetches and hashes a full 25 MiB scan file within the input limit', async () => {
+    const bytes = new Uint8Array(MAX_CONTAINER_INPUT_BYTES).fill(0x5a);
+    const token = `${'a'.repeat(32)}.${'b'.repeat(64)}`;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(bytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } }),
+    );
+    try {
+      const files = await resolveContainerFiles(
+        {
+          fileSources: {
+            'input.jpg': {
+              url: 'https://flaxia.app/api/crowd/scan-file',
+              token,
+              size: bytes.byteLength,
+              sha256: await sha256Hex(bytes),
+            },
+          },
+        },
+        ['https://flaxia.app'],
+      );
+      expect(files.get('input.jpg')?.byteLength).toBe(25 * MB);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('rejects file sources outside configured origins and with a hash mismatch', async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const token = `${'a'.repeat(32)}.${'b'.repeat(64)}`;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(bytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } }),
+    );
+    const source = {
+      url: 'https://evil.example/api/crowd/scan-file',
+      token,
+      size: bytes.byteLength,
+      sha256: await sha256Hex(bytes),
+    };
+    try {
+      await expect(resolveContainerFiles({ fileSources: { 'input.bin': source } }, ['https://flaxia.app'])).rejects.toThrow(
+        /origin not allowed/,
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const apiSource = { ...source, url: 'https://flaxia.app/api/crowd/scan-file' };
+      await expect(
+        resolveContainerFiles(
+          { fileSources: { 'input.bin': { ...apiSource, sha256: '0'.repeat(64) } } },
+          ['https://flaxia.app'],
+        ),
+      ).rejects.toThrow(/SHA-256 mismatch/);
+      await expect(
+        resolveContainerFiles(
+          { fileSources: { 'input.bin': { ...apiSource, size: bytes.byteLength + 1 } } },
+          ['https://flaxia.app'],
+        ),
+      ).rejects.toThrow(/size mismatch/);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

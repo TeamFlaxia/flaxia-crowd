@@ -1,5 +1,5 @@
 import { WASI, File, Directory, PreopenDirectory } from "@bjorn3/browser_wasi_shim";
-import type { ContainerPayload, ContainerResult } from "@flaxia/sdk";
+import type { ContainerFileSource, ContainerPayload, ContainerResult } from "@flaxia/sdk";
 import { assertPublicUrl, fetchGuarded } from "./egress-guard";
 
 /**
@@ -18,6 +18,10 @@ export const MAX_CONTAINER_IMAGE_BYTES = 128 * 1024 * 1024;
 
 /** Content types a container image may be served with. */
 const CONTAINER_IMAGE_CONTENT_TYPES = ['application/wasm', 'application/octet-stream'] as const;
+const CONTAINER_FILE_SOURCE_CONTENT_TYPES = ['application/octet-stream'] as const;
+/** Aggregate decoded input-file ceiling; keeps reference downloads bounded. */
+export const MAX_CONTAINER_INPUT_BYTES = 25 * 1024 * 1024;
+const MAX_CONTAINER_INPUT_FILES = 4096;
 
 /** Memory bounds for `memoryLimitMb` (clamped): 32 MiB .. 4 GiB. */
 export const MIN_CONTAINER_MEMORY_MB = 32;
@@ -65,7 +69,7 @@ export function getAllowedContainerImageOrigins(): readonly string[] {
  * the shared egress guard additionally rejects loopback/private hosts,
  * non-default ports, credentials, non-HTTPS schemes and non-`.wasm` paths.
  */
-export function validateImageUrl(urlStr: string): URL {
+export function validateImageUrl(urlStr: string, origins: readonly string[] = allowedImageOrigins): URL {
   let url: URL;
   try {
     url = new URL(urlStr);
@@ -73,13 +77,13 @@ export function validateImageUrl(urlStr: string): URL {
     throw new Error(`Invalid image URL: ${urlStr}`);
   }
 
-  if (allowedImageOrigins.length === 0) {
+  if (origins.length === 0) {
     throw new Error(
       'container workload disabled: no container image origins are configured (set containerImageOrigins on the node host)',
     );
   }
 
-  if (!allowedImageOrigins.includes(url.origin)) {
+  if (!origins.includes(url.origin)) {
     throw new Error(`Container image origin not allowed: ${url.origin}`);
   }
 
@@ -208,10 +212,130 @@ export function assertWasmMemoryWithinLimit(binary: Uint8Array, limitMb: number)
   return limits;
 }
 
-export const runContainer = async (payload: ContainerPayload): Promise<ContainerResult> => {
-  const { image, command, files, memoryLimitMb } = payload;
-  const safeImageUrl = validateImageUrl(image);
+function validateFileMountName(name: string): void {
+  if (
+    !name ||
+    name.length > 255 ||
+    name.startsWith('/') ||
+    name.includes('\\') ||
+    /[\u0000-\u001f\u007f]/.test(name) ||
+    name.split('/').some((part) => !part || part === '.' || part === '..')
+  ) {
+    throw new Error(`Invalid container input mount name: ${name}`);
+  }
+}
+
+function validateFileSourceUrl(value: string, allowedOrigins: readonly string[]): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('Invalid container file-source URL');
+  }
+  if (url.search || url.hash) throw new Error('Container file-source URLs cannot contain query strings or fragments');
+  if (url.username || url.password) throw new Error('Container file-source URLs cannot contain credentials');
+  if (!allowedOrigins.includes(url.origin)) {
+    throw new Error(`Container file-source origin not allowed: ${url.origin}`);
+  }
+  return assertPublicUrl(url);
+}
+
+function isContainerFileSource(value: unknown): value is ContainerFileSource {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const source = value as Partial<ContainerFileSource>;
+  return (
+    typeof source.url === 'string' &&
+    source.url.length <= 2048 &&
+    typeof source.token === 'string' &&
+    source.token.length <= 4096 &&
+    /^[A-Za-z0-9_-]+\.[a-f0-9]{64}$/.test(source.token) &&
+    Number.isSafeInteger(source.size) &&
+    (source.size as number) >= 0 &&
+    (source.size as number) <= MAX_CONTAINER_INPUT_BYTES &&
+    typeof source.sha256 === 'string' &&
+    /^[a-f0-9]{64}$/.test(source.sha256)
+  );
+}
+
+/** Decode inline files and download scoped references before mounting either. */
+export async function resolveContainerFiles(
+  payload: Pick<ContainerPayload, 'files' | 'fileSources'>,
+  allowedFileSourceOrigins: readonly string[] = [],
+): Promise<Map<string, Uint8Array>> {
+  const inlineFiles = payload.files ?? {};
+  const fileSources = payload.fileSources ?? {};
+  if (!inlineFiles || typeof inlineFiles !== 'object' || Array.isArray(inlineFiles)) {
+    throw new Error('Container files must be a filename-to-base64 map');
+  }
+  if (!fileSources || typeof fileSources !== 'object' || Array.isArray(fileSources)) {
+    throw new Error('Container fileSources must be a filename-to-source map');
+  }
+
+  const inlineEntries = Object.entries(inlineFiles);
+  const sourceEntries = Object.entries(fileSources);
+  if (inlineEntries.length + sourceEntries.length > MAX_CONTAINER_INPUT_FILES) {
+    throw new Error(`Container input file count exceeds ${MAX_CONTAINER_INPUT_FILES}`);
+  }
+  const resolved = new Map<string, Uint8Array>();
+  let totalBytes = 0;
+  for (const [name, encoded] of inlineEntries) {
+    validateFileMountName(name);
+    if (typeof encoded !== 'string') throw new Error(`Container file ${name} must be base64 text`);
+    if (encoded.length > Math.ceil(MAX_CONTAINER_INPUT_BYTES / 3) * 4) {
+      throw new Error(`Container file ${name} exceeds the 25 MiB input limit`);
+    }
+    let binary: string;
+    try {
+      binary = atob(encoded);
+    } catch {
+      throw new Error(`Container file ${name} is not valid base64`);
+    }
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_CONTAINER_INPUT_BYTES) throw new Error('Container input files exceed the 25 MiB limit');
+    resolved.set(name, bytes);
+  }
+
+  for (const [name, sourceValue] of sourceEntries) {
+    validateFileMountName(name);
+    if (resolved.has(name)) throw new Error(`Container input file is defined twice: ${name}`);
+    if (!isContainerFileSource(sourceValue)) throw new Error(`Container file source ${name} is malformed`);
+    const source = sourceValue;
+    totalBytes += source.size;
+    if (totalBytes > MAX_CONTAINER_INPUT_BYTES) throw new Error('Container input files exceed the 25 MiB limit');
+
+    const safeUrl = validateFileSourceUrl(source.url, allowedFileSourceOrigins);
+    const response = await fetchGuarded({
+      url: safeUrl,
+      allowContentTypes: CONTAINER_FILE_SOURCE_CONTENT_TYPES,
+      maxBytes: Math.max(1, source.size),
+      timeoutMs: 60_000,
+      headers: { Authorization: `Bearer ${source.token}` },
+    });
+    if (!response.ok || response.status !== 200) {
+      throw new Error(`Failed to download container file source: HTTP ${response.status}`);
+    }
+    if (response.byteLength !== source.size) {
+      throw new Error(`Container file source ${name} size mismatch: expected ${source.size}, got ${response.byteLength}`);
+    }
+    const digest = await crypto.subtle.digest('SHA-256', response.bytes.slice().buffer);
+    const actualSha = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    if (actualSha !== source.sha256) throw new Error(`Container file source ${name} SHA-256 mismatch`);
+    resolved.set(name, response.bytes);
+  }
+
+  return resolved;
+}
+
+export const runContainer = async (
+  payload: ContainerPayload,
+  allowedFileSourceOrigins: readonly string[] = [],
+  containerImageOrigins: readonly string[] = allowedImageOrigins,
+): Promise<ContainerResult> => {
+  const { image, command, memoryLimitMb } = payload;
+  const safeImageUrl = validateImageUrl(image, containerImageOrigins);
   const memoryLimit = resolveMemoryLimitMb(memoryLimitMb);
+  const resolvedFiles = await resolveContainerFiles(payload, allowedFileSourceOrigins);
 
   console.log(`Starting container: ${image} with command: ${command.join(' ')}`);
 
@@ -236,10 +360,9 @@ export const runContainer = async (payload: ContainerPayload): Promise<Container
 
   const rootFiles = new Map<string, any>();
   
-  // Map input files
-  for (const [path, base64] of Object.entries(files)) {
-    const binary = Uint8Array.from(atob(base64 as string), c => c.charCodeAt(0));
-    rootFiles.set(path, new File(binary));
+  // Map inline and verified remote-reference files into the WASI filesystem.
+  for (const [path, bytes] of resolvedFiles) {
+    rootFiles.set(path, new File(bytes));
   }
 
   const rootDir = new PreopenDirectory("/", rootFiles);

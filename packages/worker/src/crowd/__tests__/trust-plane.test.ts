@@ -92,6 +92,19 @@ describe('#5 node identity is server-issued and token-bound', () => {
     expect(payload?.siteId).toBe('');
   });
 
+  it('binds file-source support into the signed node token and coordinator record', async () => {
+    const env = makeEnv();
+    const registered = await registerNode(env, { siteId: 'flaxia', capabilities: ['container'], fileSources: true });
+    expect(registered.status).toBe(200);
+    const { token, nodeId } = await registered.json() as { token: string; nodeId: string };
+    expect((await verifyNodeToken(TEST_NODE_TOKEN_SECRET, token))?.fileSources).toBe(true);
+
+    const connected = await upgradeSignal(env, token);
+    expect(connected.status).toBe(101);
+    expect((await readNodeRecord(nodeId))?.fileSources).toBe(true);
+    (connected as unknown as { webSocket?: WebSocket }).webSocket?.accept();
+  });
+
   it('ignores a client-supplied nodeId and issues a fresh one', async () => {
     const env = makeEnv();
     const first = await registerNode(env, { siteId: 'example.com', nodeId: 'attacker-chosen' });

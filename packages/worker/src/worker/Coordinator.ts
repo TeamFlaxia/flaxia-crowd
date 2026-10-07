@@ -78,12 +78,26 @@ interface NodeRecord {
   wasmMemoryBytes?: number;
   /** WebGPU adapter is available; required for `swarm-inference`. */
   webgpu?: boolean;
+  /** Node understands and can fetch the additive container `fileSources` field. */
+  fileSources?: boolean;
   gpuArchitecture?: string;
   maxStorageBufferBindingSize?: number;
   /** Model layer spans already cached on the node. */
   warmModels?: WarmModelRange[];
   /** Tasks handed to this node so far, used as a fairness tie-break. */
   assignedCount?: number;
+}
+
+/** True for container tasks whose bytes are fetched from a scoped reference. */
+function taskNeedsFileSources(task: TaskRecord): boolean {
+  const payload = task.payload;
+  return Boolean(
+    task.workload === 'container' &&
+      payload &&
+      typeof payload === 'object' &&
+      !Array.isArray(payload) &&
+      'fileSources' in payload,
+  );
 }
 
 /** Coordinator-side state for one swarm session, keyed by task id. */
@@ -251,6 +265,7 @@ export class Coordinator extends DurableObject<Env> {
       currentTaskId: resumeTask?.id,
       lowMemory: url.searchParams.get("lowMemory") === "true",
       siteId,
+      fileSources: url.searchParams.get("fileSources") === "true",
       webgpu,
       gpuArchitecture,
       maxStorageBufferBindingSize,
@@ -1033,6 +1048,7 @@ export class Coordinator extends DurableObject<Env> {
       for (const nodeId of remainingIdle) {
         const node = nodes.get(nodeId);
         if (!node || node.status !== "idle") continue;
+        if (taskNeedsFileSources(task) && !node.fileSources) continue;
         if (!node.capabilities.includes(task.workload as WorkloadType)) continue;
         // Never hand a heavy WASM workload to a low-memory / mobile node; the
         // model load would spike memory and get the device's process killed.

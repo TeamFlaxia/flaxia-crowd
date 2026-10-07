@@ -264,13 +264,26 @@ export interface FileConvertPayload {
 
 // --- Linux Container (container2wasm) ---
 
+export interface ContainerFileSource {
+  /** HTTPS API endpoint that streams the file after validating this ticket. */
+  url: string;
+  /** Short-lived bearer ticket; the node sends it only in Authorization. */
+  token: string;
+  /** Expected raw byte count, checked before the file is mounted. */
+  size: number;
+  /** Full SHA-256 of the expected bytes, checked before the file is mounted. */
+  sha256: string;
+}
+
 export interface ContainerPayload {
   /** Name of the WASM image to load (e.g. 'alpine-magick.wasm') */
   image: string;
   /** Command and arguments to run (e.g. ['magick', 'input.jpg', '-resize', '50%', 'output.jpg']) */
   command: string[];
-  /** Input files to mount into the container (Map of filename -> base64 content) */
-  files: Record<string, string>;
+  /** Small input files mounted inline as base64 (legacy-compatible format). */
+  files?: Record<string, string>;
+  /** Input files fetched by the node just before execution, keyed by mount name. */
+  fileSources?: Record<string, ContainerFileSource>;
   /** Optional memory limit for the WASM runtime (in MB) */
   memoryLimitMb?: number;
 }
@@ -539,6 +552,10 @@ export interface NodeConfig {
   consent: ConsentConfig;
   maxCpuLoad?: number;
   capabilities?: WorkloadType[];
+  /** Exact HTTPS origins allowed to serve executable container WASM images. */
+  containerImageOrigins?: string[];
+  /** Exact HTTPS origins from which signed container file sources may be fetched. */
+  fileSourceOrigins?: string[];
   moe?: MoENodeConfig;
   /**
    * Opt in to downloading model layer weights for swarm inference. Swarm jobs
@@ -580,6 +597,8 @@ export interface NodeRegisterRequest {
    */
   nodeId?: string;
   capabilities?: WorkloadType[];
+  /** Advertises support for the additive container fileSources payload field. */
+  fileSources?: boolean;
   deviceMemory?: number | null;
   /**
    * Measured WASM memory the device could commit, in bytes. Clamped by the

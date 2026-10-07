@@ -178,7 +178,7 @@ export function parseAllowedSites(payload: unknown): { sites?: string[]; error?:
   return { sites }
 }
 
-const app = new Hono<{ Bindings: Env }>()
+const app: Hono<{ Bindings: Env }> = new Hono<{ Bindings: Env }>()
 
 function getCoordinator(c: any) {
   const id = c.env.COORDINATOR.idFromName('global-coordinator')
@@ -209,6 +209,8 @@ app.post('/nodes/register', async (c) => {
     siteId?: string
     nodeId?: string
     capabilities?: string[]
+    /** Whether this client understands the signed container fileSources field. */
+    fileSources?: boolean
     deviceMemory?: number | null
     wasmMemoryBytes?: number
     swarm?: unknown
@@ -225,10 +227,14 @@ app.post('/nodes/register', async (c) => {
   if (body?.siteId !== undefined && (typeof body.siteId !== 'string' || body.siteId.length > MAX_SITE_ID_CHARS)) {
     return c.json({ error: 'siteId must be a string of at most 128 characters' }, 400)
   }
+  if (body?.fileSources !== undefined && typeof body.fileSources !== 'boolean') {
+    return c.json({ error: 'fileSources must be a boolean' }, 400)
+  }
 
   const capabilities = Array.isArray(body.capabilities)
     ? body.capabilities.filter((cap): cap is string => typeof cap === 'string')
     : []
+  const fileSources = body.fileSources === true
   // Node identity is server-issued, always. A client-supplied `nodeId` is
   // ignored so it cannot register (and later connect) as another live node.
   const nodeId = crypto.randomUUID()
@@ -251,6 +257,7 @@ app.post('/nodes/register', async (c) => {
     siteId: body.siteId || '',
     nodeId,
     capabilities,
+    fileSources,
     deviceMemory,
     wasmMemoryBytes,
     swarm,
@@ -292,6 +299,7 @@ app.get('/signal', async (c) => {
   url.searchParams.set('nodeId', payload.nodeId)
   url.searchParams.set('site', payload.siteId)
   url.searchParams.set('capabilities', payload.capabilities.join(','))
+  if (payload.fileSources) url.searchParams.set('fileSources', 'true')
   url.searchParams.set('lowMemory', String(payload.deviceMemory === null || payload.deviceMemory === undefined || payload.deviceMemory < 4))
   if (typeof payload.wasmMemoryBytes === 'number') {
     url.searchParams.set('wasm', String(payload.wasmMemoryBytes))

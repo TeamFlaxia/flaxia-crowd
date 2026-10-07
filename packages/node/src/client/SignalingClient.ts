@@ -12,6 +12,7 @@ import {
 } from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
+import { assertPublicUrl } from '../executor/egress-guard';
 import { probeWebGpu } from '../executor/webgpuProbe';
 import {
   buildNodeSignalProtocols,
@@ -26,6 +27,20 @@ import type { ConsentState, FlaxiaNodeController, NodeConfig, SwarmNodeCapabilit
 
 const log = (...args: unknown[]) => console.log('[flaxia-node]', ...args);
 const logError = (...args: unknown[]) => console.error('[flaxia-node]', ...args);
+
+function validatedHttpsOrigins(origins?: readonly string[]): string[] {
+  const valid = new Set<string>();
+  if (!Array.isArray(origins)) return [];
+  for (const value of origins.slice(0, 32)) {
+    try {
+      const parsed = assertPublicUrl(value);
+      if (parsed.origin === value) valid.add(parsed.origin);
+    } catch {
+      // Invalid host configuration cannot advertise or fetch file sources.
+    }
+  }
+  return [...valid];
+}
 
 export interface TaskMessage {
   type: 'task';
@@ -367,6 +382,9 @@ class SignalingClient {
       const capable = wasmMemoryBytes >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
       const requested = this.config.capabilities ?? ['ai-inference', 'image-process'];
       let capabilities = capable ? [...requested] : [];
+      if (validatedHttpsOrigins(this.config.containerImageOrigins).length === 0) {
+        capabilities = capabilities.filter((cap) => cap !== 'container');
+      }
 
       // Swarm inference additionally needs WebGPU and an explicit opt-in to
       // download multi-GB layer weights. Probe only when the host asked for it,
@@ -398,6 +416,8 @@ class SignalingClient {
           // random id and binds the token to it, so a node cannot claim another
           // node's identity (or displace a live socket).
           capabilities,
+          // Only nodes with an explicit trusted-origin list can receive file refs.
+          fileSources: validatedHttpsOrigins(this.config.fileSourceOrigins).length > 0,
           // Measured WASM memory the device could actually commit (bytes). The
           // orchestrator uses this to avoid routing heavy workloads to devices
           // that cannot run them.
@@ -549,7 +569,11 @@ class SignalingClient {
         (token: string) => {
           this.send({ type: 'progress', taskId: data.taskId, token, attemptId });
         },
-        { maxCpuLoad: this.config.maxCpuLoad },
+        {
+          maxCpuLoad: this.config.maxCpuLoad,
+          fileSourceOrigins: validatedHttpsOrigins(this.config.fileSourceOrigins),
+          containerImageOrigins: validatedHttpsOrigins(this.config.containerImageOrigins),
+        },
       );
       this.send({ type: 'result', taskId: data.taskId, payload: result, attemptId });
       log(
