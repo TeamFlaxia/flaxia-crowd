@@ -174,19 +174,31 @@ async function analyzeSentiment(c: any, postId: string, text: string): Promise<v
 
 **ファイル**: `functions/api/[[route]].ts`
 
-`POST /api/crowd/webhook` を Hono ルーターに追加：
+`POST /api/crowd/webhook` を Hono ルーターに追加（**署名検証は必須**。SDK の `verifyCrowdWebhook` を使う。worker は terminal 配信の全文を `"<timestamp>.<nonce>.<body>"` の HMAC SHA-256 で署名する。secret が未設定の worker は callbackUrl 付きタスクを submit 時点で拒否するため、届く配信には必ず署名が付いている）：
 
 ```typescript
+import { readCrowdWebhookHeaders, verifyCrowdWebhook, createMemoryReplayGuard } from '@flaxia/sdk'
+
+const replayGuard = createMemoryReplayGuard() // 単一インスタンスの host 用。複数インスタンスでは D1/KV 等の共有ストアで同じ契約の実装を差し替える
+
 app.post('/api/crowd/webhook', async (c) => {
-  const { taskId, status, result, error } = await c.req.json()
-  if (!taskId) return c.text('Bad Request', 400)
+  const body = await c.req.text() // raw 文字列のまま。JSON.parse→再シリアライズすると署名が壊れる
+  const { signature, timestamp, nonce } = readCrowdWebhookHeaders(c.req.raw.headers)
+  const verified = await verifyCrowdWebhook({
+    secret: c.env.WEBHOOK_SIGNING_SECRET, // worker（orchestrator）と同じ環境変数
+    body, signature, timestamp, nonce,
+    replayGuard, // 300 秒の時間窓内でも nonce の使い回しは 1 回だけ通る
+  })
+  if (!verified.ok) return c.text('Unauthorized', 401) // verified.reason はログ用。認可の分岐に使わない
+
+  const { taskId, status } = verified.payload
 
   // taskId から postId を引く（後述の補完テーブルが必要）
   // 現状は taskId→postId のマッピングがないので、
   // posts テーブルの sentiment_task_id カラムで管理する
 
-  if (status === 'done' && result?.output?.[0]) {
-    const output = result.output[0]
+  if (status === 'done' && verified.payload.result?.output?.[0]) {
+    const output = verified.payload.result.output[0]
     const labelScoreMap = {
       very_negative: 0.0, negative: 0.25,
       neutral: 0.5, positive: 0.75, very_positive: 1.0,
@@ -201,6 +213,8 @@ app.post('/api/crowd/webhook', async (c) => {
   return c.json({ received: true })
 })
 ```
+
+検証が通らない配信（他テナントのフォワード先、時間窓外の再送、偽造）は**本文を解析せずに** 401 で返す。無署名レシーバは `taskId` を知る誰でも sentiment スコアを書き換えられるため、この検証が唯一のゲートになる（#13/#16 で閉じた契約の受信側半分）。
 
 **課題**: 現状 `taskId → postId` のマッピングがない。以下のいずれかで解決：
 
@@ -219,6 +233,8 @@ ALTER TABLE posts ADD COLUMN sentiment_task_id TEXT;
 ### 6. `flaxia` 側 — `wrangler.toml` に BASE_URL の確認
 
 `BASE_URL` 環境変数が `https://flaxia.app` に設定されていることを確認。
+
+`WEBHOOK_SIGNING_SECRET` も worker（orchestrator）と同一の値に設定しておく。未設定なら worker は callbackUrl 付きの submit を拒否するので、この環境変数が受信側の検証鍵も兼ねる（32 バイト以上のランダム値を KV/Secrets へ）。
 
 ---
 
