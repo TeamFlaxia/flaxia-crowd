@@ -20,7 +20,25 @@ const defaultOrchestrator = window.location.hostname === 'localhost' || window.l
   ? 'http://localhost:8787'
   : 'https://flaxia-worker.remydre8.workers.dev';
 
-const savedOrchestrator = localStorage.getItem('flaxia_orchestrator_url');
+// The localStorage override must not point node signaling at an arbitrary origin:
+// any same-origin script can write localStorage, and the node sends its
+// registration (capabilities) and every task result to whatever URL it is given
+// here — while accepting whatever tasks that origin sends back. Only this app's
+// own default and a local dev orchestrator pass; anything else falls back.
+function safeOrchestratorOverride(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const u = new URL(value);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') return u.origin;
+    if (u.origin === defaultOrchestrator) return defaultOrchestrator;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+const savedOrchestrator = safeOrchestratorOverride(localStorage.getItem('flaxia_orchestrator_url'));
 const displayOrchestratorUrl = savedOrchestrator || defaultOrchestrator;
 // Node signaling may connect directly to the orchestrator. Authenticated task
 // API calls are intentionally separate and always go through same-origin
