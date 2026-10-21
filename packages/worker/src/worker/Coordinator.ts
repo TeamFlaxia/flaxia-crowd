@@ -111,6 +111,7 @@ interface SwarmRecord {
   ready: string[];
   plan?: SwarmSessionPlan;
   started?: boolean;
+  peerReadiness: Record<string, boolean>;
 }
 
 /**
@@ -350,7 +351,7 @@ export class Coordinator extends DurableObject<Env> {
       }
 
       if (data.type === "swarm-ready") {
-        await this.handleSwarmReady(nodeId, data.sessionId);
+        await this.handleSwarmReady(nodeId, data.sessionId, data.peerReady === true);
         return;
       }
 
@@ -594,7 +595,7 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
-  private async handleSwarmReady(nodeId: string, sessionId: unknown) {
+  private async handleSwarmReady(nodeId: string, sessionId: unknown, peerReady: boolean) {
     const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     const taskId = node?.currentTaskId;
     if (!taskId) return;
@@ -605,10 +606,20 @@ export class Coordinator extends DurableObject<Env> {
     if (!swarm.members.some((m) => m.nodeId === nodeId)) return;
 
     if (!swarm.ready.includes(nodeId)) swarm.ready.push(nodeId);
+    swarm.peerReadiness[nodeId] = peerReady;
     if (swarm.ready.length >= swarm.members.length) {
       swarm.started = true;
       await this.ctx.storage.put(`swarm:${taskId}`, swarm);
-      this.sendToNode(swarm.hostNodeId, { type: "swarm-start", sessionId: swarm.sessionId, taskId });
+      const mode = swarm.members.every((member) => swarm.peerReadiness[member.nodeId] === true) ? "peer" : "relay";
+      for (const member of swarm.members) {
+        this.sendAttemptToNode(member.nodeId, {
+          type: "swarm-transport",
+          sessionId: swarm.sessionId,
+          taskId,
+          mode,
+        }, swarm.attemptId);
+      }
+      this.sendAttemptToNode(swarm.hostNodeId, { type: "swarm-start", sessionId: swarm.sessionId, taskId }, swarm.attemptId);
     } else {
       await this.ctx.storage.put(`swarm:${taskId}`, swarm);
     }
@@ -1275,6 +1286,7 @@ export class Coordinator extends DurableObject<Env> {
       hostNodeId: host.id,
       members,
       ready: [],
+      peerReadiness: {},
     };
     await this.ctx.storage.put(`swarm:${task.id}`, record);
 
