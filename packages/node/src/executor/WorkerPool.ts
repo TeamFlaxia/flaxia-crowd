@@ -224,6 +224,12 @@ export class WorkerPool {
     return this.postToActive({ type: 'swarm-frame', frame }, [frame]);
   }
 
+  /** Pause or resume a normal workload's asynchronous token sink. */
+  setTokenFlow(taskId: string, paused: boolean): boolean {
+    if (this.active?.id !== taskId) return false;
+    return this.postToActive({ type: 'token-flow', paused });
+  }
+
   /**
    * The coordinator settled this task elsewhere (timeout, a peer failed, the
    * plan was rejected): stop it.
