@@ -14,6 +14,8 @@ const MAX_PROBE_STEPS = 4096;
 /** A bounded probe result is a known lower bound, not the engine maximum. */
 interface ProbeEntry {
   bytes: number;
+  sampledAt: number;
+  measured: boolean;
 }
 let cachedProbe: ProbeEntry | null = null;
 let probeRuns = 0;
@@ -47,11 +49,12 @@ export function probeMaxWasmMemoryBytes(
   if (cachedProbe) return cachedProbe.bytes;
 
   probeRuns++;
+  const sampledAt = Date.now();
   let memory: WebAssembly.Memory;
   try {
     memory = new WebAssembly.Memory({ initial: 0 });
   } catch {
-    cachedProbe = { bytes: 0 };
+    cachedProbe = { bytes: 0, sampledAt, measured: false };
     return 0;
   }
 
@@ -69,7 +72,7 @@ export function probeMaxWasmMemoryBytes(
   // Drop the last local reference promptly; the runtime may reclaim committed
   // pages after GC, but they are never retained by the node.
   memory = undefined as unknown as WebAssembly.Memory;
-  cachedProbe = { bytes: grown };
+  cachedProbe = { bytes: grown, sampledAt, measured: true };
   return grown;
 }
 
@@ -81,6 +84,15 @@ export function probeMaxWasmMemoryBytes(
 export function getWasmMemoryBytes(): number {
   if (!cachedProbe) return probeMaxWasmMemoryBytes();
   return cachedProbe.bytes;
+}
+
+/** The one-shot lower-bound observation, including when the runtime could not create WASM memory. */
+export function getWasmMemoryProbeObservation(): { bytes: number | null; sampledAt: number | null } {
+  if (!cachedProbe) probeMaxWasmMemoryBytes();
+  return {
+    bytes: cachedProbe?.measured ? cachedProbe.bytes : null,
+    sampledAt: cachedProbe?.sampledAt ?? null,
+  };
 }
 
 /**
