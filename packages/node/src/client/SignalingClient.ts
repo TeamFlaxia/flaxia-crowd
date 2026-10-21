@@ -14,6 +14,7 @@ import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
 import { assertPublicUrl } from '../executor/egress-guard';
 import { probeWebGpu } from '../executor/webgpuProbe';
+import { isCurrentSwarmPeerSignal, SwarmPeerTransport } from '../swarm/peer-transport';
 import {
   buildNodeSignalProtocols,
   buildWsUrl,
@@ -88,6 +89,8 @@ class SignalingClient {
    * `inboundKey`, so one member cannot inject or rewrite a frame as another hop.
    */
   private swarmHopKeys = new Map<string, { inboundKey?: string; outboundKey?: string; chainLength: number }>();
+  private swarmPeerTransports = new Map<string, SwarmPeerTransport>();
+  private swarmPeerMetadata = new Map<string, { taskId: string; attemptId: string; peers: string[] }>();
   /** Frame handling is serialized: HMAC verification and signing are async. */
   private swarmInboundChain: Promise<void> = Promise.resolve();
   private swarmOutboundChain: Promise<void> = Promise.resolve();
@@ -99,8 +102,75 @@ class SignalingClient {
    */
   private cachedToken: NodeToken | null = null;
 
+  private receiveSwarmEnvelope(buffer: ArrayBuffer) {
+    const envelope = decodeSwarmEnvelope(buffer);
+    if (!envelope || ![...this.swarmSessions.values()].includes(envelope.sessionId)) return;
+    this.swarmInboundChain = this.swarmInboundChain
+      .then(async () => {
+        const keys = this.swarmHopKeys.get(envelope.sessionId);
+        if (keys && keys.chainLength > 1) {
+          if (!envelope.mac || !keys.inboundKey) return;
+          const valid = await verifySwarmEnvelope(
+            keys.inboundKey,
+            envelope.sessionId,
+            envelope.frame,
+            envelope.mac,
+          );
+          if (!valid) {
+            logError(`swarm frame rejected: bad hop MAC sessionId=${envelope.sessionId}`);
+            return;
+          }
+        }
+        this.workerPool.sendFrame(envelope.frame);
+      })
+      .catch(() => {});
+  }
+
+  private ensureSwarmPeerTransport(data: Record<string, unknown>) {
+    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+    const taskId = typeof data.taskId === 'string' ? data.taskId : '';
+    const attemptId = typeof data.attemptId === 'string' ? data.attemptId : '';
+    if (!sessionId || !taskId || !attemptId || this.swarmPeerTransports.has(sessionId)) return;
+    const previousNodeId = typeof data.previousNodeId === 'string' ? data.previousNodeId : undefined;
+    const nextNodeId = typeof data.nextNodeId === 'string' ? data.nextNodeId : undefined;
+    const peers = [...new Set([previousNodeId, nextNodeId].filter((id): id is string => !!id))];
+    this.swarmPeerMetadata.set(sessionId, { taskId, attemptId, peers });
+    const transport = new SwarmPeerTransport({
+      sessionId,
+      taskId,
+      attemptId,
+      nodeId: this.nodeId,
+      previousNodeId,
+      nextNodeId,
+      onSignal: (toNodeId, signal) => this.send({
+        type: 'swarm-peer-signal', taskId, sessionId, attemptId, toNodeId, signal,
+      }),
+      onFrame: (frame) => this.receiveSwarmEnvelope(frame),
+      onFailure: (error) => this.send({
+        type: 'swarm-error', taskId, sessionId, attemptId, error: error.message,
+      }),
+    });
+    this.swarmPeerTransports.set(sessionId, transport);
+    void transport.start();
+  }
+
+  private handleSwarmPeerSignal(data: Record<string, unknown>) {
+    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+    const metadata = this.swarmPeerMetadata.get(sessionId);
+    const transport = this.swarmPeerTransports.get(sessionId);
+    if (!metadata || !transport || !isCurrentSwarmPeerSignal(data, {
+      ...metadata,
+      sessionId,
+      nodeId: this.nodeId,
+    })) return;
+    void transport.handleSignal(data.fromNodeId as string, data.signal);
+  }
+
   private retireSwarmSession(sessionId: string) {
     this.swarmHopKeys.delete(sessionId);
+    this.swarmPeerTransports.get(sessionId)?.close();
+    this.swarmPeerTransports.delete(sessionId);
+    this.swarmPeerMetadata.delete(sessionId);
     this.retiredSwarmSessions.add(sessionId);
     if (this.retiredSwarmSessions.size > 64) {
       this.retiredSwarmSessions.delete(this.retiredSwarmSessions.values().next().value!);
@@ -164,31 +234,7 @@ class SignalingClient {
       // Binary frames are swarm hidden states; hand them to the running worker
       // after checking their session envelope.
       if (typeof event.data !== 'string') {
-        const envelope = decodeSwarmEnvelope(event.data as ArrayBuffer);
-        if (!envelope || ![...this.swarmSessions.values()].includes(envelope.sessionId)) return;
-        // Keep arrival order: verification is async and two frames must never
-        // reach the engine out of order.
-        this.swarmInboundChain = this.swarmInboundChain
-          .then(async () => {
-            const keys = this.swarmHopKeys.get(envelope.sessionId);
-            if (keys && keys.chainLength > 1) {
-              // Fail closed: once a session has hop keys, an unsigned or
-              // wrongly signed frame is dropped instead of being executed.
-              if (!envelope.mac || !keys.inboundKey) return;
-              const valid = await verifySwarmEnvelope(
-                keys.inboundKey,
-                envelope.sessionId,
-                envelope.frame,
-                envelope.mac,
-              );
-              if (!valid) {
-                logError(`swarm frame rejected: bad hop MAC sessionId=${envelope.sessionId}`);
-                return;
-              }
-            }
-            this.workerPool.sendFrame(envelope.frame);
-          })
-          .catch(() => {});
+        this.receiveSwarmEnvelope(event.data as ArrayBuffer);
         return;
       }
 
@@ -233,6 +279,7 @@ class SignalingClient {
         if (!taskId) return;
         if (typeof data.sessionId !== 'string' || this.retiredSwarmSessions.has(data.sessionId)) return;
         if (data.type === 'swarm-slice') {
+          this.ensureSwarmPeerTransport(data);
           this.swarmHopKeys.set(data.sessionId, {
             inboundKey: typeof data.inboundKey === 'string' ? data.inboundKey : undefined,
             outboundKey: typeof data.outboundKey === 'string' ? data.outboundKey : undefined,
@@ -249,6 +296,22 @@ class SignalingClient {
           return;
         }
         void this.startSwarm(taskId, data);
+        return;
+      }
+      if (data.type === 'swarm-peer-signal') {
+        this.handleSwarmPeerSignal(data);
+        return;
+      }
+      if (data.type === 'swarm-transport') {
+        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+        const metadata = this.swarmPeerMetadata.get(sessionId);
+        const transport = this.swarmPeerTransports.get(sessionId);
+        if (
+          metadata && transport &&
+          data.taskId === metadata.taskId &&
+          data.attemptId === metadata.attemptId &&
+          (data.mode === 'peer' || data.mode === 'relay')
+        ) transport.selectMode(data.mode);
         return;
       }
       if (data.type === 'swarm-start') {
@@ -323,6 +386,9 @@ class SignalingClient {
       this.ws?.close();
     } catch {}
     this.ws = null;
+    for (const transport of this.swarmPeerTransports.values()) transport.close();
+    this.swarmPeerTransports.clear();
+    this.swarmPeerMetadata.clear();
     try {
       delete (window as any)[INIT_FLAG];
     } catch {}
@@ -483,10 +549,14 @@ class SignalingClient {
             logError(`swarm frame not sent: no hop key sessionId=${sessionId}`);
             return;
           }
-          this.sendBinary(await signSwarmEnvelope(keys.outboundKey, sessionId, frame));
+          const envelope = await signSwarmEnvelope(keys.outboundKey, sessionId, frame);
+          const transport = this.swarmPeerTransports.get(sessionId);
+          if (!transport || !await transport.sendFrame(envelope)) this.sendBinary(envelope);
           return;
         }
-        this.sendBinary(encodeSwarmEnvelope(sessionId, frame));
+        const envelope = encodeSwarmEnvelope(sessionId, frame);
+        const transport = this.swarmPeerTransports.get(sessionId);
+        if (!transport || !await transport.sendFrame(envelope)) this.sendBinary(envelope);
       })
       .catch(() => {});
   }
@@ -521,11 +591,20 @@ class SignalingClient {
           // Attempt ids are transport metadata owned by this client, so stamp
           // them onto the engine's control messages (swarm-token / swarm-done):
           // the coordinator only accepts session messages from the host attempt.
-          onMessage: (message) => this.send(
-            message && typeof message === 'object' && !('attemptId' in message)
+          onMessage: (message) => {
+            const outgoing = message && typeof message === 'object' && !('attemptId' in message)
               ? { ...message, attemptId }
-              : (message as Record<string, unknown>),
-          ),
+              : (message as Record<string, unknown>);
+            if (outgoing?.type === 'swarm-ready') {
+              const transport = this.swarmPeerTransports.get(sessionId);
+              void (async () => {
+                const peerReady = transport ? await transport.waitUntilReady() : false;
+                this.send({ ...outgoing, peerReady });
+              })();
+              return;
+            }
+            this.send(outgoing);
+          },
         },
       );
       if (!this.abortedTasks.delete(sessionId)) {
