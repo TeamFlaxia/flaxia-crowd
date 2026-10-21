@@ -343,6 +343,8 @@ export interface SwarmSliceMessage {
   type: 'swarm-slice';
   sessionId: string;
   taskId: string;
+  /** Coordinator-generated attempt that fences peer signaling for this session. */
+  attemptId?: string;
   /** Model id, so a worker can resolve and load its layer slice. */
   model: string;
   /** Task timeout in ms, so the worker knows its own deadline. */
@@ -350,6 +352,9 @@ export interface SwarmSliceMessage {
   /** This node's chain position (0 = host). */
   index: number;
   chainLength: number;
+  /** Adjacent ring peers used by the optional WebRTC data path. */
+  previousNodeId?: string;
+  nextNodeId?: string;
   role: SwarmRole;
   slice: SwarmSlice;
   /**
@@ -358,6 +363,84 @@ export interface SwarmSliceMessage {
    */
   inboundKey?: string;
   outboundKey?: string;
+}
+
+export type SwarmPeerSignal =
+  | { kind: 'description'; description: { type: 'offer' | 'answer'; sdp: string } }
+  | {
+      kind: 'candidate';
+      candidate: {
+        candidate: string;
+        sdpMid?: string | null;
+        sdpMLineIndex?: number | null;
+        usernameFragment?: string | null;
+      } | null;
+    };
+
+/** A bounded, coordinator-routed WebRTC signaling envelope. */
+export interface SwarmPeerSignalMessage {
+  type: 'swarm-peer-signal';
+  taskId: string;
+  sessionId: string;
+  attemptId: string;
+  toNodeId: string;
+  /** Present only on signals relayed by the coordinator. */
+  fromNodeId?: string;
+  signal: SwarmPeerSignal;
+}
+
+export const MAX_SWARM_SDP_CHARS = 24 * 1024;
+export const MAX_SWARM_ICE_CANDIDATE_CHARS = 4096;
+export const MAX_SWARM_SIGNAL_BYTES = 32 * 1024;
+
+export function isSwarmPeerSignal(value: unknown): value is SwarmPeerSignal {
+  if (!isRecord(value)) return false;
+  if (value.kind === 'description') {
+    const description = value.description;
+    return (
+      isRecord(description) &&
+      (description.type === 'offer' || description.type === 'answer') &&
+      typeof description.sdp === 'string' &&
+      description.sdp.length > 0 &&
+      description.sdp.length <= MAX_SWARM_SDP_CHARS
+    );
+  }
+  if (value.kind === 'candidate') {
+    const candidate = value.candidate;
+    if (candidate === null) return true;
+    return (
+      isRecord(candidate) &&
+      typeof candidate.candidate === 'string' &&
+      candidate.candidate.length > 0 &&
+      candidate.candidate.length <= MAX_SWARM_ICE_CANDIDATE_CHARS &&
+      (candidate.sdpMid === undefined || candidate.sdpMid === null ||
+        (typeof candidate.sdpMid === 'string' && candidate.sdpMid.length <= 128)) &&
+      (candidate.sdpMLineIndex === undefined || candidate.sdpMLineIndex === null ||
+        (typeof candidate.sdpMLineIndex === 'number' && Number.isInteger(candidate.sdpMLineIndex) &&
+          candidate.sdpMLineIndex >= 0 && candidate.sdpMLineIndex <= 255)) &&
+      (candidate.usernameFragment === undefined || candidate.usernameFragment === null ||
+        (typeof candidate.usernameFragment === 'string' && candidate.usernameFragment.length <= 256))
+    );
+  }
+  return false;
+}
+
+export function isSwarmPeerSignalMessage(value: unknown): value is SwarmPeerSignalMessage {
+  if (!isRecord(value) || value.type !== 'swarm-peer-signal') return false;
+  if (!isSwarmPeerSignal(value.signal)) return false;
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value.signal)).byteLength > MAX_SWARM_SIGNAL_BYTES) return false;
+  } catch {
+    return false;
+  }
+  return (
+    typeof value.taskId === 'string' && value.taskId.length > 0 && value.taskId.length <= 128 &&
+    typeof value.sessionId === 'string' && value.sessionId.length > 0 && value.sessionId.length <= 128 &&
+    typeof value.attemptId === 'string' && value.attemptId.length > 0 && value.attemptId.length <= 128 &&
+    typeof value.toNodeId === 'string' && value.toNodeId.length > 0 && value.toNodeId.length <= 128 &&
+    (value.fromNodeId === undefined ||
+      (typeof value.fromNodeId === 'string' && value.fromNodeId.length > 0 && value.fromNodeId.length <= 128))
+  );
 }
 
 /** Sent to the host once every member has loaded its slice. */
@@ -397,7 +480,8 @@ export type SwarmNodeMessage =
   | SwarmPlanMessage
   | SwarmTokenMessage
   | SwarmDoneMessage
-  | SwarmErrorMessage;
+  | SwarmErrorMessage
+  | SwarmPeerSignalMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -476,6 +560,9 @@ export function isSwarmSliceMessage(value: unknown): value is SwarmSliceMessage 
   if (value.slice.hasEmbed !== (value.index === 0)) return false;
   if (value.slice.hasHead !== (value.index === 0)) return false;
   if (!isFrameKey(value.inboundKey) || !isFrameKey(value.outboundKey)) return false;
+  if (value.attemptId !== undefined && (typeof value.attemptId !== 'string' || !value.attemptId || value.attemptId.length > 128)) return false;
+  if (value.previousNodeId !== undefined && (typeof value.previousNodeId !== 'string' || !value.previousNodeId || value.previousNodeId.length > 128)) return false;
+  if (value.nextNodeId !== undefined && (typeof value.nextNodeId !== 'string' || !value.nextNodeId || value.nextNodeId.length > 128)) return false;
   return true;
 }
 
@@ -537,6 +624,8 @@ export function isSwarmNodeMessage(value: unknown): value is SwarmNodeMessage {
       return typeof value.token === 'string';
     case 'swarm-error':
       return typeof value.taskId === 'string' && value.taskId.length > 0 && typeof value.error === 'string';
+    case 'swarm-peer-signal':
+      return isSwarmPeerSignalMessage(value);
     default:
       return false;
   }
