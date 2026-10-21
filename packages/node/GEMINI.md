@@ -19,6 +19,7 @@
 3. `docs/03-worker-executor.md` — WebWorker処理実行
 4. `docs/04-workloads.md` — ワークロード別実装
 5. `docs/05-cpu-throttle.md` — CPU負荷制限
+6. `docs/06-resource-telemetry.md` — リソース計測とメモリ予算
 
 ## ディレクトリ構成
 
@@ -33,7 +34,8 @@ packages/node/
 │   ├── 02-node-client.md
 │   ├── 03-worker-executor.md
 │   ├── 04-workloads.md
-│   └── 05-cpu-throttle.md
+│   ├── 05-cpu-throttle.md
+│   └── 06-resource-telemetry.md
 └── src/
     ├── index.ts
     ├── consent/
