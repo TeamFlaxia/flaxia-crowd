@@ -1,5 +1,10 @@
 import { isSwarmPeerSignalMessage, MAX_SWARM_ENVELOPE_BYTES } from '@flaxia/sdk';
-import type { SwarmPeerSignal, SwarmPeerSignalMessage } from '@flaxia/sdk';
+import type { PeerQualityValues, SwarmPeerQualityReport, SwarmPeerSignal, SwarmPeerSignalMessage } from '@flaxia/sdk';
+import {
+  bytesPerSecondToMbps,
+  createSwarmPeerQualityReport,
+  SWARM_PEER_QUALITY_SAMPLE_INTERVAL_MS,
+} from './peer-quality';
 
 export const SWARM_PEER_CONNECT_TIMEOUT_MS = 5000;
 export const SWARM_PEER_FRAME_CHUNK_BYTES = 16 * 1024;
@@ -11,7 +16,20 @@ const PACKET_HEADER_BYTES = 16;
 const MAX_INCOMPLETE_FRAMES = 2;
 const MAX_PENDING_CANDIDATES = 64;
 const CHANNEL_NAME = 'flaxia-swarm-v1';
+const QUALITY_PROBE_TYPE = 'flaxia-peer-quality-v1';
+const QUALITY_PROBE_MAX_CHARS = 128;
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+
+type PeerQualityMetricName = keyof PeerQualityValues;
+type MutableQualitySamples = Record<PeerQualityMetricName, number[]>;
+interface PeerQualityHistory {
+  webRtc: MutableQualitySamples;
+  application: MutableQualitySamples;
+}
+
+function emptyQualitySamples(): MutableQualitySamples {
+  return { rttMs: [], jitterMs: [], sendMbps: [], receiveMbps: [] };
+}
 
 interface PeerChunk {
   messageId: number;
@@ -157,6 +175,18 @@ interface PeerState {
   channel: RTCDataChannel | null;
   remoteDescriptionSet: boolean;
   pendingCandidates: RTCIceCandidateInit[];
+  quality: PeerQualityHistory;
+  applicationBytesSent: number;
+  applicationBytesReceived: number;
+  lastApplicationSampleAt?: number;
+  lastApplicationBytesSent: number;
+  lastApplicationBytesReceived: number;
+  lastRtcSampleAt?: number;
+  lastRtcBytesSent?: number;
+  lastRtcBytesReceived?: number;
+  pendingProbe?: { id: number; sentAt: number };
+  nextProbeId: number;
+  lastApplicationRttMs?: number;
 }
 
 export interface SwarmPeerTransportOptions {
@@ -168,10 +198,12 @@ export interface SwarmPeerTransportOptions {
   nextNodeId?: string;
   onSignal: (toNodeId: string, signal: SwarmPeerSignal) => void;
   onFrame: (frame: ArrayBuffer) => void;
+  onQuality?: (reports: SwarmPeerQualityReport[]) => void;
   onFailure: (error: Error) => void;
   createPeerConnection?: (configuration: RTCConfiguration) => RTCPeerConnection;
   connectTimeoutMs?: number;
   now?: () => number;
+  monotonicNow?: () => number;
 };
 
 /**
@@ -189,6 +221,8 @@ export class SwarmPeerTransport {
   private readyPromise: Promise<boolean> | null = null;
   private readyResolve: ((ready: boolean) => void) | null = null;
   private readyTimer: ReturnType<typeof setTimeout> | null = null;
+  private qualityTimer: ReturnType<typeof setInterval> | null = null;
+  private samplingQuality = false;
 
   constructor(private readonly options: SwarmPeerTransportOptions) {}
 
@@ -208,7 +242,19 @@ export class SwarmPeerTransport {
       for (const nodeId of neighborIds) {
         const create = this.options.createPeerConnection ?? ((configuration) => new RTCPeerConnection(configuration));
         const connection = create({ iceServers: DEFAULT_ICE_SERVERS });
-        const state: PeerState = { nodeId, connection, channel: null, remoteDescriptionSet: false, pendingCandidates: [] };
+        const state: PeerState = {
+          nodeId,
+          connection,
+          channel: null,
+          remoteDescriptionSet: false,
+          pendingCandidates: [],
+          quality: { webRtc: emptyQualitySamples(), application: emptyQualitySamples() },
+          applicationBytesSent: 0,
+          applicationBytesReceived: 0,
+          lastApplicationBytesSent: 0,
+          lastApplicationBytesReceived: 0,
+          nextProbeId: 1,
+        };
         this.peers.set(nodeId, state);
         connection.onicecandidate = (event) => {
           const candidate = event.candidate;
@@ -289,10 +335,12 @@ export class SwarmPeerTransport {
     if (this.closed || this.mode !== 'undecided') return;
     this.mode = mode;
     if (mode === 'relay') {
+      this.stopQualitySampling();
       this.closePeerConnections();
       return;
     }
     if (!this.allPeersOpen()) this.unavailable(new Error('peer mode selected without every data channel open'));
+    else this.startQualitySampling();
   }
 
   async sendFrame(frame: ArrayBuffer): Promise<boolean> {
@@ -311,6 +359,8 @@ export class SwarmPeerTransport {
         if (channel.readyState !== 'open') throw new Error('swarm peer data channel closed while sending');
         channel.send(packet);
       }
+      const peer = nextId ? this.peers.get(nextId) : undefined;
+      if (peer) peer.applicationBytesSent += frame.byteLength;
       return true;
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error(String(error));
@@ -322,6 +372,7 @@ export class SwarmPeerTransport {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stopQualitySampling();
     this.resolveReady(false);
     this.closePeerConnections();
     this.reassembler.clear();
@@ -337,9 +388,16 @@ export class SwarmPeerTransport {
     channel.bufferedAmountLowThreshold = MAX_SWARM_PEER_BUFFERED_BYTES / 2;
     channel.onopen = () => this.resolveReadyIfOpen();
     channel.onmessage = (event) => {
+      if (typeof event.data === 'string') {
+        this.handleQualityProbe(peer, event.data);
+        return;
+      }
       if (peer.nodeId !== this.options.previousNodeId || !(event.data instanceof ArrayBuffer)) return;
       const frame = this.reassembler.accept(event.data, this.options.now?.());
-      if (frame) this.options.onFrame(frame);
+      if (frame) {
+        peer.applicationBytesReceived += frame.byteLength;
+        this.options.onFrame(frame);
+      }
     };
     channel.onclose = () => this.unavailable(new Error('swarm peer data channel closed'));
     channel.onerror = () => this.unavailable(new Error('swarm peer data channel failed'));
@@ -367,6 +425,7 @@ export class SwarmPeerTransport {
     if (this.closed) return;
     if (!this.failed) {
       this.failed = true;
+      this.stopQualitySampling();
       this.resolveReady(false);
       if (this.mode === 'peer') this.options.onFailure(error);
     }
@@ -391,11 +450,156 @@ export class SwarmPeerTransport {
   }
 
   private closePeerConnections() {
+    this.stopQualitySampling();
     for (const peer of this.peers.values()) {
       peer.channel?.close();
       peer.connection.close();
     }
     this.peers.clear();
+  }
+
+  private startQualitySampling() {
+    if (this.qualityTimer || !this.options.onQuality) return;
+    void this.samplePeerQuality();
+    this.qualityTimer = setInterval(() => void this.samplePeerQuality(), SWARM_PEER_QUALITY_SAMPLE_INTERVAL_MS);
+  }
+
+  private stopQualitySampling() {
+    if (this.qualityTimer) clearInterval(this.qualityTimer);
+    this.qualityTimer = null;
+    for (const peer of this.peers.values()) peer.pendingProbe = undefined;
+  }
+
+  private wallNow(): number {
+    return this.options.now?.() ?? Date.now();
+  }
+
+  private monotonicNow(): number {
+    return this.options.monotonicNow?.() ?? (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  }
+
+  private recordQuality(peer: PeerState, source: 'webRtc' | 'application', name: PeerQualityMetricName, value: number) {
+    if (!Number.isFinite(value) || value < 0) return;
+    const samples = peer.quality[source][name];
+    samples.push(value);
+    if (samples.length > 5) samples.splice(0, samples.length - 5);
+  }
+
+  private sendQualityProbe(peer: PeerState) {
+    const channel = peer.channel;
+    if (peer.pendingProbe && this.monotonicNow() - peer.pendingProbe.sentAt > SWARM_PEER_QUALITY_SAMPLE_INTERVAL_MS * 2) {
+      peer.pendingProbe = undefined;
+    }
+    if (!channel || channel.readyState !== 'open' || channel.bufferedAmount > MAX_SWARM_PEER_BUFFERED_BYTES || peer.pendingProbe) return;
+    const id = peer.nextProbeId++;
+    peer.pendingProbe = { id, sentAt: this.monotonicNow() };
+    try {
+      channel.send(JSON.stringify({ type: QUALITY_PROBE_TYPE, kind: 'ping', id }));
+    } catch {
+      peer.pendingProbe = undefined;
+    }
+  }
+
+  private handleQualityProbe(peer: PeerState, data: string) {
+    if (data.length > QUALITY_PROBE_MAX_CHARS) return;
+    let message: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(data);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+      message = parsed as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    if (message.type !== QUALITY_PROBE_TYPE || !Number.isSafeInteger(message.id) || (message.id as number) < 1) return;
+    if (message.kind === 'ping') {
+      if (peer.channel?.readyState !== 'open' || peer.channel.bufferedAmount > MAX_SWARM_PEER_BUFFERED_BYTES) return;
+      try { peer.channel.send(JSON.stringify({ type: QUALITY_PROBE_TYPE, kind: 'pong', id: message.id })); } catch {}
+      return;
+    }
+    const pending = peer.pendingProbe;
+    if (message.kind !== 'pong' || !pending || pending.id !== message.id) return;
+    peer.pendingProbe = undefined;
+    const rttMs = Math.max(0, this.monotonicNow() - pending.sentAt);
+    this.recordQuality(peer, 'application', 'rttMs', rttMs);
+    if (peer.lastApplicationRttMs !== undefined) {
+      this.recordQuality(peer, 'application', 'jitterMs', Math.abs(rttMs - peer.lastApplicationRttMs));
+    }
+    peer.lastApplicationRttMs = rttMs;
+  }
+
+  private async samplePeerQuality() {
+    if (this.closed || this.failed || this.mode !== 'peer' || !this.options.onQuality || this.samplingQuality) return;
+    this.samplingQuality = true;
+    try {
+      const sampledAt = this.wallNow();
+      const reports: SwarmPeerQualityReport[] = [];
+      for (const peer of this.peers.values()) {
+        if (peer.channel?.readyState !== 'open') continue;
+        this.sendQualityProbe(peer);
+        const monotonicAt = this.monotonicNow();
+        await this.sampleWebRtc(peer, monotonicAt);
+        if (peer.lastApplicationSampleAt !== undefined) {
+          const elapsedMs = monotonicAt - peer.lastApplicationSampleAt;
+          const sentRate = bytesPerSecondToMbps(peer.applicationBytesSent - peer.lastApplicationBytesSent, elapsedMs);
+          const receivedRate = bytesPerSecondToMbps(peer.applicationBytesReceived - peer.lastApplicationBytesReceived, elapsedMs);
+          if (sentRate !== null) this.recordQuality(peer, 'application', 'sendMbps', sentRate);
+          if (receivedRate !== null) this.recordQuality(peer, 'application', 'receiveMbps', receivedRate);
+        }
+        peer.lastApplicationSampleAt = monotonicAt;
+        peer.lastApplicationBytesSent = peer.applicationBytesSent;
+        peer.lastApplicationBytesReceived = peer.applicationBytesReceived;
+        reports.push(createSwarmPeerQualityReport(peer.nodeId, sampledAt, peer.quality.webRtc, peer.quality.application));
+      }
+      if (reports.length) this.options.onQuality(reports.slice(0, 2));
+    } finally {
+      this.samplingQuality = false;
+    }
+  }
+
+  private async sampleWebRtc(peer: PeerState, sampledAt: number) {
+    try {
+      const report = await peer.connection.getStats();
+      const stats: Array<Record<string, unknown>> = [];
+      report.forEach((entry) => stats.push(entry as unknown as Record<string, unknown>));
+      const candidates = stats.filter((entry) => entry.type === 'candidate-pair' && entry.state === 'succeeded');
+      const selectedPair = candidates.find((entry) => entry.selected === true) ??
+        candidates.find((entry) => entry.nominated === true) ?? candidates[0];
+      const rtt = selectedPair?.currentRoundTripTime;
+      if (typeof rtt === 'number' && Number.isFinite(rtt) && rtt >= 0) this.recordQuality(peer, 'webRtc', 'rttMs', rtt * 1000);
+      const outgoing = selectedPair?.availableOutgoingBitrate;
+      if (typeof outgoing === 'number' && Number.isFinite(outgoing) && outgoing >= 0) {
+        this.recordQuality(peer, 'webRtc', 'sendMbps', outgoing / 1_000_000);
+      }
+      const incoming = selectedPair?.availableIncomingBitrate;
+      if (typeof incoming === 'number' && Number.isFinite(incoming) && incoming >= 0) {
+        this.recordQuality(peer, 'webRtc', 'receiveMbps', incoming / 1_000_000);
+      }
+
+      const channels = stats.filter((entry) => entry.type === 'data-channel');
+      const byteTotal = (key: 'bytesSent' | 'bytesReceived'): number | undefined => {
+        const counters = channels.map((entry) => entry[key]).filter((value): value is number =>
+          typeof value === 'number' && Number.isFinite(value) && value >= 0);
+        return counters.length ? counters.reduce((sum, value) => sum + value, 0) : undefined;
+      };
+      const sent = byteTotal('bytesSent');
+      const received = byteTotal('bytesReceived');
+      if (peer.lastRtcSampleAt !== undefined) {
+        const elapsedMs = sampledAt - peer.lastRtcSampleAt;
+        if (sent !== undefined && peer.lastRtcBytesSent !== undefined && outgoing === undefined) {
+          const rate = bytesPerSecondToMbps(sent - peer.lastRtcBytesSent, elapsedMs);
+          if (rate !== null) this.recordQuality(peer, 'webRtc', 'sendMbps', rate);
+        }
+        if (received !== undefined && peer.lastRtcBytesReceived !== undefined && incoming === undefined) {
+          const rate = bytesPerSecondToMbps(received - peer.lastRtcBytesReceived, elapsedMs);
+          if (rate !== null) this.recordQuality(peer, 'webRtc', 'receiveMbps', rate);
+        }
+      }
+      if (sent !== undefined) peer.lastRtcBytesSent = sent;
+      if (received !== undefined) peer.lastRtcBytesReceived = received;
+      peer.lastRtcSampleAt = sampledAt;
+    } catch {
+      // Stats are optional and can fail transiently; unavailable values remain null.
+    }
   }
 }
 
