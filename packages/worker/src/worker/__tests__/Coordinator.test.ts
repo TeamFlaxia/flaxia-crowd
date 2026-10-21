@@ -1213,6 +1213,39 @@ describe('Coordinator swarm sessions', () => {
     expect(floods).toBeLessThan(80);
   });
 
+  it('pauses a task at the subscriber high watermark and resumes after bounded acknowledgements', async () => {
+    stub = newStub();
+    const { task, node } = await connectAndAssign('node-1');
+    const attemptId = jsonFrames(node).find(f => f.type === 'task')!.attemptId as string;
+    const response = await stub.fetch(`http://internal/subscribe?taskId=${task.id}&tenantId=${TENANT}`, {
+      headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
+    });
+    const subscriber = (response as unknown as { webSocket?: WebSocket }).webSocket!;
+    subscriber.accept();
+    const received: Array<Record<string, unknown>> = [];
+    subscriber.addEventListener('message', (event: MessageEvent) => {
+      try { received.push(JSON.parse(String(event.data))); } catch {}
+    });
+    subscriber.send(JSON.stringify({ type: 'flow-control', version: 1 }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    for (let i = 0; i < 16; i++) {
+      node.socket.send(JSON.stringify({ type: 'progress', taskId: task.id, token: `t${i}`, attemptId }));
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === true)).toBe(true);
+    const sequence = received.filter(message => message.type === 'token')[7]?.sequence;
+    expect(sequence).toBe(8);
+
+    subscriber.send(JSON.stringify({ type: 'ack', sequence: 999 }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === false)).toBe(false);
+
+    subscriber.send(JSON.stringify({ type: 'ack', sequence: 8 }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === false)).toBe(true);
+  });
+
   it('ignores progress from a node that does not own the task', async () => {
     stub = newStub();
     const { task, node } = await connectAndAssign('node-1');
