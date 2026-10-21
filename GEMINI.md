@@ -96,136 +96,27 @@ workerとnodeは`@flaxia/sdk`を依存に追加して型だけ参照する。
 - 必ず完了報告をするときはテストにパスしてなくてはならない
 - 常にパスするようにズルをしたテストを作成してはならない。
 
-## TODO: Webhook / HTTP Callback 対応
+## Webhook / HTTP Callback
 
-### 背景
-Flaxia SNS の `waitUntil` 内で `waitForTask()`（最大30秒ポーリング）がタイムアウトする。
-解決策として、タスク完了をHTTP Callback（Webhook）で受け取る方式に移行する。
+アプリケーション固有の本番 URL、DB スキーマ、Webhook 受信処理は、このリポジトリの
+開発メモに記載しない。各ホストアプリの管理下で実装し、Crowd の Callback を受ける
+場合は SDK の署名検証を必須にする。
 
-### 1. `packages/worker` — Coordinator に callback delivery を実装
+検証前に JSON を信頼したり、本文から取り出した値で DB を更新したりしてはならない。
+受信した生の本文と `readCrowdWebhookHeaders()` を
+[`packages/sdk/docs/02-submit-task.md`](packages/sdk/docs/02-submit-task.md) の
+`verifyCrowdWebhook()` に渡し、失敗時は処理を拒否する。本番では専用の
+`WEBHOOK_SIGNING_SECRET` と共有可能なリプレイガードを設定する。
 
-**ファイル**: `packages/worker/src/worker/Coordinator.ts`
-
-**`completeTask()`** と **`failTask()`** の末尾で `task.callbackUrl` が存在する場合、HTTP POST で結果を送信する：
-
-```typescript
-// completeTask() の WebSocket通知後:
-if (task.callbackUrl) {
-  await this.deliverCallback(task.callbackUrl, {
-    taskId,
-    status: 'done',
-    result: task.result,
-  });
-}
-
-// failTask() の WebSocket通知後:
-if (task.callbackUrl) {
-  await this.deliverCallback(task.callbackUrl, {
-    taskId,
-    status: 'failed',
-    error: task.error,
-  });
-}
-```
-
-**注意点**:
-- `deliverCallback()` は `fetch()` で `POST` + `Content-Type: application/json`
-- タイムアウトは 5秒程度に設定（callbackが遅くてもタスク自体の完了は阻害しない）
-- 失敗時のリトライは初回実装ではスキップ（callback先が落ちていてもタスク結果はREST APIから取得可能）
-- DO の `fetch()` には 100ms の制限がない（DO内からは通常の `fetch()` が使える）
-
-### 2. `packages/sdk` — SubmitTaskOptions に callbackUrl が既にあることを確認（済）
-`callbackUrl?: string` は既に `SubmitTaskOptions` に定義済み。変更不要。
-
-### 3. `flaxia` 側 — analyzeSentiment の callbackUrl 対応
-
-**ファイル**: `functions/api/[[route]].ts`
-
-`analyzeSentiment()` を以下のように修正：
-
-```typescript
-async function analyzeSentiment(c: any, postId: string, text: string): Promise<void> {
-  if (processingPosts.has(postId)) return
-  processingPosts.add(postId)
-  try {
-    const client = getCrowdClient(c)
-    if (!client) return
-
-    const callbackUrl = `${c.env.BASE_URL}/api/crowd/webhook`
-    await client.submit({
-      workload: 'ai-inference',
-      payload: {
-        task: 'text-classification',
-        model: 'Xenova/bert-base-multilingual-uncased-sentiment',
-        input: text,
-      },
-      callbackUrl,  // ← 追加
-    })
-    // waitForTask は呼ばない（waitUntil のタイムアウト回避）
-  } catch (err) {
-    console.error(`Sentiment analysis submission failed for post ${postId}:`, err)
-  } finally {
-    processingPosts.delete(postId)
-  }
-}
-```
-
-### 4. `flaxia` 側 — Webhook受信エンドポイントを新設
-
-**ファイル**: `functions/api/[[route]].ts`
-
-`POST /api/crowd/webhook` を Hono ルーターに追加：
-
-```typescript
-app.post('/api/crowd/webhook', async (c) => {
-  const { taskId, status, result, error } = await c.req.json()
-  if (!taskId) return c.text('Bad Request', 400)
-
-  // taskId から postId を引く（後述の補完テーブルが必要）
-  // 現状は taskId→postId のマッピングがないので、
-  // posts テーブルの sentiment_task_id カラムで管理する
-
-  if (status === 'done' && result?.output?.[0]) {
-    const output = result.output[0]
-    const labelScoreMap = {
-      very_negative: 0.0, negative: 0.25,
-      neutral: 0.5, positive: 0.75, very_positive: 1.0,
-    }
-    const score = labelScoreMap[output.label] ?? output.score
-    // postId が必要
-    await c.env.DB.prepare(
-      'UPDATE posts SET sentiment_score = ? WHERE id = ?'
-    ).bind(score, postId).run()
-  }
-
-  return c.json({ received: true })
-})
-```
-
-**課題**: 現状 `taskId → postId` のマッピングがない。以下のいずれかで解決：
-
-- **案A**: `posts` テーブルに `sentiment_task_id TEXT` カラムを追加（マイグレーション）
-- **案B**: 新テーブル `sentiment_tasks(task_id TEXT, post_id TEXT, created_at INT)` を作成
-
-### 5. `flaxia` 側 — マイグレーション
-
-`migrations/0034_add_sentiment_task_id.sql`:
-```sql
-ALTER TABLE posts ADD COLUMN sentiment_task_id TEXT;
-```
-
-または案Bのテーブルを作成。
-
-### 6. `flaxia` 側 — `wrangler.toml` に BASE_URL の確認
-
-`BASE_URL` 環境変数が `https://flaxia.app` に設定されていることを確認。
+署名は配送元と本文の真正性を示すが、推論結果の正しさは保証しない。判断に使う場合は
+独立した検証も設計する。
 
 ---
 
 ## Flaxia SNSへの組み込み方法
 
 ```bash
-# flaxia.app リポジトリ側で
+# ホストアプリ側で
 npm install @flaxia/worker @flaxia/sdk
 
 # wrangler.tomlへの追記は packages/worker/docs/06-wrangler.md を参照
