@@ -37,6 +37,9 @@ const SUPPORTED_TASKS = [
 
 const pipelineCache = new Map<string, any>();
 const MAX_CACHED_PIPELINES = 2;
+/** Bound work queued behind TextStreamer's synchronous callback API. */
+export const MAX_PENDING_TOKEN_CALLBACKS = 64;
+export const MAX_PENDING_TOKEN_CHARS = 256 * 1024;
 
 /**
  * Drops all cached model pipelines so the (potentially hundreds of MB of)
@@ -54,11 +57,20 @@ const createBufferedTokenCallback = (
   let buffer = '';
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pending: Promise<void> = Promise.resolve();
+  let pendingCount = 0;
+  let pendingChars = 0;
   let failure: unknown;
   let failed = false;
   let closed = false;
 
   const dispatch = (text: string): void => {
+    if (pendingCount >= MAX_PENDING_TOKEN_CALLBACKS || pendingChars + text.length > MAX_PENDING_TOKEN_CHARS) {
+      failed = true;
+      failure = new Error('ai-inference token consumer is too slow; generation stopped at the bounded stream buffer');
+      throw failure;
+    }
+    pendingCount++;
+    pendingChars += text.length;
     // TextStreamer invokes callbacks synchronously. Queue each async sink call
     // in order, retaining failures for the inference promise instead of leaving
     // a rejected promise behind in a timer callback.
@@ -67,7 +79,10 @@ const createBufferedTokenCallback = (
     }).then(
       () => undefined,
       (error: unknown) => { failed = true; failure = error; },
-    );
+    ).finally(() => {
+      pendingCount--;
+      pendingChars -= text.length;
+    });
   };
   const flush = (): void => {
     if (timer !== null) clearTimeout(timer);
@@ -82,6 +97,11 @@ const createBufferedTokenCallback = (
     if (!options.tokenBuffer) {
       dispatch(text);
       return;
+    }
+    if (buffer.length + text.length > MAX_PENDING_TOKEN_CHARS) {
+      failed = true;
+      failure = new Error('ai-inference token consumer is too slow; generation stopped at the bounded stream buffer');
+      throw failure;
     }
     buffer += text;
     if (timer === null) timer = setTimeout(flush, options.tokenBufferIntervalMs ?? 50);
