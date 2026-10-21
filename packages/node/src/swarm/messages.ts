@@ -1,10 +1,12 @@
 import {
   isSwarmErrorMessage,
+  isSwarmFlowMessage,
   isSwarmInitMessage,
   isSwarmSliceMessage,
   isSwarmStartMessage,
   isSwarmTransportMessage,
   type SwarmErrorMessage,
+  type SwarmFlowMessage,
   type SwarmInitMessage,
   type SwarmSliceMessage,
   type SwarmStartMessage,
@@ -17,6 +19,7 @@ export type SwarmControlMessage =
   | SwarmSliceMessage
   | SwarmStartMessage
   | SwarmErrorMessage
+  | SwarmFlowMessage
   | SwarmTransportMessage;
 
 /** Messages from the main thread into the swarm worker. */
@@ -41,6 +44,7 @@ export function isSwarmControlMessage(value: unknown): value is SwarmControlMess
     isSwarmSliceMessage(value) ||
     isSwarmStartMessage(value) ||
     isSwarmTransportMessage(value) ||
+    isSwarmFlowMessage(value) ||
     isSwarmErrorMessage(value)
   );
 }
