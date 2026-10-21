@@ -58,6 +58,28 @@ describe('WorkerPool', () => {
     expect(result).toEqual({ output: 'ok' });
   });
 
+  it('distinguishes an unobserved CPU load from a measured zero', async () => {
+    let handler: Function;
+    class MockWorker {
+      postMessage = vi.fn(() => {
+        setTimeout(() => {
+          handler({ data: { id: 'cpu', type: 'heartbeat', cpuLoad: 0 } });
+          handler({ data: { id: 'cpu', type: 'done', result: { output: 'ok' } } });
+        }, 0);
+      });
+      terminate = vi.fn();
+      addEventListener = vi.fn((_event: string, listener: Function) => { handler = listener; });
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    pool = new WorkerPool();
+
+    expect(pool.hasCpuLoadSample).toBe(false);
+    await pool.run('cpu', 'ai-inference', {}, 100);
+    expect(pool.hasCpuLoadSample).toBe(true);
+    expect(pool.lastCpuLoad).toBe(0);
+  });
+
   it('should reject when worker returns error', async () => {
     let handler: Function;
     const mockAddEventListener = vi.fn((_event: string, h: Function) => {
