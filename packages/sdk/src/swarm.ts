@@ -2,6 +2,7 @@
 // (https://github.com/Nehanth/pooled), MIT, Copyright (c) 2026 Nehanth Narendrula.
 // See vendor/pooled/VENDORED.md and vendor/pooled/LICENSE.
 import type { SwarmChainNode, SwarmRole, SwarmSessionPlan, SwarmSlice } from './types';
+import { isSwarmPeerQualityReport, type SwarmPeerQualityReport } from './peer-quality';
 
 /**
  * Swarm session runtime contracts. The coordinator plans the chain and relays
@@ -398,6 +399,29 @@ export interface SwarmPeerSignalMessage {
   signal: SwarmPeerSignal;
 }
 
+/** Node-to-coordinator quality snapshot for at most the two adjacent peers. */
+export interface SwarmPeerQualityMessage {
+  type: 'swarm-peer-quality';
+  taskId: string;
+  sessionId: string;
+  attemptId: string;
+  reports: SwarmPeerQualityReport[];
+}
+
+export function isSwarmPeerQualityMessage(value: unknown, now = Date.now()): value is SwarmPeerQualityMessage {
+  if (!isRecord(value) || value.type !== 'swarm-peer-quality') return false;
+  if (typeof value.taskId !== 'string' || !value.taskId || value.taskId.length > 128 ||
+      typeof value.sessionId !== 'string' || !value.sessionId || value.sessionId.length > 128 ||
+      typeof value.attemptId !== 'string' || !value.attemptId || value.attemptId.length > 128 ||
+      !Array.isArray(value.reports) || value.reports.length < 1 || value.reports.length > 2 ||
+      !value.reports.every((report) => isSwarmPeerQualityReport(report, now))) return false;
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength <= 4096;
+  } catch {
+    return false;
+  }
+}
+
 export const MAX_SWARM_SDP_CHARS = 24 * 1024;
 export const MAX_SWARM_ICE_CANDIDATE_CHARS = 4096;
 export const MAX_SWARM_SIGNAL_BYTES = 32 * 1024;
@@ -509,7 +533,8 @@ export type SwarmNodeMessage =
   | SwarmTokenMessage
   | SwarmDoneMessage
   | SwarmErrorMessage
-  | SwarmPeerSignalMessage;
+  | SwarmPeerSignalMessage
+  | SwarmPeerQualityMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -674,6 +699,8 @@ export function isSwarmNodeMessage(value: unknown): value is SwarmNodeMessage {
       return typeof value.taskId === 'string' && value.taskId.length > 0 && typeof value.error === 'string';
     case 'swarm-peer-signal':
       return isSwarmPeerSignalMessage(value);
+    case 'swarm-peer-quality':
+      return isSwarmPeerQualityMessage(value);
     default:
       return false;
   }
