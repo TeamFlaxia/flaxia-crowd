@@ -12,6 +12,7 @@ import type {
 import {
   HEAVY_WORKLOADS,
   isValidSwarmChain,
+  isSwarmPeerSignalMessage,
   swarmChainIndex,
   swarmNextHopIndex,
   decodeSwarmEnvelope,
@@ -104,6 +105,7 @@ function taskNeedsFileSources(task: TaskRecord): boolean {
 interface SwarmRecord {
   sessionId: string;
   taskId: string;
+  attemptId: string;
   hostNodeId: string;
   members: Array<{ nodeId: string; capacity: number }>;
   ready: string[];
@@ -342,6 +344,11 @@ export class Coordinator extends DurableObject<Env> {
         return;
       }
 
+      if (data.type === "swarm-peer-signal") {
+        await this.handleSwarmPeerSignal(ws, nodeId, data);
+        return;
+      }
+
       if (data.type === "swarm-ready") {
         await this.handleSwarmReady(nodeId, data.sessionId);
         return;
@@ -441,6 +448,59 @@ export class Coordinator extends DurableObject<Env> {
     this.sendToNode(next.nodeId, null, frame);
   }
 
+  /** Relay only bounded signaling between authenticated, adjacent members of the current attempt. */
+  private async handleSwarmPeerSignal(ws: WebSocket, nodeId: string, data: Record<string, unknown>) {
+    if (!isSwarmPeerSignalMessage(data) || data.fromNodeId !== undefined) return;
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    if (!node || node.currentTaskId !== data.taskId) return;
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${data.taskId}`);
+    if (
+      !swarm ||
+      !swarm.plan ||
+      !swarm.plan.chain.length ||
+      swarm.sessionId !== data.sessionId ||
+      swarm.attemptId !== data.attemptId ||
+      !swarm.members.some((member) => member.nodeId === nodeId)
+    ) return;
+
+    let attachment: { attemptId?: string } | undefined;
+    try {
+      attachment = ws.deserializeAttachment() as { attemptId?: string } | undefined;
+    } catch {
+      return;
+    }
+    if (attachment?.attemptId !== swarm.attemptId) return;
+
+    const index = swarmChainIndex(swarm.plan, nodeId);
+    if (index < 0) return;
+    const previous = swarm.plan.chain[(index - 1 + swarm.plan.chain.length) % swarm.plan.chain.length];
+    const next = swarm.plan.chain[swarmNextHopIndex(swarm.plan.chain.length, index)];
+    if (data.toNodeId !== previous?.nodeId && data.toNodeId !== next?.nodeId) return;
+
+    const signal = data.signal.kind === "description"
+      ? { kind: "description", description: { type: data.signal.description.type, sdp: data.signal.description.sdp } }
+      : {
+          kind: "candidate",
+          candidate: data.signal.candidate === null
+            ? null
+            : {
+                candidate: data.signal.candidate.candidate,
+                sdpMid: data.signal.candidate.sdpMid,
+                sdpMLineIndex: data.signal.candidate.sdpMLineIndex,
+                usernameFragment: data.signal.candidate.usernameFragment,
+              },
+        };
+    this.sendAttemptToNode(data.toNodeId, {
+      type: "swarm-peer-signal",
+      taskId: swarm.taskId,
+      sessionId: swarm.sessionId,
+      attemptId: swarm.attemptId,
+      fromNodeId: nodeId,
+      toNodeId: data.toNodeId,
+      signal,
+    }, swarm.attemptId);
+  }
+
   /**
    * A plan the coordinator cannot accept must be reported back: silently
    * dropping it leaves every member `busy` and the session wedged until the
@@ -515,19 +575,22 @@ export class Coordinator extends DurableObject<Env> {
     for (let i = 0; i < chain.length; i++) {
       const inboundKey = chain.length > 1 ? hopKeys[(i - 1 + chain.length) % chain.length] : undefined;
       const outboundKey = chain.length > 1 ? hopKeys[i] : undefined;
-      this.sendToNode(chain[i].nodeId, {
+      this.sendAttemptToNode(chain[i].nodeId, {
         type: "swarm-slice",
         sessionId: swarm.sessionId,
         taskId,
+        attemptId: swarm.attemptId,
         model: (task.payload as SwarmInferencePayload)?.model ?? "",
         timeoutMs: task.timeoutMs,
         index: i,
         chainLength: chain.length,
+        previousNodeId: chain.length > 1 ? chain[(i - 1 + chain.length) % chain.length].nodeId : undefined,
+        nextNodeId: chain.length > 1 ? chain[swarmNextHopIndex(chain.length, i)].nodeId : undefined,
         role: chain[i].role,
         slice: chain[i].slice,
         inboundKey,
         outboundKey,
-      });
+      }, swarm.attemptId);
     }
   }
 
@@ -1208,6 +1271,7 @@ export class Coordinator extends DurableObject<Env> {
     const record: SwarmRecord = {
       sessionId,
       taskId: task.id,
+      attemptId,
       hostNodeId: host.id,
       members,
       ready: [],
