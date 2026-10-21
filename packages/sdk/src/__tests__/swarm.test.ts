@@ -12,6 +12,7 @@ import {
   isSwarmInitMessage,
   isSwarmNodeMessage,
   isSwarmSliceMessage,
+  isSwarmPeerSignalMessage,
   isSwarmStartMessage,
   isSwarmErrorMessage,
   isValidSwarmChain,
@@ -418,5 +419,43 @@ describe('isValidSwarmChain', () => {
     expect(isValidSwarmChain([
       { ...valid[0], slice: { start: 0, end: MAX_SWARM_LAYERS + 1, hasEmbed: true, hasHead: true } },
     ])).toBe(false);
+  });
+});
+
+
+describe('swarm peer signaling', () => {
+  const base = {
+    type: 'swarm-peer-signal',
+    taskId: 'task-1',
+    sessionId: 'session-1',
+    attemptId: 'attempt-1',
+    toNodeId: 'node-2',
+  };
+
+  it('accepts bounded SDP and ICE messages as node messages', () => {
+    const offer = { ...base, signal: { kind: 'description', description: { type: 'offer', sdp: 'v=0' } } };
+    const candidate = {
+      ...base,
+      signal: { kind: 'candidate', candidate: { candidate: 'candidate:1', sdpMid: '0', sdpMLineIndex: 0 } },
+    };
+    expect(isSwarmPeerSignalMessage(offer)).toBe(true);
+    expect(isSwarmNodeMessage(offer)).toBe(true);
+    expect(isSwarmPeerSignalMessage(candidate)).toBe(true);
+  });
+
+  it('rejects missing attempt ids, oversized SDP, and malformed candidate indexes', () => {
+    expect(isSwarmPeerSignalMessage({ ...base, attemptId: undefined, signal: { kind: 'candidate', candidate: null } })).toBe(false);
+    expect(isSwarmPeerSignalMessage({
+      ...base,
+      signal: { kind: 'description', description: { type: 'offer', sdp: 'x'.repeat(24 * 1024 + 1) } },
+    })).toBe(false);
+    expect(isSwarmPeerSignalMessage({
+      ...base,
+      signal: { kind: 'candidate', candidate: { candidate: 'candidate:1', sdpMLineIndex: 1.5 } },
+    })).toBe(false);
+    expect(isSwarmPeerSignalMessage({
+      ...base,
+      signal: { kind: 'description', description: { type: 'offer', sdp: '😀'.repeat(9000) } },
+    })).toBe(false);
   });
 });
