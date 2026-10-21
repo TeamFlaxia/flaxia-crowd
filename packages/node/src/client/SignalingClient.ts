@@ -12,8 +12,8 @@ import {
 } from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
+import { collectNodeResourceReport } from '../executor/resourceReporter';
 import { assertPublicUrl } from '../executor/egress-guard';
-import { probeWebGpu } from '../executor/webgpuProbe';
 import {
   buildNodeSignalProtocols,
   buildWsUrl,
@@ -157,6 +157,7 @@ class SignalingClient {
       opened = true;
       this.reconnectAttempts = 0;
       log(`signal connected ${wsUrl}`);
+      void this.sendHeartbeat(ws);
     };
 
     ws.onmessage = async (event) => {
@@ -200,7 +201,7 @@ class SignalingClient {
       }
 
       if (data.type === 'ping') {
-        this.send({ type: 'pong', cpuLoad: this.workerPool.lastCpuLoad });
+        void this.sendHeartbeat(ws);
         return;
       }
       if (data.type === 'task') {
@@ -305,6 +306,24 @@ class SignalingClient {
     log(`task abort received taskId=${taskId} error=${error}`);
   }
 
+  private async sendHeartbeat(ws: WebSocket) {
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || getConsentState() !== 'granted') return;
+    const requested = this.config.capabilities ?? ['ai-inference', 'image-process'];
+    const probeGpu = requested.includes('swarm-inference') && this.config.allowModelDownload === true;
+    const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+    const report = await collectNodeResourceReport({
+      cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
+      deviceMemory,
+      probeGpu,
+    });
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || getConsentState() !== 'granted') return;
+    this.send({
+      type: 'pong',
+      cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
+      resources: report,
+    });
+  }
+
   private scheduleReconnect() {
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), this.MAX_RECONNECT_DELAY);
     setTimeout(() => {
@@ -386,16 +405,25 @@ class SignalingClient {
         capabilities = capabilities.filter((cap) => cap !== 'container');
       }
 
-      // Swarm inference additionally needs WebGPU and an explicit opt-in to
-      // download multi-GB layer weights. Probe only when the host asked for it,
-      // and drop the capability when the device cannot actually serve it.
+      // Swarm inference additionally needs a working WebGPU device and an
+      // explicit opt-in to download model layer weights. The resource report
+      // includes a tiny bounded compute sample and is reused by heartbeats.
       let swarm: SwarmNodeCapabilities | undefined;
       if (capable && requested.includes('swarm-inference') && this.config.allowModelDownload === true) {
-        swarm = await probeWebGpu();
+        const report = await collectNodeResourceReport({
+          cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
+          deviceMemory: (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
+          probeGpu: true,
+        });
         if (!consentStillGranted()) return null;
-        if (!swarm.webgpu) {
+        if (report.gpu.status === 'available') {
+          swarm = { webgpu: true };
+          if (report.gpu.architecture.value) swarm.gpuArchitecture = report.gpu.architecture.value;
+          if (report.gpu.maxStorageBufferBindingSize.value !== null) {
+            swarm.maxStorageBufferBindingSize = report.gpu.maxStorageBufferBindingSize.value;
+          }
+        } else {
           capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
-          swarm = undefined;
         }
       } else {
         capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
