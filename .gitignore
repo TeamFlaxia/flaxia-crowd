@@ -29,6 +29,9 @@ build/
 !.env.example
 .dev.vars
 
+# Per-user local agent settings may contain internal endpoints and model names.
+.gemini/settings.json
+
 # logs
 *.log
 npm-debug.log*
