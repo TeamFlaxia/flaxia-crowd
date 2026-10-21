@@ -13,6 +13,7 @@ import {
   isSwarmNodeMessage,
   isSwarmSliceMessage,
   isSwarmPeerSignalMessage,
+  isSwarmPeerQualityMessage,
   isSwarmFlowMessage,
   isSwarmStartMessage,
   isSwarmErrorMessage,
@@ -469,5 +470,29 @@ describe('swarm peer signaling', () => {
     expect(isSwarmFlowMessage({ type: 'swarm-flow', taskId: 'task-1', sessionId: 'session-1', paused: true })).toBe(true);
     expect(isSwarmFlowMessage({ type: 'swarm-flow', taskId: 'task-1', sessionId: 'session-1', paused: 'true' })).toBe(false);
     expect(isSwarmFlowMessage({ type: 'swarm-flow', taskId: '', sessionId: 'session-1', paused: false })).toBe(false);
+  });
+});
+
+describe('swarm peer quality wire message', () => {
+  it('accepts bounded fresh reports and rejects stale, oversized, or multi-peer batches', () => {
+    const now = Date.now();
+    const unknown = { value: null, sampledAt: now, sampleCount: 0 };
+    const report = {
+      version: 1,
+      peerNodeId: 'node-2',
+      sampledAt: now,
+      expiresAt: now + 60_000,
+      webRtc: { rttMs: { value: 20, sampledAt: now, sampleCount: 2 }, jitterMs: unknown, sendMbps: unknown, receiveMbps: unknown },
+      application: { rttMs: unknown, jitterMs: unknown, sendMbps: unknown, receiveMbps: unknown },
+    };
+    const message = {
+      type: 'swarm-peer-quality', taskId: 'task-1', sessionId: 'session-1', attemptId: 'attempt-1', reports: [report],
+    };
+
+    expect(isSwarmPeerQualityMessage(message, now)).toBe(true);
+    expect(isSwarmNodeMessage(message)).toBe(true);
+    expect(isSwarmPeerQualityMessage({ ...message, reports: [report, report, report] }, now)).toBe(false);
+    expect(isSwarmPeerQualityMessage({ ...message, reports: [{ ...report, expiresAt: now }] }, now)).toBe(false);
+    expect(isSwarmPeerQualityMessage({ ...message, padding: 'x'.repeat(4097) }, now)).toBe(false);
   });
 });
