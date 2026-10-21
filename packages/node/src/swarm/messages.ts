@@ -3,14 +3,21 @@ import {
   isSwarmInitMessage,
   isSwarmSliceMessage,
   isSwarmStartMessage,
+  isSwarmTransportMessage,
   type SwarmErrorMessage,
   type SwarmInitMessage,
   type SwarmSliceMessage,
   type SwarmStartMessage,
+  type SwarmTransportMessage,
 } from '@flaxia/sdk';
 
 /** Swarm control messages the coordinator sends to a node. */
-export type SwarmControlMessage = SwarmInitMessage | SwarmSliceMessage | SwarmStartMessage | SwarmErrorMessage;
+export type SwarmControlMessage =
+  | SwarmInitMessage
+  | SwarmSliceMessage
+  | SwarmStartMessage
+  | SwarmErrorMessage
+  | SwarmTransportMessage;
 
 /** Messages from the main thread into the swarm worker. */
 export type SwarmWorkerInbound =
@@ -33,6 +40,7 @@ export function isSwarmControlMessage(value: unknown): value is SwarmControlMess
     isSwarmInitMessage(value) ||
     isSwarmSliceMessage(value) ||
     isSwarmStartMessage(value) ||
+    isSwarmTransportMessage(value) ||
     isSwarmErrorMessage(value)
   );
 }
