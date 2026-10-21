@@ -10,10 +10,9 @@ import {
 import { __consentTestHooks } from '../../consent/storage';
 import { setFlaxiaNodeHostManagedConsent } from '../../index';
 
-// Swarm capability advertisement is driven by the WebGPU probe; mock it so
-// tests never touch a real adapter.
-const { probeWebGpuMock } = vi.hoisted(() => ({ probeWebGpuMock: vi.fn() }));
-vi.mock('../../executor/webgpuProbe', () => ({ probeWebGpu: probeWebGpuMock }));
+// Resource telemetry includes a GPU probe; keep signaling tests deterministic.
+const { collectNodeResourceReportMock } = vi.hoisted(() => ({ collectNodeResourceReportMock: vi.fn() }));
+vi.mock('../../executor/resourceReporter', () => ({ collectNodeResourceReport: collectNodeResourceReportMock }));
 
 // Deterministic capability probe so obtainToken() never actually tries to
 // allocate gigabytes of RAM in the test runner. This file simulates a capable
@@ -52,7 +51,7 @@ describe('SignalingClient', () => {
     document.body.innerHTML = '';
     localStorage.clear();
     vi.restoreAllMocks();
-    probeWebGpuMock.mockClear();
+    collectNodeResourceReportMock.mockReset();
     vi.useRealTimers();
     __consentTestHooks.reset();
     setFlaxiaNodeHostManagedConsent(false);
@@ -187,10 +186,12 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
     seedGrantedConsent();
-    probeWebGpuMock.mockResolvedValue({
-      webgpu: true,
-      gpuArchitecture: 'apple m1',
-      maxStorageBufferBindingSize: 134217728,
+    collectNodeResourceReportMock.mockResolvedValue({
+      gpu: {
+        status: 'available',
+        architecture: { value: 'apple m1' },
+        maxStorageBufferBindingSize: { value: 134217728 },
+      },
     });
 
     initFlaxiaNode({
@@ -217,7 +218,9 @@ describe('SignalingClient', () => {
     globalThis.WebSocket = vi.fn() as any;
     mockFetchToken();
     seedGrantedConsent();
-    probeWebGpuMock.mockResolvedValue({ webgpu: false });
+    collectNodeResourceReportMock.mockResolvedValue({
+      gpu: { status: 'unsupported', architecture: { value: null }, maxStorageBufferBindingSize: { value: null } },
+    });
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
@@ -233,6 +236,51 @@ describe('SignalingClient', () => {
     const body = JSON.parse(init.body);
     expect(body.capabilities).toEqual(['ai-inference']);
     expect(body.swarm).toBeUndefined();
+  });
+
+  it('sends fresh resource telemetry on connect and each coordinator heartbeat', async () => {
+    const send = vi.fn();
+    let wsInstance: any;
+    class MockWebSocket {
+      readyState = 1;
+      binaryType = 'arraybuffer';
+      onopen?: () => void;
+      onmessage?: (event: MessageEvent) => void;
+      onclose?: () => void;
+      close = vi.fn();
+      send = send;
+      constructor() { wsInstance = this; }
+    }
+    globalThis.WebSocket = MockWebSocket as any;
+    (globalThis.WebSocket as any).OPEN = 1;
+    mockFetchToken();
+    seedGrantedConsent();
+    const resourceReport = {
+      version: 1,
+      sampledAt: Date.now(),
+      expiresAt: Date.now() + 90_000,
+      cpuLoad: { value: 0.25, source: 'estimated', unit: 'ratio' },
+      gpu: { status: 'available' },
+    };
+    collectNodeResourceReportMock.mockResolvedValue(resourceReport);
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    await flush();
+    await flush();
+    wsInstance.onopen();
+    await flush();
+    wsInstance.onmessage({ data: JSON.stringify({ type: 'ping' }) });
+    await flush();
+
+    const pongs = send.mock.calls.map(([message]) => JSON.parse(message)).filter((message) => message.type === 'pong');
+    expect(pongs).toHaveLength(2);
+    expect(pongs[0].resources).toEqual(resourceReport);
+    expect(pongs[1].resources).toEqual(resourceReport);
+    expect(collectNodeResourceReportMock).toHaveBeenCalledTimes(2);
   });
 
   it('never probes WebGPU without the model-download opt-in', async () => {
@@ -253,7 +301,7 @@ describe('SignalingClient', () => {
     const body = JSON.parse(init.body);
     expect(body.capabilities).toEqual(['ai-inference']);
     expect(body.swarm).toBeUndefined();
-    expect(probeWebGpuMock).not.toHaveBeenCalled();
+    expect(collectNodeResourceReportMock).not.toHaveBeenCalled();
   });
 
   it('should create consent container with correct id', () => {
