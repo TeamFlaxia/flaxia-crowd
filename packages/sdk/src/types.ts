@@ -577,6 +577,59 @@ export interface SwarmNodeCapabilities {
   maxStorageBufferBindingSize?: number;
 }
 
+/** How a resource value was obtained. Unknown values are always represented by null. */
+export type ResourceMetricSource = 'measured' | 'estimated' | 'unknown';
+
+export type ResourceMetricUnit = 'ratio' | 'bytes' | 'GiB' | 'ms' | 'text';
+
+/** A bounded, time-stamped resource observation. `expiresAt` is never a cache hint from the node. */
+export interface ResourceMetric<T extends number | string> {
+  value: T | null;
+  unit: ResourceMetricUnit;
+  source: ResourceMetricSource;
+  sampledAt: number;
+  expiresAt: number;
+  sampleCount: number;
+}
+
+export type GpuProbeStatus = 'available' | 'unsupported' | 'unavailable' | 'device-lost' | 'unknown';
+
+/** Current, self-reported diagnostics used for scheduling hints, never trust decisions. */
+export interface NodeResourceReport {
+  version: 1;
+  sampledAt: number;
+  expiresAt: number;
+  cpuLoad: ResourceMetric<number>;
+  wasmMemoryLowerBound: ResourceMetric<number>;
+  deviceMemory: ResourceMetric<number>;
+  gpu: {
+    status: GpuProbeStatus;
+    sampledAt: number;
+    expiresAt: number;
+    architecture: ResourceMetric<string>;
+    maxStorageBufferBindingSize: ResourceMetric<number>;
+    computeCompletionMs: ResourceMetric<number>;
+    /** Total/free GPU memory is not exposed by WebGPU and remains unknown. */
+    memoryBytes: ResourceMetric<number>;
+  };
+}
+
+export interface MemoryBudgetInput {
+  availableBytes: number | null;
+  modelBytes: number | null;
+  activationBytes: number | null;
+  kvCacheBytes: number | null;
+  reservedBytes: number | null;
+  safetyMarginBytes: number | null;
+}
+
+export interface MemoryBudgetResult {
+  fits: boolean | null;
+  requiredBytes: number | null;
+  availableBytes: number | null;
+  missing: Array<'availableBytes' | 'modelBytes' | 'activationBytes' | 'kvCacheBytes' | 'reservedBytes' | 'safetyMarginBytes'>;
+}
+
 /** A layer span of a model a node already holds in its persistent cache. */
 export interface WarmModelRange {
   modelId: string;
