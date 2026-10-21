@@ -13,6 +13,11 @@ import {
   HEAVY_WORKLOADS,
   isValidSwarmChain,
   isSwarmPeerSignalMessage,
+  MAX_SUBSCRIBER_INFLIGHT_TOKENS,
+  MAX_SUBSCRIBER_INFLIGHT_BYTES,
+  SUBSCRIBER_ACK_TIMEOUT_MS,
+  SUBSCRIBER_PAUSE_AT_TOKENS,
+  SUBSCRIBER_RESUME_AT_TOKENS,
   swarmChainIndex,
   swarmNextHopIndex,
   decodeSwarmEnvelope,
@@ -59,6 +64,8 @@ export const MAX_RESULT_BYTES = 4 * 1024 * 1024;
 /** Progress token ceiling (#21) and per-task send rate. */
 export const MAX_PROGRESS_TOKEN_CHARS = 4096;
 export const MAX_PROGRESS_PER_SECOND = 50;
+/** WebSocket bytes queued for an older SDK without per-token acknowledgements. */
+const MAX_LEGACY_SUBSCRIBER_BUFFERED_BYTES = 256 * 1024;
 
 interface NodeRecord {
   id: string;
@@ -112,6 +119,7 @@ interface SwarmRecord {
   plan?: SwarmSessionPlan;
   started?: boolean;
   peerReadiness: Record<string, boolean>;
+  flowPaused?: boolean;
 }
 
 /**
@@ -128,6 +136,15 @@ interface AttemptRecord {
 interface RateEntry {
   count: number;
   resetAt: number;
+}
+
+interface SubscriberAttachment {
+  sentSequence: number;
+  ackSequence: number;
+  unackedTokenBytes: number[];
+  inflightBytes: number;
+  flowControl: boolean;
+  lastAckAt: number;
 }
 
 /**
@@ -306,14 +323,15 @@ export class Coordinator extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const tags = this.ctx.getTags(ws);
-    const nodeId = tags[0];
+    const connectionId = tags[0];
 
-    if (!nodeId || nodeId.startsWith("client:")) return;
+    if (!connectionId) return;
+    const subscriber = connectionId.startsWith("client:");
 
     // A binary frame is a swarm hidden state: route it to the next chain hop
     // without decoding the payload.
     if (message instanceof ArrayBuffer) {
-      await this.relaySwarmFrame(nodeId, message);
+      if (!subscriber) await this.relaySwarmFrame(connectionId, message);
       return;
     }
 
@@ -325,6 +343,12 @@ export class Coordinator extends DurableObject<Env> {
     }
 
     try {
+      if (subscriber) {
+        await this.handleSubscriberControl(ws, connectionId.slice("client:".length), data);
+        return;
+      }
+
+      const nodeId = connectionId;
       if (data.type === "pong") {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (node) {
@@ -701,10 +725,41 @@ export class Coordinator extends DurableObject<Env> {
     if (!(await this.checkRateLimitKey(`rate:progress:${taskId}`, MAX_PROGRESS_PER_SECOND, 1000))) return;
 
     const subs = this.ctx.getWebSockets(`client:${taskId}`);
-    const msg = JSON.stringify({ type: "token", token });
+    const excluded = new Set<WebSocket>();
     for (const sub of subs) {
-      try { sub.send(msg); } catch {}
+      const attachment = this.readSubscriberAttachment(sub);
+      const inflight = attachment.sentSequence - attachment.ackSequence;
+      const bufferedAmount = (sub as WebSocket & { bufferedAmount?: number }).bufferedAmount;
+      const sequence = attachment.sentSequence + 1;
+      const message = JSON.stringify({ type: "token", token, sequence });
+      const messageBytes = new TextEncoder().encode(message).byteLength;
+      if (
+        inflight >= MAX_SUBSCRIBER_INFLIGHT_TOKENS ||
+        attachment.inflightBytes + messageBytes > MAX_SUBSCRIBER_INFLIGHT_BYTES ||
+        (typeof bufferedAmount === "number" && bufferedAmount > MAX_SUBSCRIBER_INFLIGHT_BYTES) ||
+        (!attachment.flowControl && typeof bufferedAmount === "number" && bufferedAmount > MAX_LEGACY_SUBSCRIBER_BUFFERED_BYTES)
+      ) {
+        this.closeSlowSubscriber(sub);
+        excluded.add(sub);
+        continue;
+      }
+      try {
+        sub.send(message);
+        attachment.sentSequence = sequence;
+        attachment.unackedTokenBytes.push(messageBytes);
+        attachment.inflightBytes += messageBytes;
+        this.writeSubscriberAttachment(sub, attachment);
+        // Legacy SDKs do not acknowledge callback completion. Send at most one
+        // fixed window, then disconnect them to keep their browser-side queue finite.
+        if (!attachment.flowControl && sequence - attachment.ackSequence >= MAX_SUBSCRIBER_INFLIGHT_TOKENS) {
+          this.closeSlowSubscriber(sub);
+          excluded.add(sub);
+        }
+      } catch {
+        excluded.add(sub);
+      }
     }
+    await this.updateSubscriberFlow(taskId, excluded);
   }
 
   /**
@@ -734,6 +789,7 @@ export class Coordinator extends DurableObject<Env> {
 
     if (tag.startsWith("client:")) {
       try { ws.close(); } catch {}
+      await this.updateSubscriberFlow(tag.slice("client:".length), new Set([ws]));
       return;
     }
 
@@ -756,6 +812,122 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   // --- WebSocket: Subscriber ---
+
+  private readSubscriberAttachment(ws: WebSocket): SubscriberAttachment {
+    try {
+      const value = ws.deserializeAttachment() as Partial<SubscriberAttachment> | undefined;
+      const sentSequence = Number.isSafeInteger(value?.sentSequence) && value!.sentSequence! >= 0
+        ? value!.sentSequence!
+        : 0;
+      const rawAckSequence = Number.isSafeInteger(value?.ackSequence) && value!.ackSequence! >= 0
+        ? value!.ackSequence!
+        : 0;
+      const ackSequence = Math.min(sentSequence, rawAckSequence);
+      const rawBytes = Array.isArray(value?.unackedTokenBytes)
+        ? value.unackedTokenBytes.filter((bytes) => Number.isSafeInteger(bytes) && bytes >= 0).slice(0, MAX_SUBSCRIBER_INFLIGHT_TOKENS)
+        : [];
+      if (rawBytes.length !== sentSequence - ackSequence) {
+        return { sentSequence: 0, ackSequence: 0, unackedTokenBytes: [], inflightBytes: 0, flowControl: false, lastAckAt: Date.now() };
+      }
+      return {
+        sentSequence,
+        ackSequence,
+        unackedTokenBytes: rawBytes,
+        inflightBytes: rawBytes.reduce((sum, bytes) => sum + bytes, 0),
+        flowControl: value?.flowControl === true,
+        lastAckAt: typeof value?.lastAckAt === "number" && Number.isFinite(value.lastAckAt) ? value.lastAckAt : Date.now(),
+      };
+    } catch {
+      return { sentSequence: 0, ackSequence: 0, unackedTokenBytes: [], inflightBytes: 0, flowControl: false, lastAckAt: Date.now() };
+    }
+  }
+
+  private writeSubscriberAttachment(ws: WebSocket, attachment: SubscriberAttachment) {
+    try { ws.serializeAttachment(attachment); } catch {}
+  }
+
+  private async handleSubscriberControl(ws: WebSocket, taskId: string, data: Record<string, unknown>) {
+    const attachment = this.readSubscriberAttachment(ws);
+    if (data.type === "flow-control" && data.version === 1) {
+      attachment.flowControl = true;
+      this.writeSubscriberAttachment(ws, attachment);
+      await this.updateSubscriberFlow(taskId);
+      return;
+    }
+    if (data.type !== "ack" || !attachment.flowControl) return;
+    const sequence = data.sequence;
+    if (!Number.isSafeInteger(sequence) || typeof sequence !== "number") return;
+    if (sequence <= attachment.ackSequence || sequence > attachment.sentSequence) return;
+    const acknowledged = sequence - attachment.ackSequence;
+    if (acknowledged > attachment.unackedTokenBytes.length) return;
+    attachment.unackedTokenBytes.splice(0, acknowledged);
+    attachment.inflightBytes = attachment.unackedTokenBytes.reduce((sum, bytes) => sum + bytes, 0);
+    attachment.ackSequence = sequence;
+    attachment.lastAckAt = Date.now();
+    this.writeSubscriberAttachment(ws, attachment);
+    await this.updateSubscriberFlow(taskId);
+  }
+
+  private closeSlowSubscriber(ws: WebSocket) {
+    try { ws.send(JSON.stringify({ type: "error", error: "Subscription closed because the token consumer is too slow" })); } catch {}
+    try { ws.close(1013, "slow token consumer"); } catch {}
+  }
+
+  /** Pause the producer at a token boundary while any current subscriber is above its high watermark. */
+  private async updateSubscriberFlow(taskId: string, excluded: Set<WebSocket> = new Set()) {
+    const task = await this.getTask(taskId);
+    if (!task || task.status !== "processing" || !task.assignedNodeId) return;
+
+    const now = Date.now();
+    let paused = false;
+    const subscribers = this.ctx.getWebSockets(`client:${taskId}`);
+    for (const sub of subscribers) {
+      if (excluded.has(sub)) continue;
+      const attachment = this.readSubscriberAttachment(sub);
+      const inflight = attachment.sentSequence - attachment.ackSequence;
+      if (inflight > 0 && now - attachment.lastAckAt >= SUBSCRIBER_ACK_TIMEOUT_MS) {
+        this.closeSlowSubscriber(sub);
+        continue;
+      }
+      const bufferedAmount = (sub as WebSocket & { bufferedAmount?: number }).bufferedAmount;
+      if (
+        inflight >= MAX_SUBSCRIBER_INFLIGHT_TOKENS ||
+        attachment.inflightBytes > MAX_SUBSCRIBER_INFLIGHT_BYTES ||
+        (typeof bufferedAmount === "number" && bufferedAmount > MAX_SUBSCRIBER_INFLIGHT_BYTES) ||
+        (!attachment.flowControl && typeof bufferedAmount === "number" && bufferedAmount > MAX_LEGACY_SUBSCRIBER_BUFFERED_BYTES)
+      ) {
+        this.closeSlowSubscriber(sub);
+        continue;
+      }
+      if (attachment.flowControl && inflight >= SUBSCRIBER_PAUSE_AT_TOKENS) paused = true;
+    }
+
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+    if (swarm) {
+      if (!swarm.started || swarm.flowPaused === paused) return;
+      swarm.flowPaused = paused;
+      await this.ctx.storage.put(`swarm:${taskId}`, swarm);
+      this.sendAttemptToNode(swarm.hostNodeId, {
+        type: "swarm-flow",
+        sessionId: swarm.sessionId,
+        taskId,
+        paused,
+      }, swarm.attemptId);
+      return;
+    }
+
+    const attempt = await this.ctx.storage.get<AttemptRecord>(`attempt:${taskId}`);
+    if (!attempt) return;
+    const flowKey = `flow:${taskId}`;
+    const previous = await this.ctx.storage.get<{ attemptId: string; paused: boolean }>(flowKey);
+    if (previous?.attemptId === attempt.attemptId && previous.paused === paused) return;
+    if (previous?.attemptId !== attempt.attemptId && !paused) {
+      await this.ctx.storage.delete(flowKey);
+      return;
+    }
+    await this.ctx.storage.put(flowKey, { attemptId: attempt.attemptId, paused });
+    this.sendAttemptToNode(attempt.nodeId, { type: "task-flow", taskId, paused }, attempt.attemptId);
+  }
 
   private async handleSubscribe(request: Request, url: URL): Promise<Response> {
     const taskId = url.searchParams.get("taskId");
@@ -790,7 +962,16 @@ export class Coordinator extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server, [`client:${taskId}`]);
-    server.send(JSON.stringify({ type: "subscribed", taskId }));
+    this.writeSubscriberAttachment(server, {
+      sentSequence: 0,
+      ackSequence: 0,
+      unackedTokenBytes: [],
+      inflightBytes: 0,
+      flowControl: false,
+      lastAckAt: Date.now(),
+    });
+    server.send(JSON.stringify({ type: "subscribed", taskId, flowControl: "ack-v1" }));
+    await this.updateSubscriberFlow(taskId);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -868,6 +1049,7 @@ export class Coordinator extends DurableObject<Env> {
     task.swarmSession = undefined;
     await this.ctx.storage.put(this.taskKey(task.tenantId, taskId), task);
     await this.retireAttempt(taskId);
+    await this.ctx.storage.delete(`flow:${taskId}`);
     await this.removeFromTenantPending(task.tenantId, taskId);
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
@@ -915,6 +1097,7 @@ export class Coordinator extends DurableObject<Env> {
     // not be able to settle the task after this point.
     task.swarmSession = undefined;
     await this.retireAttempt(taskId);
+    await this.ctx.storage.delete(`flow:${taskId}`);
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
     // The session ends here either way, so every node still working on it must
@@ -1287,6 +1470,7 @@ export class Coordinator extends DurableObject<Env> {
       members,
       ready: [],
       peerReadiness: {},
+      flowPaused: false,
     };
     await this.ctx.storage.put(`swarm:${task.id}`, record);
 
@@ -1325,6 +1509,8 @@ export class Coordinator extends DurableObject<Env> {
       if (task.assignedAt && now - task.assignedAt > (task.timeoutMs || DEFAULT_TIMEOUT_MS)) {
         await this.failTask(taskId, "Task timed out");
       }
+      const current = await this.getTask(taskId);
+      if (current?.status === "processing") await this.updateSubscriberFlow(taskId);
     }
 
     // Sweep the pending queue: a task nobody can serve must fail instead of
