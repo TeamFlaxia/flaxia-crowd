@@ -147,6 +147,9 @@ class SignalingClient {
         type: 'swarm-peer-signal', taskId, sessionId, attemptId, toNodeId, signal,
       }),
       onFrame: (frame) => this.receiveSwarmEnvelope(frame),
+      onQuality: (reports) => this.send({
+        type: 'swarm-peer-quality', taskId, sessionId, attemptId, reports,
+      }),
       onFailure: (error) => {
         this.swarmFailureReported.add(sessionId);
         this.send({ type: 'swarm-error', taskId, sessionId, attemptId, error: error.message });
