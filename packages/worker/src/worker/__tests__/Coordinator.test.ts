@@ -1,7 +1,7 @@
 import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
-import type { SwarmChainNode, TaskRecord } from '@flaxia/sdk';
-import { encodeSwarmEnvelope, verifyCrowdWebhook } from '@flaxia/sdk';
+import type { NodeResourceReport, SwarmChainNode, TaskRecord } from '@flaxia/sdk';
+import { encodeSwarmEnvelope, MAX_RESOURCE_CAPACITY_BYTES, verifyCrowdWebhook } from '@flaxia/sdk';
 import { MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK } from '../Coordinator';
 import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
@@ -17,6 +17,7 @@ interface NodeRecord {
   currentTaskId?: string;
   siteId?: string;
   assignedCount?: number;
+  resources?: NodeResourceReport;
 }
 
 const TENANT = 'tenant-test';
@@ -792,6 +793,52 @@ describe('Coordinator', () => {
       // A malformed value must not be coerced to 0, which is the best score a
       // node could report and would let it win every assignment.
       expect((await storage.get<NodeRecord>('node:node-1'))!.cpuLoad).toBe(0.5);
+    });
+  });
+
+  it('stores only fresh bounded resource reports from authenticated node heartbeats', async () => {
+    stub = newStub();
+    const node = await connectNode('node-resource', 'capabilities=swarm-inference&webgpu=true');
+    const now = Date.now();
+    const metric = (value: number | string | null, unit: string, source: string, ttl: number) => ({
+      value,
+      unit,
+      source,
+      sampledAt: now,
+      expiresAt: now + ttl,
+      sampleCount: value === null ? 0 : 1,
+    });
+    const valid: NodeResourceReport = {
+      version: 1,
+      sampledAt: now,
+      expiresAt: now + 90_000,
+      cpuLoad: metric(0.25, 'ratio', 'estimated', 90_000) as NodeResourceReport['cpuLoad'],
+      wasmMemoryLowerBound: metric(2 * 1024 ** 3, 'bytes', 'measured', 24 * 60 * 60 * 1000) as NodeResourceReport['wasmMemoryLowerBound'],
+      deviceMemory: metric(null, 'GiB', 'unknown', 24 * 60 * 60 * 1000) as NodeResourceReport['deviceMemory'],
+      gpu: {
+        status: 'available',
+        sampledAt: now,
+        expiresAt: now + 10 * 60 * 1000,
+        architecture: metric('test-gpu', 'text', 'measured', 10 * 60 * 1000) as NodeResourceReport['gpu']['architecture'],
+        maxStorageBufferBindingSize: metric(128 * 1024 ** 2, 'bytes', 'measured', 10 * 60 * 1000) as NodeResourceReport['gpu']['maxStorageBufferBindingSize'],
+        computeCompletionMs: metric(2, 'ms', 'measured', 10 * 60 * 1000) as NodeResourceReport['gpu']['computeCompletionMs'],
+        memoryBytes: metric(null, 'bytes', 'unknown', 10 * 60 * 1000) as NodeResourceReport['gpu']['memoryBytes'],
+      },
+    };
+    node.socket.send(JSON.stringify({ type: 'pong', resources: valid }));
+    await new Promise(r => setTimeout(r, 30));
+    await withStorage(async (storage) => {
+      expect((await storage.get<NodeRecord>('node:node-resource'))!.resources?.gpu.computeCompletionMs.value).toBe(2);
+    });
+
+    const invalid = structuredClone(valid);
+    invalid.wasmMemoryLowerBound.value = MAX_RESOURCE_CAPACITY_BYTES + 1;
+    node.socket.send(JSON.stringify({ type: 'pong', resources: invalid }));
+    await new Promise(r => setTimeout(r, 30));
+    await withStorage(async (storage) => {
+      // A malformed report must not replace the last valid measurement.
+      expect((await storage.get<NodeRecord>('node:node-resource'))!.resources?.wasmMemoryLowerBound.value)
+        .toBe(2 * 1024 ** 3);
     });
   });
 
