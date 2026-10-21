@@ -25,6 +25,25 @@ const SLOT_RETRY_COOLDOWN_MS = 15_000;
 
 /** Task ids the coordinator asked us to abort, with the reason to surface. */
 const cancelRequested = new Map<string, string>();
+const tokenFlowPaused = new Set<string>();
+const tokenFlowWaiters = new Map<string, Set<() => void>>();
+
+function releaseTokenFlow(id: string) {
+  tokenFlowPaused.delete(id);
+  const waiters = tokenFlowWaiters.get(id);
+  if (!waiters) return;
+  tokenFlowWaiters.delete(id);
+  for (const resolve of waiters) resolve();
+}
+
+function waitForTokenFlow(id: string): Promise<void> {
+  if (!tokenFlowPaused.has(id)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const waiters = tokenFlowWaiters.get(id) ?? new Set<() => void>();
+    waiters.add(resolve);
+    tokenFlowWaiters.set(id, waiters);
+  });
+}
 
 // The active swarm session, if any. One task at a time, so a single slot is
 // enough; control messages and frames from the main thread route here.
@@ -76,6 +95,7 @@ function createTokenSink(id: string): (token: string) => Promise<void> {
     self.postMessage({ id, type: 'token', token });
   };
   return async (token: string): Promise<void> => {
+    await waitForTokenFlow(id);
     postToken(token);
     await throttle?.yieldIfOverloaded();
   };
@@ -192,6 +212,15 @@ function startSwarmTask(id: string, initial: SwarmInitMessage | SwarmSliceMessag
 self.onmessage = async (e: MessageEvent) => {
   const data = e.data;
 
+  if (data?.type === 'token-flow') {
+    const id = typeof data.id === 'string' ? data.id : '';
+    if (id && activeTaskId === id && typeof data.paused === 'boolean') {
+      if (data.paused) tokenFlowPaused.add(id);
+      else releaseTokenFlow(id);
+    }
+    return;
+  }
+
   if (data?.type === 'swarm-control') {
     // The main thread forwards whatever the coordinator sent; it is untrusted
     // input. Only a well-formed control envelope reaches the session, so a
@@ -216,6 +245,7 @@ self.onmessage = async (e: MessageEvent) => {
   if (data?.type === 'abort') {
     const id = data.id as string;
     const reason = typeof data.reason === 'string' && data.reason ? data.reason : 'aborted by the coordinator';
+    releaseTokenFlow(id);
     if (activeSwarm && activeSwarmTaskId === id) {
       // Settling the controller posts the error this pool needs to release the
       // slot; nothing waits on this message's reply.
@@ -231,6 +261,7 @@ self.onmessage = async (e: MessageEvent) => {
   const { id, workload, payload, config } = data;
   const taskStartedAt = performance.now();
   activeTaskId = id;
+  releaseTokenFlow(id);
 
   try {
     if (!throttle) {
@@ -285,6 +316,7 @@ self.onmessage = async (e: MessageEvent) => {
     } finally {
       activeTaskId = null;
       cancelRequested.delete(id);
+      releaseTokenFlow(id);
       clearInterval(heartbeat);
       throttle.markTaskComplete(performance.now() - taskStart);
       armIdleEviction();
@@ -293,6 +325,7 @@ self.onmessage = async (e: MessageEvent) => {
     const error = err instanceof Error ? err.message : String(err);
     console.error(`[flaxia-node:worker] task error id=${id} workload=${workload} error=${error}`);
     if (activeTaskId === id) activeTaskId = null;
+    releaseTokenFlow(id);
     self.postMessage({ id, type: 'error', error });
   }
 };
