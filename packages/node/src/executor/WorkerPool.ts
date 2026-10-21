@@ -45,6 +45,7 @@ export class WorkerPool {
   private pendingControls: Array<{ taskId: string; message: unknown }> = [];
   private static readonly MAX_PENDING_CONTROLS = 64;
   private _lastCpuLoad = 0;
+  private _hasCpuLoadSample = false;
 
   constructor(workerUrl?: string, timeoutMs = 300000) {
     this.workerUrl = workerUrl || '/worker.js';
@@ -137,6 +138,7 @@ export class WorkerPool {
       if (type === 'heartbeat') {
         if (typeof cpuLoad === 'number' && Number.isFinite(cpuLoad)) {
           this._lastCpuLoad = Math.min(1, Math.max(0, cpuLoad));
+          this._hasCpuLoadSample = true;
         }
         return;
       }
@@ -302,5 +304,9 @@ export class WorkerPool {
 
   get lastCpuLoad(): number {
     return this._lastCpuLoad;
+  }
+
+  get hasCpuLoadSample(): boolean {
+    return this._hasCpuLoadSample;
   }
 }
