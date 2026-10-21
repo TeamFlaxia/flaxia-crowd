@@ -188,17 +188,21 @@ describe('FlaxiaClient', () => {
   describe('subscribe', () => {
     class MockWebSocket {
       static instances: MockWebSocket[] = [];
+      static OPEN = 1;
       onopen: (() => void) | null = null;
       onmessage: ((ev: MessageEvent) => void) | null = null;
       onerror: (() => void) | null = null;
       closed = false;
+      readyState = 0;
+      sent: string[] = [];
 
       constructor(public url: string, public protocols?: string[]) {
         MockWebSocket.instances.push(this);
-        queueMicrotask(() => this.onopen?.());
+        queueMicrotask(() => { this.readyState = 1; this.onopen?.(); });
       }
 
-      close() { this.closed = true; }
+      send(message: string) { this.sent.push(message); }
+      close() { this.closed = true; this.readyState = 3; }
     }
 
     beforeEach(() => {
@@ -265,6 +269,39 @@ describe('FlaxiaClient', () => {
       await client.subscribe('task_4', { subscribeToken: 'explicit' });
       expect(MockWebSocket.instances[0].protocols).toEqual(['flaxia-subscribe-v1', 'bearer.explicit']);
       expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('buffers tokens until a consumer is attached and acknowledges only after it finishes', async () => {
+      const subscription = await client.subscribe('task_5', { subscribeToken: 'explicit' });
+      const socket = MockWebSocket.instances[0];
+      expect(JSON.parse(socket.sent[0])).toEqual({ type: 'flow-control', version: 1 });
+      socket.onmessage?.({ data: JSON.stringify({ type: 'token', token: 'first', sequence: 4 }) } as MessageEvent);
+
+      let release!: () => void;
+      const received: string[] = [];
+      subscription.onToken(async (token) => {
+        received.push(token);
+        await new Promise<void>((resolve) => { release = resolve; });
+      });
+      await vi.waitFor(() => expect(received).toEqual(['first']));
+      expect(socket.sent.some((item) => JSON.parse(item).type === 'ack')).toBe(false);
+
+      release();
+      await vi.waitFor(() => expect(socket.sent.map((item) => JSON.parse(item)).some(
+        (item) => item.type === 'ack' && item.sequence === 4,
+      )).toBe(true));
+    });
+
+    it('closes instead of growing beyond the bounded SDK token queue', async () => {
+      const subscription = await client.subscribe('task_6', { subscribeToken: 'explicit' });
+      const socket = MockWebSocket.instances[0];
+      for (let sequence = 1; sequence <= 33; sequence++) {
+        socket.onmessage?.({ data: JSON.stringify({ type: 'token', token: 'x', sequence }) } as MessageEvent);
+      }
+      expect(socket.closed).toBe(true);
+      const onError = vi.fn();
+      subscription.onError(onError);
+      expect(onError).toHaveBeenCalledWith(expect.stringMatching(/too slow/));
     });
   });
 
