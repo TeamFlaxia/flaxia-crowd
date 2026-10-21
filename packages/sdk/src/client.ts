@@ -1,6 +1,7 @@
 import type { TaskPayload, WorkloadType, TaskRecord, SubmitTaskResponse } from './types';
 import { AuthenticationError, FlaxiaError, TaskNotFoundError, ValidationError } from './errors';
 import { SUBSCRIBE_PROTOCOL, buildSubscribeProtocols, buildWsUrl } from './handshake';
+import { MAX_SDK_BUFFERED_TOKENS, MAX_SDK_BUFFERED_TOKEN_CHARS } from './flow-control';
 
 export interface FlaxiaClientConfig {
   apiKey: string;
@@ -16,7 +17,7 @@ export interface SubmitTaskOptions {
 }
 
 export interface TaskSubscription {
-  onToken: (callback: (token: string) => void) => void;
+  onToken: (callback: (token: string) => void | Promise<void>) => void;
   onDone: (callback: (result: unknown) => void) => void;
   onError: (callback: (error: string) => void) => void;
   close: () => void;
@@ -184,29 +185,90 @@ export class FlaxiaClient {
     const url = buildWsUrl(this.baseUrl, '/crowd/subscribe', { taskId });
     const ws = new WebSocket(url, buildSubscribeProtocols(token));
 
-    let tokenCallback: ((token: string) => void) | null = null;
+    let tokenCallback: ((token: string) => void | Promise<void>) | null = null;
     let doneCallback: ((result: unknown) => void) | null = null;
     let errorCallback: ((error: string) => void) | null = null;
+    const pendingTokens: Array<{ token: string; sequence?: number }> = [];
+    let pendingTokenChars = 0;
+    let drainingTokens = false;
+    let pendingError: string | null = null;
+
+    const reportError = (message: string) => {
+      pendingTokens.length = 0;
+      pendingTokenChars = 0;
+      if (errorCallback) errorCallback(message);
+      else pendingError = message;
+    };
+
+    const drainTokens = async () => {
+      if (drainingTokens || !tokenCallback) return;
+      drainingTokens = true;
+      try {
+        while (pendingTokens.length > 0) {
+          const callback = tokenCallback;
+          if (!callback) break;
+          const item = pendingTokens.shift()!;
+          pendingTokenChars -= item.token.length;
+          await callback(item.token);
+          if (item.sequence !== undefined && (ws as WebSocket).readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ack', sequence: item.sequence }));
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Token consumer failed';
+        reportError(message);
+        try { ws.close(1011, 'token consumer failed'); } catch {}
+      } finally {
+        drainingTokens = false;
+        if (pendingTokens.length > 0) void drainTokens();
+      }
+    };
 
     return new Promise((resolve, reject) => {
       ws.onopen = () => {
+        // The coordinator only pauses generation for clients that explicitly
+        // support per-token acknowledgements. Older SDKs remain bounded by the
+        // server's legacy in-flight token ceiling.
+        ws.send(JSON.stringify({ type: 'flow-control', version: 1 }));
         resolve({
-          onToken: (cb) => { tokenCallback = cb; },
+          onToken: (cb) => { tokenCallback = cb; void drainTokens(); },
           onDone: (cb) => { doneCallback = cb; },
-          onError: (cb) => { errorCallback = cb; },
-          close: () => { ws.close(); },
+          onError: (cb) => {
+            errorCallback = cb;
+            if (pendingError) {
+              const message = pendingError;
+              pendingError = null;
+              cb(message);
+            }
+          },
+          close: () => { pendingTokens.length = 0; pendingTokenChars = 0; ws.close(); },
         });
       };
 
       ws.onmessage = (ev: MessageEvent) => {
         try {
           const msg = JSON.parse(ev.data as string);
-          if (msg.type === 'token' && tokenCallback) {
-            tokenCallback(msg.token);
+          if (msg.type === 'token') {
+            if (typeof msg.token !== 'string' || msg.token.length > 4096) {
+              reportError('Task stream returned an invalid token');
+              ws.close(1009, 'invalid token');
+              return;
+            }
+            const sequence = Number.isSafeInteger(msg.sequence) && msg.sequence > 0 ? msg.sequence as number : undefined;
+            if (pendingTokens.length >= MAX_SDK_BUFFERED_TOKENS || pendingTokenChars + msg.token.length > MAX_SDK_BUFFERED_TOKEN_CHARS) {
+              reportError('Task stream consumer is too slow; subscription was closed');
+              ws.close(1013, 'slow task stream consumer');
+              return;
+            }
+            pendingTokens.push({ token: msg.token, sequence });
+            pendingTokenChars += msg.token.length;
+            void drainTokens();
           } else if (msg.type === 'done' && doneCallback) {
             doneCallback(msg.result);
           } else if (msg.type === 'error' && errorCallback) {
             errorCallback(msg.error);
+          } else if (msg.type === 'error' && typeof msg.error === 'string') {
+            pendingError = msg.error;
           }
         } catch {}
       };
