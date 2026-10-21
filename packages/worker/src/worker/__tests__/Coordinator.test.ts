@@ -1287,4 +1287,36 @@ describe('Coordinator swarm sessions', () => {
     await new Promise(r => setTimeout(r, 20));
     expect(jsonFrames(n2).some(f => f.type === 'swarm-start')).toBe(true);
   });
+
+  it('relays bounded peer signaling only between current adjacent members', async () => {
+    const { task, n1, n2, n3 } = await setup();
+    const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    await new Promise(r => setTimeout(r, 30));
+
+    const hostSlice = jsonFrames(n2).find(f => f.type === 'swarm-slice');
+    const workerSlice = jsonFrames(n1).find(f => f.type === 'swarm-slice');
+    expect(hostSlice).toMatchObject({ attemptId: init.attemptId, previousNodeId: 'n1', nextNodeId: 'n1' });
+    expect(workerSlice).toMatchObject({ attemptId: init.attemptId, previousNodeId: 'n2', nextNodeId: 'n2' });
+
+    const offer = {
+      type: 'swarm-peer-signal', taskId: task.id, sessionId: init.sessionId,
+      attemptId: init.attemptId, toNodeId: 'n1',
+      signal: { kind: 'description', description: { type: 'offer', sdp: 'v=0' } },
+    };
+    n2.socket.send(JSON.stringify(offer));
+    await new Promise(r => setTimeout(r, 25));
+    expect(jsonFrames(n1).some(f => f.type === 'swarm-peer-signal' && f.fromNodeId === 'n2')).toBe(true);
+
+    const before = jsonFrames(n1).filter(f => f.type === 'swarm-peer-signal').length;
+    n2.socket.send(JSON.stringify({ ...offer, attemptId: 'retired-attempt' }));
+    n2.socket.send(JSON.stringify({ ...offer, toNodeId: 'n3' }));
+    n2.socket.send(JSON.stringify({
+      ...offer,
+      signal: { kind: 'description', description: { type: 'offer', sdp: 'x'.repeat(24 * 1024 + 1) } },
+    }));
+    n3.socket.send(JSON.stringify({ ...offer, toNodeId: 'n2' }));
+    await new Promise(r => setTimeout(r, 25));
+    expect(jsonFrames(n1).filter(f => f.type === 'swarm-peer-signal')).toHaveLength(before);
+  });
 });
