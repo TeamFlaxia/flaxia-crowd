@@ -13,6 +13,7 @@ import {
   isSwarmNodeMessage,
   isSwarmSliceMessage,
   isSwarmPeerSignalMessage,
+  isSwarmFlowMessage,
   isSwarmStartMessage,
   isSwarmErrorMessage,
   isValidSwarmChain,
@@ -23,6 +24,7 @@ import {
   SWARM_FRAME_HEADER_BYTES,
   encodeSwarmEnvelope,
   decodeSwarmEnvelope,
+  MAX_SWARM_ENVELOPE_BYTES,
   computeSwarmFrameMac,
   signSwarmEnvelope,
   verifySwarmEnvelope,
@@ -41,6 +43,11 @@ describe('swarm session envelopes', () => {
     expect(decodeSwarmEnvelope(new ArrayBuffer(0))).toBeNull();
     expect(decodeSwarmEnvelope(encodeSwarmStopFrame())).toBeNull();
     expect(decodeSwarmEnvelope(encodeSwarmEnvelope('s', encodeSwarmStopFrame()).slice(0, 8))).toBeNull();
+  });
+
+  it('caps complete activation envelopes for both relay and peer transports', () => {
+    expect(() => encodeSwarmEnvelope('s', new ArrayBuffer(MAX_SWARM_ENVELOPE_BYTES))).toThrow(/exceeds/);
+    expect(decodeSwarmEnvelope(new ArrayBuffer(MAX_SWARM_ENVELOPE_BYTES + 1))).toBeNull();
   });
 
   it('round-trips a per-hop MAC and reports its absence', () => {
@@ -422,7 +429,6 @@ describe('isValidSwarmChain', () => {
   });
 });
 
-
 describe('swarm peer signaling', () => {
   const base = {
     type: 'swarm-peer-signal',
@@ -457,5 +463,11 @@ describe('swarm peer signaling', () => {
       ...base,
       signal: { kind: 'description', description: { type: 'offer', sdp: '😀'.repeat(9000) } },
     })).toBe(false);
+  });
+
+  it('accepts only task/session-scoped boolean flow controls', () => {
+    expect(isSwarmFlowMessage({ type: 'swarm-flow', taskId: 'task-1', sessionId: 'session-1', paused: true })).toBe(true);
+    expect(isSwarmFlowMessage({ type: 'swarm-flow', taskId: 'task-1', sessionId: 'session-1', paused: 'true' })).toBe(false);
+    expect(isSwarmFlowMessage({ type: 'swarm-flow', taskId: '', sessionId: 'session-1', paused: false })).toBe(false);
   });
 });
