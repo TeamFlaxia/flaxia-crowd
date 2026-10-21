@@ -7,3 +7,4 @@ export * from './nsfw';
 export * from './swarm';
 export * from './handshake';
 export * from './flow-control';
+export * from './peer-quality';
