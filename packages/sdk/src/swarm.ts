@@ -453,6 +453,16 @@ export interface SwarmStartMessage {
 export interface SwarmReadyMessage {
   type: 'swarm-ready';
   sessionId: string;
+  /** True only after all adjacent DataChannels opened before the readiness deadline. */
+  peerReady?: boolean;
+}
+
+/** Coordinator decision shared by every member before generation begins. */
+export interface SwarmTransportMessage {
+  type: 'swarm-transport';
+  sessionId: string;
+  taskId: string;
+  mode: 'peer' | 'relay';
 }
 
 export interface SwarmTokenMessage {
@@ -571,6 +581,15 @@ export function isSwarmStartMessage(value: unknown): value is SwarmStartMessage 
   return typeof value.sessionId === 'string' && !!value.sessionId && typeof value.taskId === 'string' && !!value.taskId;
 }
 
+export function isSwarmTransportMessage(value: unknown): value is SwarmTransportMessage {
+  if (!isRecord(value) || value.type !== 'swarm-transport') return false;
+  return (
+    typeof value.sessionId === 'string' && !!value.sessionId &&
+    typeof value.taskId === 'string' && !!value.taskId &&
+    (value.mode === 'peer' || value.mode === 'relay')
+  );
+}
+
 export function isSwarmErrorMessage(value: unknown): value is SwarmErrorMessage {
   if (!isRecord(value) || value.type !== 'swarm-error') return false;
   return (
@@ -616,6 +635,7 @@ export function isSwarmNodeMessage(value: unknown): value is SwarmNodeMessage {
   if (typeof value.sessionId !== 'string' || !value.sessionId) return false;
   switch (value.type) {
     case 'swarm-ready':
+      return value.peerReady === undefined || typeof value.peerReady === 'boolean';
     case 'swarm-done':
       return true;
     case 'swarm-plan':
