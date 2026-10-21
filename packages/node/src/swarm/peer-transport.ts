@@ -1,9 +1,9 @@
-import { isSwarmPeerSignalMessage } from '@flaxia/sdk';
+import { isSwarmPeerSignalMessage, MAX_SWARM_ENVELOPE_BYTES } from '@flaxia/sdk';
 import type { SwarmPeerSignal, SwarmPeerSignalMessage } from '@flaxia/sdk';
 
 export const SWARM_PEER_CONNECT_TIMEOUT_MS = 5000;
 export const SWARM_PEER_FRAME_CHUNK_BYTES = 16 * 1024;
-export const MAX_SWARM_PEER_FRAME_BYTES = 8 * 1024 * 1024;
+export const MAX_SWARM_PEER_FRAME_BYTES = MAX_SWARM_ENVELOPE_BYTES;
 export const MAX_SWARM_PEER_BUFFERED_BYTES = 256 * 1024;
 
 const PACKET_MAGIC = 0x43584c46; // "FLXC"
