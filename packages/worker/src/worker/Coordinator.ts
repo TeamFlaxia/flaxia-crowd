@@ -6,6 +6,7 @@ import type {
   SwarmInitMessage,
   SwarmSessionPlan,
   TaskRecord,
+  NodeResourceReport,
   WarmModelRange,
   WorkloadType,
 } from "@flaxia/sdk";
@@ -15,6 +16,7 @@ import {
   swarmChainIndex,
   swarmNextHopIndex,
   decodeSwarmEnvelope,
+  validateNodeResourceReport,
   MIN_SWARM_NODES,
   MAX_SWARM_NODES,
 } from "@flaxia/sdk";
@@ -84,6 +86,8 @@ interface NodeRecord {
   maxStorageBufferBindingSize?: number;
   /** Model layer spans already cached on the node. */
   warmModels?: WarmModelRange[];
+  /** Short-lived self-reported measurements; used only as scheduling hints. */
+  resources?: NodeResourceReport;
   /** Tasks handed to this node so far, used as a fairness tie-break. */
   assignedCount?: number;
 }
@@ -259,7 +263,8 @@ export class Coordinator extends DurableObject<Env> {
       id: nodeId,
       status: resumeTask ? "busy" : "idle",
       capabilities,
-      cpuLoad: existing?.cpuLoad ?? 0,
+      // An unmeasured node must not receive the best possible load score.
+      cpuLoad: existing?.cpuLoad ?? 1,
       connectedAt: existing?.connectedAt ?? Date.now(),
       lastPongAt: Date.now(),
       currentTaskId: resumeTask?.id,
@@ -331,6 +336,19 @@ export class Coordinator extends DurableObject<Env> {
           const rawLoad = data.cpuLoad;
           if (typeof rawLoad === "number" && Number.isFinite(rawLoad)) {
             node.cpuLoad = Math.min(1, Math.max(0, rawLoad));
+          }
+          const resources = validateNodeResourceReport(data.resources);
+          if (resources) {
+            node.resources = resources;
+            // Device loss is a current eligibility signal. A later successful
+            // bounded probe can restore this hint; telemetry is never a trust
+            // decision and cannot establish identity or tenant permission.
+            if (resources.gpu.status === "device-lost" || resources.gpu.status === "unsupported" ||
+                resources.gpu.status === "unavailable") {
+              node.webgpu = false;
+            } else if (resources.gpu.status === "available" && node.capabilities.includes("swarm-inference")) {
+              node.webgpu = true;
+            }
           }
           await this.ctx.storage.put(`node:${nodeId}`, node);
         }
@@ -1168,9 +1186,19 @@ export class Coordinator extends DurableObject<Env> {
       !!n.warmModels?.some((m) => m.modelId === wantedModel);
     const capacity = (n: NodeRecord) =>
       clampByteCapacity(n.wasmMemoryBytes) ?? clampByteCapacity(n.maxStorageBufferBindingSize) ?? 0;
+    const now = Date.now();
+    const gpuCompletionMs = (n: NodeRecord) => {
+      const report = n.resources;
+      const metric = report?.gpu.computeCompletionMs;
+      return report && report.expiresAt > now && report.gpu.expiresAt > now &&
+        metric?.source === "measured" && metric.expiresAt > now && metric.value !== null
+        ? metric.value
+        : Number.POSITIVE_INFINITY;
+    };
     eligible.sort(
       (a, b) =>
         (preferWarm ? Number(isWarm(b)) - Number(isWarm(a)) : 0) ||
+        gpuCompletionMs(a) - gpuCompletionMs(b) ||
         capacity(b) - capacity(a) ||
         (a.assignedCount ?? 0) - (b.assignedCount ?? 0) ||
         a.connectedAt - b.connectedAt,
