@@ -150,6 +150,8 @@ export const SWARM_FRAME_KIND = {
  * staying small next to a hidden-state payload.
  */
 export const SWARM_ENVELOPE_MAC_BYTES = 16;
+/** Maximum complete session envelope carried over either DataChannel or relay. */
+export const MAX_SWARM_ENVELOPE_BYTES = 8 * 1024 * 1024;
 
 /**
  * WebSocket envelope: bind an engine frame to one session attempt, optionally
@@ -161,8 +163,15 @@ export const SWARM_ENVELOPE_MAC_BYTES = 16;
  */
 export function encodeSwarmEnvelope(sessionId: string, frame: ArrayBuffer, mac?: Uint8Array | null): ArrayBuffer {
   const id = new TextEncoder().encode(sessionId);
+  if (!id.length || id.length > 256) throw new Error('swarm session id length is invalid');
   const macBytes = mac ?? new Uint8Array(0);
+  if (macBytes.byteLength !== 0 && macBytes.byteLength !== SWARM_ENVELOPE_MAC_BYTES) {
+    throw new Error('swarm envelope MAC length is invalid');
+  }
   const frameOffset = 4 + id.length + 1 + macBytes.byteLength;
+  if (frameOffset + frame.byteLength > MAX_SWARM_ENVELOPE_BYTES) {
+    throw new Error(`swarm envelope exceeds ${MAX_SWARM_ENVELOPE_BYTES} bytes`);
+  }
   const buffer = new ArrayBuffer(frameOffset + frame.byteLength);
   const view = new DataView(buffer);
   view.setUint32(0, id.length, true);
@@ -176,7 +185,7 @@ export function encodeSwarmEnvelope(sessionId: string, frame: ArrayBuffer, mac?:
 export function decodeSwarmEnvelope(
   buffer: ArrayBuffer,
 ): { sessionId: string; frame: ArrayBuffer; mac: Uint8Array | null } | null {
-  if (buffer.byteLength < 4 + 1) return null;
+  if (buffer.byteLength < 4 + 1 || buffer.byteLength > MAX_SWARM_ENVELOPE_BYTES) return null;
   const view = new DataView(buffer);
   const length = view.getUint32(0, true);
   if (!length || length > 256) return null;
@@ -465,6 +474,15 @@ export interface SwarmTransportMessage {
   mode: 'peer' | 'relay';
 }
 
+/** Pause or resume host generation when a bounded result subscriber falls behind. */
+export interface SwarmFlowMessage {
+  type: 'swarm-flow';
+  sessionId: string;
+  taskId: string;
+  paused: boolean;
+  attemptId?: string;
+}
+
 export interface SwarmTokenMessage {
   type: 'swarm-token';
   sessionId: string;
@@ -587,6 +605,16 @@ export function isSwarmTransportMessage(value: unknown): value is SwarmTransport
     typeof value.sessionId === 'string' && !!value.sessionId &&
     typeof value.taskId === 'string' && !!value.taskId &&
     (value.mode === 'peer' || value.mode === 'relay')
+  );
+}
+
+export function isSwarmFlowMessage(value: unknown): value is SwarmFlowMessage {
+  if (!isRecord(value) || value.type !== 'swarm-flow') return false;
+  return (
+    typeof value.sessionId === 'string' && !!value.sessionId &&
+    typeof value.taskId === 'string' && !!value.taskId &&
+    typeof value.paused === 'boolean' &&
+    (value.attemptId === undefined || (typeof value.attemptId === 'string' && !!value.attemptId && value.attemptId.length <= 128))
   );
 }
 
