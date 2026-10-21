@@ -4,6 +4,7 @@ import type {
   SwarmChainNode,
   SwarmInferencePayload,
   SwarmInitMessage,
+  SwarmPeerQualityReport,
   SwarmSessionPlan,
   TaskRecord,
   WarmModelRange,
@@ -13,6 +14,7 @@ import {
   HEAVY_WORKLOADS,
   isValidSwarmChain,
   isSwarmPeerSignalMessage,
+  isSwarmPeerQualityMessage,
   MAX_SUBSCRIBER_INFLIGHT_TOKENS,
   MAX_SUBSCRIBER_INFLIGHT_BYTES,
   SUBSCRIBER_ACK_TIMEOUT_MS,
@@ -26,6 +28,7 @@ import {
 } from "@flaxia/sdk";
 import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
+import { mergePeerQualitySnapshot } from "./peer-quality";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_RETRIES = 3;
@@ -120,6 +123,8 @@ interface SwarmRecord {
   started?: boolean;
   peerReadiness: Record<string, boolean>;
   flowPaused?: boolean;
+  /** Latest bounded, self-reported measurements for adjacent session links. */
+  peerQuality?: Record<string, SwarmPeerQualityReport>;
 }
 
 /**
@@ -374,6 +379,11 @@ export class Coordinator extends DurableObject<Env> {
         return;
       }
 
+      if (data.type === "swarm-peer-quality") {
+        await this.handleSwarmPeerQuality(ws, nodeId, data);
+        return;
+      }
+
       if (data.type === "swarm-ready") {
         await this.handleSwarmReady(nodeId, data.sessionId, data.peerReady === true);
         return;
@@ -524,6 +534,51 @@ export class Coordinator extends DurableObject<Env> {
       toNodeId: data.toNodeId,
       signal,
     }, swarm.attemptId);
+  }
+
+  /** Store only fresh, bounded measurements for a node's current adjacent links. */
+  private async handleSwarmPeerQuality(ws: WebSocket, nodeId: string, data: Record<string, unknown>) {
+    if (data.type !== "swarm-peer-quality" || typeof data.taskId !== "string" ||
+        typeof data.sessionId !== "string" || typeof data.attemptId !== "string" ||
+        !Array.isArray(data.reports) || data.reports.length < 1 || data.reports.length > 2) return;
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(data);
+    } catch {
+      return;
+    }
+    if (serialized.length > 4096) return;
+    const now = Date.now();
+    if (!isSwarmPeerQualityMessage(data, now)) return;
+
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    if (!node || node.currentTaskId !== data.taskId) return;
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${data.taskId}`);
+    if (!swarm || !swarm.plan || swarm.sessionId !== data.sessionId || swarm.attemptId !== data.attemptId ||
+        !swarm.members.some((member) => member.nodeId === nodeId)) return;
+
+    let attachment: { attemptId?: string } | undefined;
+    try {
+      attachment = ws.deserializeAttachment() as { attemptId?: string } | undefined;
+    } catch {
+      return;
+    }
+    if (attachment?.attemptId !== swarm.attemptId) return;
+    if (!(await this.checkRateLimitKey(`rate:peer-quality:${swarm.sessionId}:${nodeId}`, 4))) return;
+
+    const index = swarmChainIndex(swarm.plan, nodeId);
+    if (index < 0) return;
+    const length = swarm.plan.chain.length;
+    const adjacent = new Set([
+      swarm.plan.chain[(index - 1 + length) % length]?.nodeId,
+      swarm.plan.chain[swarmNextHopIndex(length, index)]?.nodeId,
+    ]);
+    const maxEntries = Math.max(2, swarm.plan.chain.length * 2);
+    const result = mergePeerQualitySnapshot(swarm.peerQuality, nodeId, data.reports, adjacent, now, maxEntries);
+    if (!result.accepted) return;
+    // These are self-reported scheduling hints, not proof of peer identity or quality.
+    swarm.peerQuality = result.snapshot;
+    await this.ctx.storage.put(`swarm:${data.taskId}`, swarm);
   }
 
   /**
