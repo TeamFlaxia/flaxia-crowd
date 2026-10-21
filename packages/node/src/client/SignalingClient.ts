@@ -91,6 +91,7 @@ class SignalingClient {
   private swarmHopKeys = new Map<string, { inboundKey?: string; outboundKey?: string; chainLength: number }>();
   private swarmPeerTransports = new Map<string, SwarmPeerTransport>();
   private swarmPeerMetadata = new Map<string, { taskId: string; attemptId: string; peers: string[] }>();
+  private swarmFailureReported = new Set<string>();
   /** Frame handling is serialized: HMAC verification and signing are async. */
   private swarmInboundChain: Promise<void> = Promise.resolve();
   private swarmOutboundChain: Promise<void> = Promise.resolve();
@@ -146,9 +147,10 @@ class SignalingClient {
         type: 'swarm-peer-signal', taskId, sessionId, attemptId, toNodeId, signal,
       }),
       onFrame: (frame) => this.receiveSwarmEnvelope(frame),
-      onFailure: (error) => this.send({
-        type: 'swarm-error', taskId, sessionId, attemptId, error: error.message,
-      }),
+      onFailure: (error) => {
+        this.swarmFailureReported.add(sessionId);
+        this.send({ type: 'swarm-error', taskId, sessionId, attemptId, error: error.message });
+      },
     });
     this.swarmPeerTransports.set(sessionId, transport);
     void transport.start();
@@ -171,6 +173,7 @@ class SignalingClient {
     this.swarmPeerTransports.get(sessionId)?.close();
     this.swarmPeerTransports.delete(sessionId);
     this.swarmPeerMetadata.delete(sessionId);
+    this.swarmFailureReported.delete(sessionId);
     this.retiredSwarmSessions.add(sessionId);
     if (this.retiredSwarmSessions.size > 64) {
       this.retiredSwarmSessions.delete(this.retiredSwarmSessions.values().next().value!);
@@ -312,6 +315,24 @@ class SignalingClient {
           data.attemptId === metadata.attemptId &&
           (data.mode === 'peer' || data.mode === 'relay')
         ) transport.selectMode(data.mode);
+        return;
+      }
+      if (data.type === 'swarm-flow') {
+        const taskId = typeof data.taskId === 'string' ? data.taskId : '';
+        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+        const attemptId = typeof data.attemptId === 'string' ? data.attemptId : '';
+        if (
+          taskId && sessionId && this.swarmSessions.get(taskId) === sessionId &&
+          this.attempts.get(taskId) === attemptId && typeof data.paused === 'boolean'
+        ) this.workerPool.sendControl(data, sessionId);
+        return;
+      }
+      if (data.type === 'task-flow') {
+        const taskId = typeof data.taskId === 'string' ? data.taskId : '';
+        const attemptId = typeof data.attemptId === 'string' ? data.attemptId : '';
+        if (taskId && this.attempts.get(taskId) === attemptId && typeof data.paused === 'boolean') {
+          this.workerPool.setTokenFlow(taskId, data.paused);
+        }
         return;
       }
       if (data.type === 'swarm-start') {
@@ -558,7 +579,18 @@ class SignalingClient {
         const transport = this.swarmPeerTransports.get(sessionId);
         if (!transport || !await transport.sendFrame(envelope)) this.sendBinary(envelope);
       })
-      .catch(() => {});
+      .catch((error) => {
+        const metadata = this.swarmPeerMetadata.get(sessionId);
+        if (!metadata || this.swarmFailureReported.has(sessionId)) return;
+        this.swarmFailureReported.add(sessionId);
+        this.send({
+          type: 'swarm-error',
+          taskId: metadata.taskId,
+          sessionId,
+          attemptId: metadata.attemptId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   /**
