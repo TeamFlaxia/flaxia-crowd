@@ -1,4 +1,4 @@
-import type { TaskPayload, WorkloadType, TaskRecord, SubmitTaskResponse } from './types';
+import type { TaskPayload, WorkloadType, TaskRecord, SubmitTaskResponse, TaskQueueStats } from './types';
 import { AuthenticationError, FlaxiaError, TaskNotFoundError, ValidationError } from './errors';
 import { SUBSCRIBE_PROTOCOL, buildSubscribeProtocols, buildWsUrl } from './handshake';
 
@@ -13,6 +13,8 @@ export interface SubmitTaskOptions {
   payload: TaskPayload;
   callbackUrl?: string;
   timeoutMs?: number;
+  /** Scheduling class from 0 (background) through 3 (interactive). */
+  priority?: 0 | 1 | 2 | 3;
 }
 
 export interface TaskSubscription {
@@ -70,6 +72,12 @@ export class FlaxiaClient {
     };
     if (options.callbackUrl) body.callbackUrl = options.callbackUrl;
     if (options.timeoutMs !== undefined) body.timeoutMs = options.timeoutMs;
+    if (options.priority !== undefined) {
+      if (!Number.isInteger(options.priority) || options.priority < 0 || options.priority > 3) {
+        throw new ValidationError('priority must be an integer between 0 and 3');
+      }
+      body.priority = options.priority;
+    }
 
     const response = await fetch(`${this.baseUrl}/crowd/tasks`, {
       method: 'POST',
@@ -109,6 +117,18 @@ export class FlaxiaClient {
     const task = await response.json() as TaskRecord;
     this.rememberSubscribeToken(taskId, task.subscribeToken, task.subscribeTokenExpiresAt);
     return task;
+  }
+
+  /** Read queue wait and fairness counters for this API key's tenant only. */
+  async getQueueStats(): Promise<TaskQueueStats> {
+    const response = await fetch(`${this.baseUrl}/crowd/queue/stats`, {
+      headers: { 'Authorization': `Bearer ${this.apiKey}` },
+    });
+    if (!response.ok) {
+      const message = await this.extractError(response);
+      throw new FlaxiaError(message, 'QUEUE_STATS_ERROR', response.status);
+    }
+    return response.json() as Promise<TaskQueueStats>;
   }
 
   async waitForTask(taskId: string, intervalMs = 2000, timeoutMs = 60000): Promise<TaskRecord> {
