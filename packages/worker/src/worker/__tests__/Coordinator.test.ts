@@ -105,6 +105,35 @@ async function runAlarm() {
 }
 
 describe('Coordinator', () => {
+  it('validates and rate-limits bounded tenant swarm prewarm tasks', async () => {
+    stub = newStub();
+    const makePrewarmTask = (model: string) => makeTask({
+      workload: 'swarm-inference',
+      payload: {
+        model,
+        prompt: 'flaxia model cache warm-up',
+        maxNewTokens: 1,
+        swarm: { minNodes: 2, maxNodes: 4, preferWarm: false },
+      },
+      priority: 0,
+      timeoutMs: 10 * 60 * 1000,
+    });
+    const sendPrewarm = (task: TaskRecord) => stub.fetch(`http://internal/prewarm?tenantId=${TENANT}`, {
+      method: 'POST',
+      body: JSON.stringify(task),
+    });
+
+    expect((await sendPrewarm(makePrewarmTask('external-url-model'))).status).toBe(400);
+    const first = makePrewarmTask('qwen3.5-2b');
+    const second = makePrewarmTask('qwen3.8-27b');
+    const third = makePrewarmTask('qwen3.6-35b-moe');
+    expect((await sendPrewarm(first)).status).toBe(200);
+    expect((await sendPrewarm(second)).status).toBe(200);
+    expect((await sendPrewarm(third)).status).toBe(429);
+    expect(await getTask(first.id)).toMatchObject({ status: 'pending', workload: 'swarm-inference' });
+  });
+
+
   it('stores a submitted task', async () => {
     stub = newStub();
     const task = makeTask();
