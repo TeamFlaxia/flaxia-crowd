@@ -17,8 +17,10 @@ interface NodeRecord {
   currentTaskId?: string;
   siteId?: string;
   assignedCount?: number;
+  warmModels?: Array<{ modelId: string; startLayer: number; endLayer: number; downloadedAt: number }>;
   resources?: NodeResourceReport;
   modelCache?: NodeModelCacheSnapshot;
+  reservation?: { taskId: string; generation: string; expiresAt: number };
 }
 
 const TENANT = 'tenant-test';
@@ -880,6 +882,62 @@ describe('Coordinator', () => {
     await new Promise(r => setTimeout(r, 30));
     expect((await getTask(second.id)).assignedNodeId).toBe('node-honest');
     expect(jsonFrames(honest).some(f => f.type === 'task' && f.taskId === second.id)).toBe(true);
+  });
+
+  it('records why the warm model node won and exposes the current reservation generation', async () => {
+    stub = newStub();
+    await connectNode('node-cold', 'capabilities=ai-inference');
+    const warm = await connectNode('node-warm', 'capabilities=ai-inference');
+    const now = Date.now();
+    await withStorage(async (storage) => {
+      const record = await storage.get<NodeRecord>('node:node-warm');
+      record!.modelCache = {
+        version: 1,
+        sampledAt: now,
+        expiresAt: now + 60_000,
+        entries: [{ modelId: 'test-model', revision: 'main', dtype: 'q4', backend: 'webgpu', state: 'ready', referenceCount: 1 }],
+      };
+      await storage.put('node:node-warm', record!);
+    });
+
+    const task = makeTask();
+    await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+    await new Promise(r => setTimeout(r, 30));
+
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('node-warm');
+    expect(scheduled.placementReason).toBe('warm-model');
+    const attemptId = jsonFrames(warm).find((frame) => frame.type === 'task' && frame.taskId === task.id)!.attemptId;
+    await withStorage(async (storage) => {
+      expect(await storage.get<NodeRecord>('node:node-warm')).toMatchObject({
+        status: 'busy',
+        currentTaskId: task.id,
+        reservation: { taskId: task.id, generation: attemptId },
+      });
+    });
+  });
+
+  it('ignores active idle-index leases and reuses a node when the lease expires', async () => {
+    stub = newStub();
+    await connectNode('node-leased', 'capabilities=ai-inference');
+    await withStorage(async (storage) => {
+      const record = await storage.get<NodeRecord>('node:node-leased');
+      record!.reservation = { taskId: 'orphaned-task', generation: 'old-attempt', expiresAt: Date.now() + 60_000 };
+      await storage.put('node:node-leased', record!);
+    });
+
+    const task = makeTask();
+    await seedPending([task], ['node-leased']);
+    await runAssign();
+    expect((await getTask(task.id)).status).toBe('pending');
+
+    await withStorage(async (storage) => {
+      const record = await storage.get<NodeRecord>('node:node-leased');
+      record!.reservation!.expiresAt = Date.now() - 1;
+      await storage.put('node:node-leased', record!);
+    });
+    await runAssign();
+    expect((await getTask(task.id)).assignedNodeId).toBe('node-leased');
   });
 });
 
