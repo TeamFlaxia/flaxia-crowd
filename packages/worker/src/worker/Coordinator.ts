@@ -24,6 +24,13 @@ import {
 } from "@flaxia/sdk";
 import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
+import {
+  rankPlacementCandidates,
+  reservationBlocksAllocation,
+  reservationMatches,
+  type NodeReservation,
+  type PlacementCandidate,
+} from "./scheduler";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_RETRIES = 3;
@@ -94,6 +101,8 @@ interface NodeRecord {
   modelCache?: NodeModelCacheSnapshot;
   /** Tasks handed to this node so far, used as a fairness tie-break. */
   assignedCount?: number;
+  /** Lease for the task currently holding this node; fenced by attempt generation. */
+  reservation?: NodeReservation;
 }
 
 /** True for container tasks whose bytes are fetched from a scoped reference. */
@@ -114,6 +123,8 @@ interface SwarmRecord {
   taskId: string;
   hostNodeId: string;
   members: Array<{ nodeId: string; capacity: number }>;
+  generation: string;
+  reservationExpiresAt: number;
   ready: string[];
   plan?: SwarmSessionPlan;
   started?: boolean;
@@ -126,6 +137,7 @@ interface SwarmRecord {
  */
 interface AttemptRecord {
   attemptId: string;
+  generation: string;
   nodeId: string;
   tenantId: string;
 }
@@ -272,6 +284,13 @@ export class Coordinator extends DurableObject<Env> {
       connectedAt: existing?.connectedAt ?? Date.now(),
       lastPongAt: Date.now(),
       currentTaskId: resumeTask?.id,
+      reservation: resumeTask
+        ? existing?.reservation ?? {
+            taskId: resumeTask.id,
+            generation: crypto.randomUUID(),
+            expiresAt: (resumeTask.assignedAt ?? Date.now()) + (resumeTask.timeoutMs || DEFAULT_TIMEOUT_MS),
+          }
+        : undefined,
       lowMemory: url.searchParams.get("lowMemory") === "true",
       siteId,
       fileSources: url.searchParams.get("fileSources") === "true",
@@ -420,7 +439,12 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   private async recordAttempt(taskId: string, nodeId: string, tenantId: string, attemptId: string) {
-    await this.ctx.storage.put(`attempt:${taskId}`, { attemptId, nodeId, tenantId } satisfies AttemptRecord);
+    await this.ctx.storage.put(`attempt:${taskId}`, {
+      attemptId,
+      generation: attemptId,
+      nodeId,
+      tenantId,
+    } satisfies AttemptRecord);
   }
 
   private async retireAttempt(taskId: string) {
@@ -441,6 +465,10 @@ export class Coordinator extends DurableObject<Env> {
     if (typeof rawAttemptId !== "string" || !rawAttemptId) return null;
     const attempt = await this.ctx.storage.get<AttemptRecord>(`attempt:${taskId}`);
     if (!attempt || attempt.attemptId !== rawAttemptId || attempt.nodeId !== nodeId) return null;
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    const generation = attempt.generation ?? attempt.attemptId;
+    if (node?.reservation && (!reservationMatches(node.reservation, taskId, generation) ||
+        node.reservation.expiresAt <= Date.now())) return null;
     let attachment: { attemptId?: string } | undefined;
     try {
       attachment = ws.deserializeAttachment() as { attemptId?: string } | undefined;
@@ -827,7 +855,7 @@ export class Coordinator extends DurableObject<Env> {
     if (swarm) {
       await this.releaseSwarmMembers(taskId);
     } else {
-      await this.releaseNode(nodeId);
+      await this.releaseNode(nodeId, taskId, attemptId);
     }
 
     const processing = await this.getProcessing();
@@ -867,6 +895,12 @@ export class Coordinator extends DurableObject<Env> {
     // not survive to route a later attempt's frames, and a retired attempt must
     // not be able to settle the task after this point.
     task.swarmSession = undefined;
+    const reservedNode = task.assignedNodeId
+      ? await this.ctx.storage.get<NodeRecord>(`node:${task.assignedNodeId}`)
+      : undefined;
+    const reservationGeneration = reservedNode?.reservation?.taskId === taskId
+      ? reservedNode.reservation.generation
+      : undefined;
     await this.retireAttempt(taskId);
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
@@ -886,7 +920,7 @@ export class Coordinator extends DurableObject<Env> {
     if (swarm) {
       await this.releaseSwarmMembers(taskId);
     } else if (task.assignedNodeId && release) {
-      await this.releaseNode(task.assignedNodeId);
+      await this.releaseNode(task.assignedNodeId, taskId, reservationGeneration);
     }
 
     // Retry transient failures (timeout / disconnect) up to MAX_RETRIES times.
@@ -947,11 +981,14 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
-  private async releaseNode(nodeId: string) {
+  private async releaseNode(nodeId: string, taskId?: string, generation?: string) {
     const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     if (!node) return;
+    if (taskId && node.currentTaskId && node.currentTaskId !== taskId) return;
+    if (taskId && node.reservation && !reservationMatches(node.reservation, taskId, generation)) return;
     node.status = "idle";
     node.currentTaskId = undefined;
+    node.reservation = undefined;
     await this.ctx.storage.put(`node:${nodeId}`, node);
 
     const idleNodes = await this.getIdleNodes();
@@ -967,7 +1004,7 @@ export class Coordinator extends DurableObject<Env> {
     for (const member of record.members) {
       const node = await this.ctx.storage.get<NodeRecord>(`node:${member.nodeId}`);
       if (node?.currentTaskId === taskId) {
-        await this.releaseNode(member.nodeId);
+        await this.releaseNode(member.nodeId, taskId, record.generation);
       }
     }
     await this.ctx.storage.delete(`swarm:${taskId}`);
@@ -1012,9 +1049,18 @@ export class Coordinator extends DurableObject<Env> {
    * reconnect) gets a new attempt id, and only the receiving socket is allowed
    * to settle it, so a replayed or forged result cannot complete the task.
    */
-  private async deliverTask(task: TaskRecord, socket?: WebSocket): Promise<boolean> {
+  private async deliverTask(task: TaskRecord, socket?: WebSocket, generation = crypto.randomUUID()): Promise<boolean> {
     if (!task.assignedNodeId) return false;
-    const attemptId = crypto.randomUUID();
+    const attemptId = generation;
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${task.assignedNodeId}`);
+    if (node?.currentTaskId === task.id) {
+      node.reservation = {
+        taskId: task.id,
+        generation,
+        expiresAt: (task.assignedAt ?? Date.now()) + (task.timeoutMs || DEFAULT_TIMEOUT_MS),
+      };
+      await this.ctx.storage.put(`node:${task.assignedNodeId}`, node);
+    }
     const message = JSON.stringify({
       type: "task",
       taskId: task.id,
@@ -1067,14 +1113,12 @@ export class Coordinator extends DurableObject<Env> {
         continue;
       }
 
-      let chosenNode: string | null = null;
-      let bestAssigned = Infinity;
-      let bestBucket = Infinity;
-      let bestConnectedAt = Infinity;
+      const candidates: PlacementCandidate[] = [];
 
       for (const nodeId of remainingIdle) {
         const node = nodes.get(nodeId);
         if (!node || node.status !== "idle") continue;
+        if (reservationBlocksAllocation(node.reservation, Date.now())) continue;
         if (taskNeedsFileSources(task) && !node.fileSources) continue;
         if (!node.capabilities.includes(task.workload as WorkloadType)) continue;
         // Never hand a heavy WASM workload to a low-memory / mobile node; the
@@ -1086,25 +1130,40 @@ export class Coordinator extends DurableObject<Env> {
         const sockets = this.ctx.getWebSockets(nodeId);
         if (sockets.length === 0) continue;
 
-        // `cpuLoad` is self-reported and cannot be verified, so it is only a
-        // tie-break inside an equal-use group: a node that lies about its load
-        // cannot monopolize the queue because the node with fewer assignments
-        // always wins first.
-        const assigned = node.assignedCount ?? 0;
-        const bucket = loadBucket(node.cpuLoad);
-        if (
-          assigned < bestAssigned ||
-          (assigned === bestAssigned && bucket < bestBucket) ||
-          (assigned === bestAssigned && bucket === bestBucket && node.connectedAt < bestConnectedAt)
-        ) {
-          chosenNode = nodeId;
-          bestAssigned = assigned;
-          bestBucket = bucket;
-          bestConnectedAt = node.connectedAt;
-        }
+        const now = Date.now();
+        const report = node.resources;
+        const gpuMetric = report?.gpu.computeCompletionMs;
+        const gpuCompletionMs = report && report.expiresAt > now && report.gpu.expiresAt > now &&
+          gpuMetric?.source === "measured" && gpuMetric.expiresAt > now && gpuMetric.value !== null
+          ? gpuMetric.value
+          : null;
+        const cpuMetric = report?.cpuLoad;
+        const cpuLoad = report && report.expiresAt > now && cpuMetric?.source === "measured" &&
+          cpuMetric.expiresAt > now && cpuMetric.value !== null
+          ? cpuMetric.value
+          : now - node.lastPongAt <= STALE_NODE_MS ? loadBucket(node.cpuLoad) : null;
+        const payload = task.payload as { model?: unknown } | null;
+        const model = typeof payload?.model === "string" ? payload.model : "";
+        candidates.push({
+          nodeId,
+          warmModel: !!model && (
+            !!node.warmModels?.some((entry) => entry.modelId === model) ||
+            !!node.modelCache?.entries.some((entry) => entry.modelId === model && entry.state === "ready")
+          ),
+          gpuCompletionMs,
+          capacityBytes: clampByteCapacity(node.wasmMemoryBytes) ??
+            clampByteCapacity(node.maxStorageBufferBindingSize) ?? null,
+          cpuLoad,
+          assignedCount: node.assignedCount ?? 0,
+          connectedAt: node.connectedAt,
+        });
       }
 
+      const selected = rankPlacementCandidates(candidates)[0];
+      const chosenNode = selected?.candidate.nodeId ?? null;
+
       if (!chosenNode) continue;
+      task.placementReason = selected.reason;
 
       task.status = "processing";
       task.assignedNodeId = chosenNode;
@@ -1123,17 +1182,23 @@ export class Coordinator extends DurableObject<Env> {
       await this.ctx.storage.put("queue:processing", this.processingCache);
 
       const node = nodes.get(chosenNode);
+      const generation = crypto.randomUUID();
       if (node) {
         node.status = "busy";
         node.currentTaskId = taskId;
         node.assignedCount = (node.assignedCount ?? 0) + 1;
+        node.reservation = {
+          taskId,
+          generation,
+          expiresAt: task.assignedAt + (task.timeoutMs || DEFAULT_TIMEOUT_MS),
+        };
         await this.ctx.storage.put(`node:${chosenNode}`, node);
       }
 
       remainingIdle = remainingIdle.filter(id => id !== chosenNode);
       await this.ctx.storage.put("nodes:idle", remainingIdle);
 
-      const sent = await this.deliverTask(task);
+      const sent = await this.deliverTask(task, undefined, generation);
 
       // If the send failed, immediately fail the task (with retry) instead of
       // leaving it stuck in `processing`.
@@ -1171,6 +1236,7 @@ export class Coordinator extends DurableObject<Env> {
     for (const nodeId of idle) {
       const node = nodes.get(nodeId);
       if (!node || node.status !== "idle") continue;
+      if (reservationBlocksAllocation(node.reservation, Date.now())) continue;
       if (!node.capabilities.includes("swarm-inference")) continue;
       if (!node.webgpu) continue;
       if (node.lowMemory) continue;
@@ -1191,32 +1257,39 @@ export class Coordinator extends DurableObject<Env> {
     // sampling).
     const preferWarm = opts.preferWarm !== false;
     const wantedModel = typeof payload?.model === "string" ? payload.model : "";
-    const isWarm = (n: NodeRecord) =>
-      !!n.warmModels?.some((m) => m.modelId === wantedModel);
     const capacity = (n: NodeRecord) =>
       clampByteCapacity(n.wasmMemoryBytes) ?? clampByteCapacity(n.maxStorageBufferBindingSize) ?? 0;
     const now = Date.now();
-    const gpuCompletionMs = (n: NodeRecord) => {
-      const report = n.resources;
-      const metric = report?.gpu.computeCompletionMs;
-      return report && report.expiresAt > now && report.gpu.expiresAt > now &&
-        metric?.source === "measured" && metric.expiresAt > now && metric.value !== null
-        ? metric.value
-        : Number.POSITIVE_INFINITY;
-    };
-    eligible.sort(
-      (a, b) =>
-        (preferWarm ? Number(isWarm(b)) - Number(isWarm(a)) : 0) ||
-        gpuCompletionMs(a) - gpuCompletionMs(b) ||
-        capacity(b) - capacity(a) ||
-        (a.assignedCount ?? 0) - (b.assignedCount ?? 0) ||
-        a.connectedAt - b.connectedAt,
-    );
-    const chosen = eligible.slice(0, Math.min(maxNodes, eligible.length));
+    const placementCandidates = eligible.map((node): PlacementCandidate => {
+      const report = node.resources;
+      const gpu = report?.gpu.computeCompletionMs;
+      const cpu = report?.cpuLoad;
+      return {
+        nodeId: node.id,
+        warmModel: preferWarm && !!wantedModel && (
+          !!node.warmModels?.some((entry) => entry.modelId === wantedModel) ||
+          !!node.modelCache?.entries.some((entry) => entry.modelId === wantedModel && entry.state === "ready")
+        ),
+        gpuCompletionMs: report && report.expiresAt > now && report.gpu.expiresAt > now &&
+          gpu?.source === "measured" && gpu.expiresAt > now && gpu.value !== null ? gpu.value : null,
+        capacityBytes: capacity(node) || null,
+        cpuLoad: report && report.expiresAt > now && cpu?.source === "measured" &&
+          cpu.expiresAt > now && cpu.value !== null ? cpu.value : null,
+        assignedCount: node.assignedCount ?? 0,
+        connectedAt: node.connectedAt,
+      };
+    });
+    const ranked = rankPlacementCandidates(placementCandidates);
+    const byId = new Map(eligible.map((node) => [node.id, node]));
+    const chosen = ranked.slice(0, Math.min(maxNodes, ranked.length))
+      .map(({ candidate }) => byId.get(candidate.nodeId)!)
+      .filter(Boolean);
     if (chosen.length === 0) return null;
     const host = chosen[0];
     const sessionId = crypto.randomUUID();
     const attemptId = crypto.randomUUID();
+    const reservationExpiresAt = Date.now() + (task.timeoutMs || DEFAULT_TIMEOUT_MS);
+    task.placementReason = ranked[0].reason;
     const members = chosen.map((n) => ({
       nodeId: n.id,
       capacity: capacity(n) || 1,
@@ -1239,6 +1312,11 @@ export class Coordinator extends DurableObject<Env> {
       n.status = "busy";
       n.currentTaskId = task.id;
       n.assignedCount = (n.assignedCount ?? 0) + 1;
+      n.reservation = {
+        taskId: task.id,
+        generation: attemptId,
+        expiresAt: reservationExpiresAt,
+      };
       await this.ctx.storage.put(`node:${n.id}`, n);
     }
 
@@ -1247,6 +1325,8 @@ export class Coordinator extends DurableObject<Env> {
       taskId: task.id,
       hostNodeId: host.id,
       members,
+      generation: attemptId,
+      reservationExpiresAt,
       ready: [],
     };
     await this.ctx.storage.put(`swarm:${task.id}`, record);
@@ -1320,7 +1400,18 @@ export class Coordinator extends DurableObject<Env> {
 
     for (const [key, record] of nodeEntries) {
       const nodeId = key.slice("node:".length);
-      const node = record as unknown as NodeRecord;
+      let node = record as unknown as NodeRecord;
+
+      if (node.reservation && now >= node.reservation.expiresAt) {
+        const lease = node.reservation;
+        const task = await this.getTask(lease.taskId);
+        if (task?.status === "processing") {
+          await this.failTask(task.id, "Node reservation expired");
+        } else {
+          await this.releaseNode(nodeId, lease.taskId, lease.generation);
+        }
+        node = (await this.ctx.storage.get<NodeRecord>(key)) ?? node;
+      }
 
       if (now - node.lastPongAt > STALE_NODE_MS) {
         if (node.currentTaskId) {
@@ -1339,7 +1430,13 @@ export class Coordinator extends DurableObject<Env> {
         } catch {}
       }
     }
-    await this.ctx.storage.put("nodes:idle", idleNodes);
+    const idleIds = new Set([...idleNodes, ...(await this.getIdleNodes())]);
+    const reconciledIdle: string[] = [];
+    for (const nodeId of idleIds) {
+      const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+      if (node?.status === "idle" && now - node.lastPongAt <= STALE_NODE_MS) reconciledIdle.push(nodeId);
+    }
+    await this.ctx.storage.put("nodes:idle", reconciledIdle);
 
     // GC expired rate-limit entries.
     const rateEntries = await this.ctx.storage.list({ prefix: "rate:" });
@@ -1353,6 +1450,7 @@ export class Coordinator extends DurableObject<Env> {
     const pending = await this.getPending();
     const processing = await this.getProcessing();
     const remainingIdle = await this.getIdleNodes();
+    if (pending.length > 0 && remainingIdle.length > 0) await this.tryAssignAll();
     if (pending.length > 0 || processing.length > 0 || remainingIdle.length > 0) {
       await this.ctx.storage.setAlarm(now + ALARM_INTERVAL_MS);
     }
