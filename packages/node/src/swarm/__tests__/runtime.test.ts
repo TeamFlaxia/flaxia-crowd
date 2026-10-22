@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildSemantics, rangeFetch, resolveModelUrl } from '../runtime';
+import { buildSemantics, createSwarmModelCacheEntryStatus, rangeFetch, resolveModelUrl } from '../runtime';
 import type { PooledEngineModule, PooledTokenizer } from '../adapter';
 
 afterEach(() => {
@@ -22,6 +22,25 @@ describe('resolveModelUrl', () => {
 
   it('rejects an unknown model id', () => {
     expect(() => resolveModelUrl('not-a-model')).toThrow(/unknown swarm model/);
+  });
+});
+
+describe('swarm executable model status', () => {
+  it('identifies a loaded slice by model revision, dtype, backend, and layer range', () => {
+    expect(createSwarmModelCacheEntryStatus(
+      'qwen3.5-2b',
+      { start: 4, end: 12, hasEmbed: false, hasHead: false },
+      'ready',
+      1,
+    )).toEqual({
+      modelId: 'qwen3.5-2b',
+      revision: 'main',
+      dtype: 'Q4_0',
+      backend: 'webgpu',
+      layerRange: [4, 12],
+      state: 'ready',
+      referenceCount: 1,
+    });
   });
 });
 

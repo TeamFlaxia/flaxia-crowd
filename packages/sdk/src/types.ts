@@ -433,11 +433,28 @@ export interface TaskRecord {
    * only nodes whose signed token carries a matching `siteId` may run the task.
    */
   allowedSites?: string[];
+  /** Caller-selected scheduling class. Lower values age into fair service. */
+  priority?: 0 | 1 | 2 | 3;
+  /** Start of the current pending interval; resets when a failed attempt is retried. */
+  queuedAt?: number;
   assignedAt?: number;
+  /** Milliseconds spent pending before the current assignment. */
+  queueWaitMs?: number;
+  /** Incremented when a retried attempt re-prefills and resets streamed output. */
+  streamEpoch?: number;
   completedAt?: number;
   assignedNodeId?: string;
   assignedCoordinatorNodeId?: string;
   assignedExpertNodeIds?: string[];
+  /** Compact explanation of the coordinator's selected placement heuristic. */
+  placementReason?:
+    | 'only-eligible-candidate'
+    | 'warm-model'
+    | 'measured-gpu'
+    | 'known-capacity'
+    | 'reported-load'
+    | 'assignment-count'
+    | 'stable-order';
   retryCount: number;
   timeoutMs: number;
   callbackUrl?: string;
@@ -468,6 +485,22 @@ export interface SubmitTaskResponse {
   /** Short-lived token required by `GET /crowd/subscribe` for this task. */
   subscribeToken?: string;
   subscribeTokenExpiresAt?: number;
+}
+
+/** Signals that the current attempt ended and a retry will restart from the prompt. */
+export interface TaskStreamReset {
+  epoch: number;
+}
+
+export interface TaskQueueStats {
+  pendingCount: number;
+  pendingByPriority: Record<0 | 1 | 2 | 3, number>;
+  assignedByPriority: Record<0 | 1 | 2 | 3, number>;
+  rejectionCounts: Record<'global-cap' | 'tenant-cap' | 'enqueue-rate', number>;
+  oldestPendingWaitMs: number | null;
+  lastAssignmentWaitMs: number | null;
+  maxAssignmentWaitMs: number | null;
+  updatedAt: number | null;
 }
 
 /**
@@ -575,6 +608,59 @@ export interface SwarmNodeCapabilities {
   gpuArchitecture?: string;
   /** Adapter max storage-buffer binding size in bytes, when reported. */
   maxStorageBufferBindingSize?: number;
+}
+
+/** How a resource value was obtained. Unknown values are always represented by null. */
+export type ResourceMetricSource = 'measured' | 'estimated' | 'unknown';
+
+export type ResourceMetricUnit = 'ratio' | 'bytes' | 'GiB' | 'ms' | 'text';
+
+/** A bounded, time-stamped resource observation. `expiresAt` is never a cache hint from the node. */
+export interface ResourceMetric<T extends number | string> {
+  value: T | null;
+  unit: ResourceMetricUnit;
+  source: ResourceMetricSource;
+  sampledAt: number;
+  expiresAt: number;
+  sampleCount: number;
+}
+
+export type GpuProbeStatus = 'available' | 'unsupported' | 'unavailable' | 'device-lost' | 'unknown';
+
+/** Current, self-reported diagnostics used for scheduling hints, never trust decisions. */
+export interface NodeResourceReport {
+  version: 1;
+  sampledAt: number;
+  expiresAt: number;
+  cpuLoad: ResourceMetric<number>;
+  wasmMemoryLowerBound: ResourceMetric<number>;
+  deviceMemory: ResourceMetric<number>;
+  gpu: {
+    status: GpuProbeStatus;
+    sampledAt: number;
+    expiresAt: number;
+    architecture: ResourceMetric<string>;
+    maxStorageBufferBindingSize: ResourceMetric<number>;
+    computeCompletionMs: ResourceMetric<number>;
+    /** Total/free GPU memory is not exposed by WebGPU and remains unknown. */
+    memoryBytes: ResourceMetric<number>;
+  };
+}
+
+export interface MemoryBudgetInput {
+  availableBytes: number | null;
+  modelBytes: number | null;
+  activationBytes: number | null;
+  kvCacheBytes: number | null;
+  reservedBytes: number | null;
+  safetyMarginBytes: number | null;
+}
+
+export interface MemoryBudgetResult {
+  fits: boolean | null;
+  requiredBytes: number | null;
+  availableBytes: number | null;
+  missing: Array<'availableBytes' | 'modelBytes' | 'activationBytes' | 'kvCacheBytes' | 'reservedBytes' | 'safetyMarginBytes'>;
 }
 
 /** A layer span of a model a node already holds in its persistent cache. */

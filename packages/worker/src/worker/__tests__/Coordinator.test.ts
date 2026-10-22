@@ -1,8 +1,10 @@
 import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
-import { describe, it, expect } from 'vitest';
-import type { SwarmChainNode, TaskRecord } from '@flaxia/sdk';
-import { encodeSwarmEnvelope, verifyCrowdWebhook } from '@flaxia/sdk';
+import { describe, it, expect, vi } from 'vitest';
+import type { NodeResourceReport, NodeModelCacheSnapshot, SwarmChainNode, TaskRecord } from '@flaxia/sdk';
+import { encodeSwarmEnvelope, MAX_RESOURCE_CAPACITY_BYTES, verifyCrowdWebhook } from '@flaxia/sdk';
+import type { PeerLinkHistory } from '../peer-link-history';
 import { MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK } from '../Coordinator';
+import { MAX_SWARM_RELAY_BYTES_PER_TASK, swarmRelayBudgetKey } from '../relay-budget';
 import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
 
@@ -17,6 +19,10 @@ interface NodeRecord {
   currentTaskId?: string;
   siteId?: string;
   assignedCount?: number;
+  warmModels?: Array<{ modelId: string; startLayer: number; endLayer: number; downloadedAt: number }>;
+  resources?: NodeResourceReport;
+  modelCache?: NodeModelCacheSnapshot;
+  reservation?: { taskId: string; generation: string; expiresAt: number };
 }
 
 const TENANT = 'tenant-test';
@@ -101,6 +107,35 @@ async function runAlarm() {
 }
 
 describe('Coordinator', () => {
+  it('validates and rate-limits bounded tenant swarm prewarm tasks', async () => {
+    stub = newStub();
+    const makePrewarmTask = (model: string) => makeTask({
+      workload: 'swarm-inference',
+      payload: {
+        model,
+        prompt: 'flaxia model cache warm-up',
+        maxNewTokens: 1,
+        swarm: { minNodes: 2, maxNodes: 4, preferWarm: false },
+      },
+      priority: 0,
+      timeoutMs: 10 * 60 * 1000,
+    });
+    const sendPrewarm = (task: TaskRecord) => stub.fetch(`http://internal/prewarm?tenantId=${TENANT}`, {
+      method: 'POST',
+      body: JSON.stringify(task),
+    });
+
+    expect((await sendPrewarm(makePrewarmTask('external-url-model'))).status).toBe(400);
+    const first = makePrewarmTask('qwen3.5-2b');
+    const second = makePrewarmTask('qwen3.8-27b');
+    const third = makePrewarmTask('qwen3.6-35b-moe');
+    expect((await sendPrewarm(first)).status).toBe(200);
+    expect((await sendPrewarm(second)).status).toBe(200);
+    expect((await sendPrewarm(third)).status).toBe(429);
+    expect(await getTask(first.id)).toMatchObject({ status: 'pending', workload: 'swarm-inference' });
+  });
+
+
   it('stores a submitted task', async () => {
     stub = newStub();
     const task = makeTask();
@@ -795,6 +830,60 @@ describe('Coordinator', () => {
     });
   });
 
+  it('stores only fresh bounded resource and executable model snapshots from authenticated heartbeats', async () => {
+    stub = newStub();
+    const node = await connectNode('node-resource', 'capabilities=swarm-inference&webgpu=true');
+    const now = Date.now();
+    const metric = (value: number | string | null, unit: string, source: string, ttl: number) => ({
+      value,
+      unit,
+      source,
+      sampledAt: now,
+      expiresAt: now + ttl,
+      sampleCount: value === null ? 0 : 1,
+    });
+    const valid: NodeResourceReport = {
+      version: 1,
+      sampledAt: now,
+      expiresAt: now + 90_000,
+      cpuLoad: metric(0.25, 'ratio', 'estimated', 90_000) as NodeResourceReport['cpuLoad'],
+      wasmMemoryLowerBound: metric(2 * 1024 ** 3, 'bytes', 'measured', 24 * 60 * 60 * 1000) as NodeResourceReport['wasmMemoryLowerBound'],
+      deviceMemory: metric(null, 'GiB', 'unknown', 24 * 60 * 60 * 1000) as NodeResourceReport['deviceMemory'],
+      gpu: {
+        status: 'available',
+        sampledAt: now,
+        expiresAt: now + 10 * 60 * 1000,
+        architecture: metric('test-gpu', 'text', 'measured', 10 * 60 * 1000) as NodeResourceReport['gpu']['architecture'],
+        maxStorageBufferBindingSize: metric(128 * 1024 ** 2, 'bytes', 'measured', 10 * 60 * 1000) as NodeResourceReport['gpu']['maxStorageBufferBindingSize'],
+        computeCompletionMs: metric(2, 'ms', 'measured', 10 * 60 * 1000) as NodeResourceReport['gpu']['computeCompletionMs'],
+        memoryBytes: metric(null, 'bytes', 'unknown', 10 * 60 * 1000) as NodeResourceReport['gpu']['memoryBytes'],
+      },
+    };
+    const modelCache: NodeModelCacheSnapshot = {
+      version: 1,
+      sampledAt: now,
+      expiresAt: now + 60_000,
+      entries: [{ modelId: 'qwen3-1.7b', revision: 'main', dtype: 'q4_0', backend: 'webgpu', layerRange: [0, 16], state: 'ready', referenceCount: 1 }],
+    };
+    node.socket.send(JSON.stringify({ type: 'pong', resources: valid, modelCache }));
+    await new Promise(r => setTimeout(r, 30));
+    await withStorage(async (storage) => {
+      expect((await storage.get<NodeRecord>('node:node-resource'))!.resources?.gpu.computeCompletionMs.value).toBe(2);
+      expect((await storage.get<NodeRecord>('node:node-resource'))!.modelCache?.entries[0].layerRange).toEqual([0, 16]);
+    });
+
+    const invalid = structuredClone(valid);
+    invalid.wasmMemoryLowerBound.value = MAX_RESOURCE_CAPACITY_BYTES + 1;
+    node.socket.send(JSON.stringify({ type: 'pong', resources: invalid, modelCache: { ...modelCache, entries: [{ ...modelCache.entries[0], referenceCount: -1 }] } }));
+    await new Promise(r => setTimeout(r, 30));
+    await withStorage(async (storage) => {
+      // A malformed report must not replace the last valid measurement.
+      expect((await storage.get<NodeRecord>('node:node-resource'))!.resources?.wasmMemoryLowerBound.value)
+        .toBe(2 * 1024 ** 3);
+      expect((await storage.get<NodeRecord>('node:node-resource'))!.modelCache?.entries[0].referenceCount).toBe(1);
+    });
+  });
+
   it('does not let a node that claims zero load monopolize assignments', async () => {
     stub = newStub();
     const liar = await connectNode('node-liar', 'capabilities=ai-inference');
@@ -824,6 +913,101 @@ describe('Coordinator', () => {
     await new Promise(r => setTimeout(r, 30));
     expect((await getTask(second.id)).assignedNodeId).toBe('node-honest');
     expect(jsonFrames(honest).some(f => f.type === 'task' && f.taskId === second.id)).toBe(true);
+  });
+
+  it('records why the warm model node won and exposes the current reservation generation', async () => {
+    stub = newStub();
+    await connectNode('node-cold', 'capabilities=ai-inference');
+    const warm = await connectNode('node-warm', 'capabilities=ai-inference');
+    const now = Date.now();
+    await withStorage(async (storage) => {
+      const record = await storage.get<NodeRecord>('node:node-warm');
+      record!.modelCache = {
+        version: 1,
+        sampledAt: now,
+        expiresAt: now + 60_000,
+        entries: [{ modelId: 'test-model', revision: 'main', dtype: 'q4', backend: 'webgpu', state: 'ready', referenceCount: 1 }],
+      };
+      await storage.put('node:node-warm', record!);
+    });
+
+    const task = makeTask();
+    await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+    await new Promise(r => setTimeout(r, 30));
+
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('node-warm');
+    expect(scheduled.placementReason).toBe('warm-model');
+    const attemptId = jsonFrames(warm).find((frame) => frame.type === 'task' && frame.taskId === task.id)!.attemptId;
+    await withStorage(async (storage) => {
+      expect(await storage.get<NodeRecord>('node:node-warm')).toMatchObject({
+        status: 'busy',
+        currentTaskId: task.id,
+        reservation: { taskId: task.id, generation: attemptId },
+      });
+    });
+  });
+
+  it('finds eligible work behind more than one assignment pass of ineligible tasks', async () => {
+    stub = newStub();
+    await connectNode('available-ai', 'capabilities=ai-inference');
+    const blocked = Array.from({ length: 33 }, () => makeTask({ workload: 'container', priority: 3 }));
+    const eligible = makeTask({ priority: 0 });
+    await seedPending([...blocked, eligible], ['available-ai']);
+    await runAssign();
+    expect(await getTask(eligible.id)).toMatchObject({ status: 'processing', assignedNodeId: 'available-ai' });
+    expect(await getTask(blocked[0].id)).toMatchObject({ status: 'pending' });
+  });
+
+  it('ages a retry from its new pending interval', async () => {
+    stub = newStub();
+    await connectNode('retry-age-node', 'capabilities=ai-inference');
+    const now = Date.now();
+    const retry = makeTask({ priority: 0, createdAt: now - 240_000, queuedAt: now, retryCount: 1 });
+    const interactive = makeTask({ priority: 3, createdAt: now });
+    await seedPending([retry, interactive], ['retry-age-node']);
+    await runAssign();
+    expect(await getTask(interactive.id)).toMatchObject({ status: 'processing' });
+    expect(await getTask(retry.id)).toMatchObject({ status: 'pending' });
+  });
+
+  it('ages old background work ahead of fresh interactive work and records queue wait', async () => {
+    stub = newStub();
+    await connectNode('fair-node', 'capabilities=ai-inference');
+    const now = Date.now();
+    const background = makeTask({ id: 'background', tenantId: TENANT, priority: 0, createdAt: now - 4 * 60_000 });
+    const interactive = makeTask({ id: 'interactive', tenantId: OTHER_TENANT, priority: 3, createdAt: now });
+    await seedPending([interactive, background], ['fair-node']);
+
+    await runAssign();
+
+    const assigned = await getTask(background.id);
+    expect(assigned.status).toBe('processing');
+    expect(assigned.queueWaitMs).toBeGreaterThanOrEqual(4 * 60_000);
+    expect((await getTask(interactive.id, OTHER_TENANT)).status).toBe('pending');
+  });
+
+  it('ignores active idle-index leases and reuses a node when the lease expires', async () => {
+    stub = newStub();
+    await connectNode('node-leased', 'capabilities=ai-inference');
+    await withStorage(async (storage) => {
+      const record = await storage.get<NodeRecord>('node:node-leased');
+      record!.reservation = { taskId: 'orphaned-task', generation: 'old-attempt', expiresAt: Date.now() + 60_000 };
+      await storage.put('node:node-leased', record!);
+    });
+
+    const task = makeTask();
+    await seedPending([task], ['node-leased']);
+    await runAssign();
+    expect((await getTask(task.id)).status).toBe('pending');
+
+    await withStorage(async (storage) => {
+      const record = await storage.get<NodeRecord>('node:node-leased');
+      record!.reservation!.expiresAt = Date.now() - 1;
+      await storage.put('node:node-leased', record!);
+    });
+    await runAssign();
+    expect((await getTask(task.id)).assignedNodeId).toBe('node-leased');
   });
 });
 
@@ -970,6 +1154,36 @@ describe('Coordinator swarm sessions', () => {
     expect(jsonFrames(n3).some((f) => f.type === 'swarm-init')).toBe(false);
   });
 
+  it('selects a fresh low-RTT peer while retaining the resource-ranked host', async () => {
+    stub = newStub();
+    const n1 = await connectNode('n1', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
+    const n2 = await connectNode('n2', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
+    await connectNode('n3', 'capabilities=swarm-inference&webgpu=true&wasm=6000000000');
+    const now = Date.now();
+    const history: PeerLinkHistory = {
+      'n2>n1': {
+        fromNodeId: 'n2', toNodeId: 'n1', sampledAt: now, expiresAt: now + 60_000,
+        applicationRttMs: 20, webRtcRttMs: null, bandwidthMbps: 100,
+      },
+      'n2>n3': {
+        fromNodeId: 'n2', toNodeId: 'n3', sampledAt: now, expiresAt: now + 60_000,
+        applicationRttMs: 150, webRtcRttMs: null, bandwidthMbps: 1,
+      },
+    };
+    await withStorage((storage) => storage.put('peer-quality:history', history));
+    const task = makeTask({
+      workload: 'swarm-inference',
+      payload: { model: 'qwen3-1.7b', prompt: 'hi', swarm: { minNodes: 2, maxNodes: 2 } },
+    });
+    await seedPending([task], ['n1', 'n2', 'n3']);
+
+    await runAssign();
+
+    const init = jsonFrames(n2).find((frame) => frame.type === 'swarm-init')!;
+    expect(init.members.map((member: { nodeId: string }) => member.nodeId)).toEqual(['n2', 'n1']);
+    expect((await getTask(task.id)).assignedNodeId).toBe('n2');
+  });
+
   it('leaves a swarm task pending when only one candidate node is available', async () => {
     stub = newStub();
     await connectNode('solo', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
@@ -990,7 +1204,7 @@ describe('Coordinator swarm sessions', () => {
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
     const chain = swarmChainFor(init);
 
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain }));
     await new Promise((r) => setTimeout(r, 30));
 
     const hostSlice = jsonFrames(n2).find((f) => f.type === 'swarm-slice');
@@ -1017,7 +1231,7 @@ describe('Coordinator swarm sessions', () => {
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
 
     n1.socket.send(JSON.stringify({
-      type: 'swarm-plan', sessionId: init.sessionId,
+      type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId,
       chain: [{ nodeId: 'n1', role: 'host', slice: { start: 0, end: 1e9, hasEmbed: true, hasHead: true } }],
     }));
     await new Promise((r) => setTimeout(r, 30));
@@ -1025,7 +1239,7 @@ describe('Coordinator swarm sessions', () => {
     expect(jsonFrames(n2).some((f) => f.type === 'swarm-error')).toBe(false);
 
     // The authenticated host can still submit the valid plan after the attack.
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
     expect((await getTask(task.id)).swarmSession?.chain.map((entry) => entry.nodeId)).toEqual(['n2', 'n1']);
   });
@@ -1040,7 +1254,7 @@ describe('Coordinator swarm sessions', () => {
       { nodeId: 'n2', role: 'host', slice: { start: 0, end: 6, hasEmbed: true, hasHead: true } },
       { nodeId: 'n1', role: 'worker', slice: { start: 6, end: 1e9, hasEmbed: false, hasHead: false } },
     ];
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: hostile }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: hostile }));
     await new Promise((r) => setTimeout(r, 50));
 
     const errors = jsonFrames(n2).filter((f) => f.type === 'swarm-error');
@@ -1056,7 +1270,7 @@ describe('Coordinator swarm sessions', () => {
   it('relays a binary hidden frame to the next hop', async () => {
     const { n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     // Host (n2, index 0) sends a hidden frame; it should reach n1 (index 1)
@@ -1072,7 +1286,7 @@ describe('Coordinator swarm sessions', () => {
   it('hands every member distinct per-hop frame keys', async () => {
     const { n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     // n2 is the host (index 0), n1 the worker (index 1). Each member gets the
@@ -1092,7 +1306,7 @@ describe('Coordinator swarm sessions', () => {
   it('accepts only the host result and releases every member', async () => {
     const { task, n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     // A worker's result is ignored, even with the session id and attempt id.
@@ -1124,7 +1338,7 @@ describe('Coordinator swarm sessions', () => {
   it('does not let a member fail another member\'s task', async () => {
     const { task, n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     // The worker reports a failure. It must not settle the task; the host owns
@@ -1158,7 +1372,7 @@ describe('Coordinator swarm sessions', () => {
   it('ignores swarm-token and swarm-done from a member', async () => {
     const { task, n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     const subscriber = await stub.fetch(`http://internal/subscribe?taskId=${task.id}&tenantId=${TENANT}`, {
@@ -1213,6 +1427,79 @@ describe('Coordinator swarm sessions', () => {
     expect(floods).toBeLessThan(80);
   });
 
+  it('pauses a task at the subscriber high watermark and resumes after bounded acknowledgements', async () => {
+    stub = newStub();
+    const { task, node } = await connectAndAssign('node-1');
+    const attemptId = jsonFrames(node).find(f => f.type === 'task')!.attemptId as string;
+    const response = await stub.fetch(`http://internal/subscribe?taskId=${task.id}&tenantId=${TENANT}`, {
+      headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
+    });
+    const subscriber = (response as unknown as { webSocket?: WebSocket }).webSocket!;
+    subscriber.accept();
+    const received: Array<Record<string, unknown>> = [];
+    subscriber.addEventListener('message', (event: MessageEvent) => {
+      try { received.push(JSON.parse(String(event.data))); } catch {}
+    });
+    subscriber.send(JSON.stringify({ type: 'flow-control', version: 1 }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    for (let i = 0; i < 16; i++) {
+      node.socket.send(JSON.stringify({ type: 'progress', taskId: task.id, token: `t${i}`, attemptId }));
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === true)).toBe(true);
+    const sequence = received.filter(message => message.type === 'token')[7]?.sequence;
+    expect(sequence).toBe(8);
+
+    subscriber.send(JSON.stringify({ type: 'ack', sequence: 999 }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === false)).toBe(false);
+
+    subscriber.send(JSON.stringify({ type: 'ack', sequence: 1 }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === false)).toBe(false);
+
+    subscriber.send(JSON.stringify({ type: 'ack', sequence: 8 }));
+    await vi.waitFor(async () => {
+      const snapshot = await runInDurableObject(stub, async (instance) => ({
+        flow: await (instance as any).ctx.storage.get(`flow:${task.id}`),
+        subscriber: (instance as any).ctx.getWebSockets(`client:${task.id}`)[0]?.deserializeAttachment(),
+      }));
+      expect(snapshot).toMatchObject({ flow: { paused: false }, subscriber: { ackSequence: 8 } });
+    });
+    await vi.waitFor(() => expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === false)).toBe(true));
+  });
+
+  it('resets streamed output before a retry re-prefills the original prompt', async () => {
+    stub = newStub();
+    const { task, node } = await connectAndAssign('node-restart-stream');
+    const initialAttemptId = jsonFrames(node).find(frame => frame.type === 'task')!.attemptId as string;
+    const response = await stub.fetch(`http://internal/subscribe?taskId=${task.id}&tenantId=${TENANT}`, {
+      headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
+    });
+    const subscriber = (response as unknown as { webSocket?: WebSocket }).webSocket!;
+    subscriber.accept();
+    const received: Array<Record<string, unknown>> = [];
+    subscriber.addEventListener('message', (event: MessageEvent) => {
+      try { received.push(JSON.parse(String(event.data))); } catch {}
+    });
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    node.socket.send(JSON.stringify({ type: 'progress', taskId: task.id, token: 'partial', attemptId: initialAttemptId }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    node.socket.send(JSON.stringify({ type: 'error', taskId: task.id, error: 'peer disconnected', attemptId: initialAttemptId }));
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    expect(received.some(message => message.type === 'token' && message.token === 'partial')).toBe(true);
+    expect(received).toContainEqual({ type: 'reset', epoch: 1 });
+    const retried = await getTask(task.id);
+    expect(retried).toMatchObject({ status: 'processing', retryCount: 1, streamEpoch: 1 });
+    const taskFrames = jsonFrames(node).filter(frame => frame.type === 'task');
+    const nextAttemptId = taskFrames.length ? taskFrames[taskFrames.length - 1].attemptId : undefined;
+    expect(nextAttemptId).toEqual(expect.any(String));
+    expect(nextAttemptId).not.toBe(initialAttemptId);
+  });
+
   it('ignores progress from a node that does not own the task', async () => {
     stub = newStub();
     const { task, node } = await connectAndAssign('node-1');
@@ -1236,7 +1523,7 @@ describe('Coordinator swarm sessions', () => {
   it.each(['n1', 'n2'])('restarts the whole swarm when %s reconnects', async (nodeId) => {
     const { task, n1, n2 } = await setup();
     const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise(r => setTimeout(r, 20));
     const replacement = await connectNode(nodeId,
       `capabilities=swarm-inference&webgpu=true&wasm=${nodeId === 'n2' ? 8000000000 : 4000000000}`);
@@ -1262,6 +1549,46 @@ describe('Coordinator swarm sessions', () => {
     });
   });
 
+  it('re-prefills on a fresh swarm attempt after peer loss and rejects the old host result', async () => {
+    const { task, n1, n2 } = await setup();
+    const backup = await connectNode('n4', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
+    const firstInit = jsonFrames(n2).find((frame) => frame.type === 'swarm-init')!;
+
+    // The dropped member closes without sending a protocol-level error.
+    n1.socket.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const retry = await getTask(task.id);
+    expect(retry).toMatchObject({ status: 'processing', retryCount: 1, assignedNodeId: 'n2' });
+    const inits = jsonFrames(n2).filter((frame) => frame.type === 'swarm-init');
+    const nextInit = inits[inits.length - 1];
+    expect(nextInit.sessionId).not.toBe(firstInit.sessionId);
+    expect(nextInit.attemptId).not.toBe(firstInit.attemptId);
+    expect(nextInit.prompt).toEqual((task.payload as { prompt: string }).prompt);
+
+    n2.socket.send(JSON.stringify({
+      type: 'result', taskId: task.id, sessionId: firstInit.sessionId,
+      payload: { output: 'stale' }, attemptId: firstInit.attemptId,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect((await getTask(task.id)).status).toBe('processing');
+
+    n2.socket.send(JSON.stringify({
+      type: 'result', taskId: task.id, sessionId: nextInit.sessionId,
+      payload: { output: 'recovered' }, attemptId: nextInit.attemptId,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(await getTask(task.id)).toMatchObject({ status: 'done', result: { output: 'recovered' } });
+    await withStorage(async (storage) => {
+      for (const nodeId of ['n2', 'n4']) {
+        expect(await storage.get<NodeRecord>(`node:${nodeId}`)).toMatchObject({ status: 'idle' });
+        expect((await storage.get<NodeRecord>(`node:${nodeId}`))?.reservation).toBeUndefined();
+      }
+      expect((await storage.get<NodeRecord>('node:n1'))?.reservation).toBeUndefined();
+    });
+    expect(backup.frames.some((frame) => typeof frame === 'string' && JSON.parse(frame).type === 'swarm-init')).toBe(false);
+  });
+
   it('ignores stale attempts and errors from non-members', async () => {
     const { task, n1, n2, n3 } = await setup();
     const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
@@ -1269,7 +1596,7 @@ describe('Coordinator swarm sessions', () => {
     n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: 'old-session', chain }));
     await new Promise(r => setTimeout(r, 20));
     expect(jsonFrames(n1).some(f => f.type === 'swarm-slice')).toBe(false);
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain }));
     await new Promise(r => setTimeout(r, 20));
     n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: 'old-session' }));
     n2.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
@@ -1286,5 +1613,170 @@ describe('Coordinator swarm sessions', () => {
     n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
     await new Promise(r => setTimeout(r, 20));
     expect(jsonFrames(n2).some(f => f.type === 'swarm-start')).toBe(true);
+  });
+
+  it('fails a swarm when its cumulative Coordinator relay byte budget is exceeded', async () => {
+    const { task, n1, n2 } = await setup();
+    const init = jsonFrames(n2).find((frame) => frame.type === 'swarm-init');
+    n2.socket.send(JSON.stringify({
+      type: 'swarm-plan',
+      sessionId: init.sessionId,
+      attemptId: init.attemptId,
+      chain: swarmChainFor(init),
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const frame = encodeSwarmEnvelope(init.sessionId, new ArrayBuffer(16));
+    await withStorage(async (storage) => {
+      await storage.put(
+        swarmRelayBudgetKey(task.id),
+        MAX_SWARM_RELAY_BYTES_PER_TASK - frame.byteLength + 1,
+      );
+    });
+    const relayedBefore = n2.frames.filter((value) => value instanceof ArrayBuffer).length;
+    n1.socket.send(frame);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(await getTask(task.id)).toMatchObject({
+      status: 'failed',
+      error: 'Coordinator swarm relay byte budget exceeded',
+    });
+    expect(n2.frames.filter((value) => value instanceof ArrayBuffer)).toHaveLength(relayedBefore);
+    expect(jsonFrames(n1).some((value) => value.type === 'abort')).toBe(true);
+    expect(await withStorage((storage) => storage.get(swarmRelayBudgetKey(task.id)))).toBeUndefined();
+  });
+
+  it('records large adjacent peer RTT disagreements as advisory diagnostics only', async () => {
+    const { task, n1, n2 } = await setup();
+    const init = jsonFrames(n2).find((frame) => frame.type === 'swarm-init');
+    n2.socket.send(JSON.stringify({
+      type: 'swarm-plan',
+      sessionId: init.sessionId,
+      attemptId: init.attemptId,
+      chain: swarmChainFor(init),
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const now = Date.now();
+    const metric = (value: number | null, sampleCount = value === null ? 0 : 5) => ({
+      value, sampledAt: now, sampleCount,
+    });
+    const values = (rttMs: number) => ({
+      rttMs: metric(rttMs),
+      jitterMs: metric(null),
+      sendMbps: metric(null),
+      receiveMbps: metric(null),
+    });
+    n2.socket.send(JSON.stringify({
+      type: 'swarm-peer-quality',
+      taskId: task.id,
+      sessionId: init.sessionId,
+      attemptId: init.attemptId,
+      reports: [{
+        version: 1,
+        peerNodeId: 'n1',
+        sampledAt: now,
+        expiresAt: now + 30_000,
+        webRtc: values(50),
+        application: values(2_500),
+      }],
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const diagnostics = await withStorage(async (storage) =>
+      storage.get<any[]>('trust:peer-quality-anomalies'));
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics?.[0]).toMatchObject({
+      reporterNodeId: 'n2',
+      peerNodeId: 'n1',
+      webRtcRttMs: 50,
+      applicationRttMs: 2_500,
+      differenceMs: 2_450,
+    });
+    expect(await withStorage(async (storage) => storage.get('trust:protocol-faults'))).toBeUndefined();
+    expect(await getTask(task.id)).toMatchObject({ status: 'processing' });
+    expect(jsonFrames(n1).some((frame) => frame.type === 'swarm-error')).toBe(false);
+  });
+
+  it('relays bounded peer signaling only between current adjacent members', async () => {
+    const { task, n1, n2, n3 } = await setup();
+    const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
+    await new Promise(r => setTimeout(r, 30));
+
+    const hostSlice = jsonFrames(n2).find(f => f.type === 'swarm-slice');
+    const workerSlice = jsonFrames(n1).find(f => f.type === 'swarm-slice');
+    expect(hostSlice).toMatchObject({ attemptId: init.attemptId, previousNodeId: 'n1', nextNodeId: 'n1' });
+    expect(workerSlice).toMatchObject({ attemptId: init.attemptId, previousNodeId: 'n2', nextNodeId: 'n2' });
+
+    const offer = {
+      type: 'swarm-peer-signal', taskId: task.id, sessionId: init.sessionId,
+      attemptId: init.attemptId, toNodeId: 'n1',
+      signal: { kind: 'description', description: { type: 'offer', sdp: 'v=0' } },
+    };
+    n2.socket.send(JSON.stringify(offer));
+    await new Promise(r => setTimeout(r, 25));
+    expect(jsonFrames(n1).some(f => f.type === 'swarm-peer-signal' && f.fromNodeId === 'n2')).toBe(true);
+
+    const before = jsonFrames(n1).filter(f => f.type === 'swarm-peer-signal').length;
+    n2.socket.send(JSON.stringify({ ...offer, attemptId: 'retired-attempt' }));
+    n2.socket.send(JSON.stringify({ ...offer, toNodeId: 'n3' }));
+    n2.socket.send(JSON.stringify({
+      ...offer,
+      signal: { kind: 'description', description: { type: 'offer', sdp: 'x'.repeat(24 * 1024 + 1) } },
+    }));
+    n3.socket.send(JSON.stringify({ ...offer, toNodeId: 'n2' }));
+    await new Promise(r => setTimeout(r, 25));
+    expect(jsonFrames(n1).filter(f => f.type === 'swarm-peer-signal')).toHaveLength(before);
+  });
+});
+
+
+    
+describe('swarm protocol quarantine', () => {
+  it('ignores wrong attempts, quarantines repeated malformed plans, and excludes the host from new swarms', async () => {
+    stub = newStub();
+    const worker = await connectNode('trust-worker', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
+    const host = await connectNode('trust-host', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
+    const createdAt = Date.now();
+    const tasks = Array.from({ length: 4 }, (_, index) => makeTask({
+      createdAt: createdAt + index,
+      workload: 'swarm-inference',
+      payload: { model: 'qwen3-1.7b', prompt: 'hi' },
+    }));
+    await seedPending(tasks, ['trust-worker', 'trust-host']);
+    await runAssign();
+
+    for (let index = 0; index < 3; index++) {
+      const task = tasks[index];
+      await vi.waitFor(() => expect(jsonFrames(host).some((frame) => frame.type === 'swarm-init' && frame.taskId === task.id)).toBe(true));
+      const init = jsonFrames(host).find((frame) => frame.type === 'swarm-init' && frame.taskId === task.id);
+
+      // A matching session with the wrong attempt must not add a strike or
+      // settle the task.
+      host.socket.send(JSON.stringify({
+        type: 'swarm-plan', sessionId: init.sessionId, attemptId: 'wrong-attempt', chain: [],
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await withStorage(async (storage) => {
+        const trust = await storage.get<any>('trust:protocol-faults');
+        expect(trust?.['trust-host']?.faults ?? []).toHaveLength(index);
+      });
+
+      // The currently authenticated host attempt submits a malformed plan.
+      host.socket.send(JSON.stringify({
+        type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: [],
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(await getTask(task.id)).toMatchObject({ status: 'failed' });
+    }
+
+    const trust = await withStorage(async (storage) => storage.get<any>('trust:protocol-faults'));
+    expect(trust?.['trust-host']?.faults).toHaveLength(3);
+    expect(trust['trust-host'].quarantineUntil).toBeGreaterThan(Date.now());
+    // With the only host quarantined, one remaining candidate cannot form a
+    // swarm; the fourth task stays queued without reserving the worker.
+    expect(await getTask(tasks[3].id)).toMatchObject({ status: 'pending' });
+    expect(jsonFrames(worker).some((frame) => frame.type === 'swarm-init' && frame.taskId === tasks[3].id)).toBe(false);
   });
 });

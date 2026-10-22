@@ -12,8 +12,10 @@ import {
 } from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
+import { collectNodeResourceReport } from '../executor/resourceReporter';
 import { assertPublicUrl } from '../executor/egress-guard';
-import { probeWebGpu } from '../executor/webgpuProbe';
+import { isCurrentSwarmPeerSignal, SwarmPeerTransport } from '../swarm/peer-transport';
+import { evaluateMobileLifecycle } from './mobile-lifecycle';
 import {
   buildNodeSignalProtocols,
   buildWsUrl,
@@ -76,7 +78,12 @@ class SignalingClient {
   private readonly MAX_RECONNECT_DELAY = 30000;
   private destroyed = false;
   private suspended = false;
-  private visibilityHandler: (() => void) | null = null;
+  private lifecycleCleanup: Array<() => void> = [];
+  private lifecyclePageHidden = false;
+  private lifecycleOffline = false;
+  private lifecycleEpoch = 0;
+  private batteryState: (EventTarget & { level: number; charging: boolean }) | null = null;
+  private networkState: (EventTarget & { effectiveType?: string; saveData?: boolean }) | null = null;
   private inflightTasks = new Set<string>();
   /** Tasks the coordinator told us to stop; their failure must not be echoed back. */
   private abortedTasks = new Set<string>();
@@ -88,6 +95,9 @@ class SignalingClient {
    * `inboundKey`, so one member cannot inject or rewrite a frame as another hop.
    */
   private swarmHopKeys = new Map<string, { inboundKey?: string; outboundKey?: string; chainLength: number }>();
+  private swarmPeerTransports = new Map<string, SwarmPeerTransport>();
+  private swarmPeerMetadata = new Map<string, { taskId: string; attemptId: string; peers: string[] }>();
+  private swarmFailureReported = new Set<string>();
   /** Frame handling is serialized: HMAC verification and signing are async. */
   private swarmInboundChain: Promise<void> = Promise.resolve();
   private swarmOutboundChain: Promise<void> = Promise.resolve();
@@ -99,8 +109,80 @@ class SignalingClient {
    */
   private cachedToken: NodeToken | null = null;
 
+  private receiveSwarmEnvelope(buffer: ArrayBuffer) {
+    const envelope = decodeSwarmEnvelope(buffer);
+    if (!envelope || ![...this.swarmSessions.values()].includes(envelope.sessionId)) return;
+    this.swarmInboundChain = this.swarmInboundChain
+      .then(async () => {
+        const keys = this.swarmHopKeys.get(envelope.sessionId);
+        if (keys && keys.chainLength > 1) {
+          if (!envelope.mac || !keys.inboundKey) return;
+          const valid = await verifySwarmEnvelope(
+            keys.inboundKey,
+            envelope.sessionId,
+            envelope.frame,
+            envelope.mac,
+          );
+          if (!valid) {
+            logError(`swarm frame rejected: bad hop MAC sessionId=${envelope.sessionId}`);
+            return;
+          }
+        }
+        this.workerPool.sendFrame(envelope.frame);
+      })
+      .catch(() => {});
+  }
+
+  private ensureSwarmPeerTransport(data: Record<string, unknown>) {
+    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+    const taskId = typeof data.taskId === 'string' ? data.taskId : '';
+    const attemptId = typeof data.attemptId === 'string' ? data.attemptId : '';
+    if (!sessionId || !taskId || !attemptId || this.swarmPeerTransports.has(sessionId)) return;
+    const previousNodeId = typeof data.previousNodeId === 'string' ? data.previousNodeId : undefined;
+    const nextNodeId = typeof data.nextNodeId === 'string' ? data.nextNodeId : undefined;
+    const peers = [...new Set([previousNodeId, nextNodeId].filter((id): id is string => !!id))];
+    this.swarmPeerMetadata.set(sessionId, { taskId, attemptId, peers });
+    const transport = new SwarmPeerTransport({
+      sessionId,
+      taskId,
+      attemptId,
+      nodeId: this.nodeId,
+      previousNodeId,
+      nextNodeId,
+      onSignal: (toNodeId, signal) => this.send({
+        type: 'swarm-peer-signal', taskId, sessionId, attemptId, toNodeId, signal,
+      }),
+      onFrame: (frame) => this.receiveSwarmEnvelope(frame),
+      onQuality: (reports) => this.send({
+        type: 'swarm-peer-quality', taskId, sessionId, attemptId, reports,
+      }),
+      onFailure: (error) => {
+        this.swarmFailureReported.add(sessionId);
+        this.send({ type: 'swarm-error', taskId, sessionId, attemptId, error: error.message });
+      },
+    });
+    this.swarmPeerTransports.set(sessionId, transport);
+    void transport.start();
+  }
+
+  private handleSwarmPeerSignal(data: Record<string, unknown>) {
+    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+    const metadata = this.swarmPeerMetadata.get(sessionId);
+    const transport = this.swarmPeerTransports.get(sessionId);
+    if (!metadata || !transport || !isCurrentSwarmPeerSignal(data, {
+      ...metadata,
+      sessionId,
+      nodeId: this.nodeId,
+    })) return;
+    void transport.handleSignal(data.fromNodeId as string, data.signal);
+  }
+
   private retireSwarmSession(sessionId: string) {
     this.swarmHopKeys.delete(sessionId);
+    this.swarmPeerTransports.get(sessionId)?.close();
+    this.swarmPeerTransports.delete(sessionId);
+    this.swarmPeerMetadata.delete(sessionId);
+    this.swarmFailureReported.delete(sessionId);
     this.retiredSwarmSessions.add(sessionId);
     if (this.retiredSwarmSessions.size > 64) {
       this.retiredSwarmSessions.delete(this.retiredSwarmSessions.values().next().value!);
@@ -130,9 +212,11 @@ class SignalingClient {
       this.ws = null;
     }
 
-    this.setupVisibilityHandler();
+    this.setupMobileLifecycleHandlers();
+    if (this.suspended) return;
 
     const token = await this.obtainToken();
+    if (this.destroyed || this.suspended) return;
     if (getConsentState() !== 'granted') {
       log('connect cancelled because consent was revoked while obtaining a token');
       return;
@@ -157,6 +241,7 @@ class SignalingClient {
       opened = true;
       this.reconnectAttempts = 0;
       log(`signal connected ${wsUrl}`);
+      void this.sendHeartbeat(ws);
     };
 
     ws.onmessage = async (event) => {
@@ -164,31 +249,7 @@ class SignalingClient {
       // Binary frames are swarm hidden states; hand them to the running worker
       // after checking their session envelope.
       if (typeof event.data !== 'string') {
-        const envelope = decodeSwarmEnvelope(event.data as ArrayBuffer);
-        if (!envelope || ![...this.swarmSessions.values()].includes(envelope.sessionId)) return;
-        // Keep arrival order: verification is async and two frames must never
-        // reach the engine out of order.
-        this.swarmInboundChain = this.swarmInboundChain
-          .then(async () => {
-            const keys = this.swarmHopKeys.get(envelope.sessionId);
-            if (keys && keys.chainLength > 1) {
-              // Fail closed: once a session has hop keys, an unsigned or
-              // wrongly signed frame is dropped instead of being executed.
-              if (!envelope.mac || !keys.inboundKey) return;
-              const valid = await verifySwarmEnvelope(
-                keys.inboundKey,
-                envelope.sessionId,
-                envelope.frame,
-                envelope.mac,
-              );
-              if (!valid) {
-                logError(`swarm frame rejected: bad hop MAC sessionId=${envelope.sessionId}`);
-                return;
-              }
-            }
-            this.workerPool.sendFrame(envelope.frame);
-          })
-          .catch(() => {});
+        this.receiveSwarmEnvelope(event.data as ArrayBuffer);
         return;
       }
 
@@ -200,7 +261,7 @@ class SignalingClient {
       }
 
       if (data.type === 'ping') {
-        this.send({ type: 'pong', cpuLoad: this.workerPool.lastCpuLoad });
+        void this.sendHeartbeat(ws);
         return;
       }
       if (data.type === 'task') {
@@ -233,6 +294,7 @@ class SignalingClient {
         if (!taskId) return;
         if (typeof data.sessionId !== 'string' || this.retiredSwarmSessions.has(data.sessionId)) return;
         if (data.type === 'swarm-slice') {
+          this.ensureSwarmPeerTransport(data);
           this.swarmHopKeys.set(data.sessionId, {
             inboundKey: typeof data.inboundKey === 'string' ? data.inboundKey : undefined,
             outboundKey: typeof data.outboundKey === 'string' ? data.outboundKey : undefined,
@@ -249,6 +311,40 @@ class SignalingClient {
           return;
         }
         void this.startSwarm(taskId, data);
+        return;
+      }
+      if (data.type === 'swarm-peer-signal') {
+        this.handleSwarmPeerSignal(data);
+        return;
+      }
+      if (data.type === 'swarm-transport') {
+        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+        const metadata = this.swarmPeerMetadata.get(sessionId);
+        const transport = this.swarmPeerTransports.get(sessionId);
+        if (
+          metadata && transport &&
+          data.taskId === metadata.taskId &&
+          data.attemptId === metadata.attemptId &&
+          (data.mode === 'peer' || data.mode === 'relay')
+        ) transport.selectMode(data.mode);
+        return;
+      }
+      if (data.type === 'swarm-flow') {
+        const taskId = typeof data.taskId === 'string' ? data.taskId : '';
+        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+        const attemptId = typeof data.attemptId === 'string' ? data.attemptId : '';
+        if (
+          taskId && sessionId && this.swarmSessions.get(taskId) === sessionId &&
+          this.attempts.get(taskId) === attemptId && typeof data.paused === 'boolean'
+        ) this.workerPool.sendControl(data, sessionId);
+        return;
+      }
+      if (data.type === 'task-flow') {
+        const taskId = typeof data.taskId === 'string' ? data.taskId : '';
+        const attemptId = typeof data.attemptId === 'string' ? data.attemptId : '';
+        if (taskId && this.attempts.get(taskId) === attemptId && typeof data.paused === 'boolean') {
+          this.workerPool.setTokenFlow(taskId, data.paused);
+        }
         return;
       }
       if (data.type === 'swarm-start') {
@@ -305,6 +401,25 @@ class SignalingClient {
     log(`task abort received taskId=${taskId} error=${error}`);
   }
 
+  private async sendHeartbeat(ws: WebSocket) {
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || getConsentState() !== 'granted') return;
+    const requested = this.config.capabilities ?? ['ai-inference', 'image-process'];
+    const probeGpu = requested.includes('swarm-inference') && this.config.allowModelDownload === true;
+    const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+    const report = await collectNodeResourceReport({
+      cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
+      deviceMemory,
+      probeGpu,
+    });
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || getConsentState() !== 'granted') return;
+    this.send({
+      type: 'pong',
+      cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
+      resources: report,
+      modelCache: this.workerPool.modelCacheSnapshot,
+    });
+  }
+
   private scheduleReconnect() {
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), this.MAX_RECONNECT_DELAY);
     setTimeout(() => {
@@ -318,11 +433,14 @@ class SignalingClient {
     log(`disconnect nodeId=${this.nodeId}`);
     this.destroyed = true;
     this.suspended = false;
-    this.removeVisibilityHandler();
+    this.removeMobileLifecycleHandlers();
     try {
       this.ws?.close();
     } catch {}
     this.ws = null;
+    for (const transport of this.swarmPeerTransports.values()) transport.close();
+    this.swarmPeerTransports.clear();
+    this.swarmPeerMetadata.clear();
     try {
       delete (window as any)[INIT_FLAG];
     } catch {}
@@ -386,16 +504,25 @@ class SignalingClient {
         capabilities = capabilities.filter((cap) => cap !== 'container');
       }
 
-      // Swarm inference additionally needs WebGPU and an explicit opt-in to
-      // download multi-GB layer weights. Probe only when the host asked for it,
-      // and drop the capability when the device cannot actually serve it.
+      // Swarm inference additionally needs a working WebGPU device and an
+      // explicit opt-in to download model layer weights. The resource report
+      // includes a tiny bounded compute sample and is reused by heartbeats.
       let swarm: SwarmNodeCapabilities | undefined;
       if (capable && requested.includes('swarm-inference') && this.config.allowModelDownload === true) {
-        swarm = await probeWebGpu();
+        const report = await collectNodeResourceReport({
+          cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
+          deviceMemory: (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
+          probeGpu: true,
+        });
         if (!consentStillGranted()) return null;
-        if (!swarm.webgpu) {
+        if (report.gpu.status === 'available') {
+          swarm = { webgpu: true };
+          if (report.gpu.architecture.value) swarm.gpuArchitecture = report.gpu.architecture.value;
+          if (report.gpu.maxStorageBufferBindingSize.value !== null) {
+            swarm.maxStorageBufferBindingSize = report.gpu.maxStorageBufferBindingSize.value;
+          }
+        } else {
           capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
-          swarm = undefined;
         }
       } else {
         capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
@@ -483,12 +610,27 @@ class SignalingClient {
             logError(`swarm frame not sent: no hop key sessionId=${sessionId}`);
             return;
           }
-          this.sendBinary(await signSwarmEnvelope(keys.outboundKey, sessionId, frame));
+          const envelope = await signSwarmEnvelope(keys.outboundKey, sessionId, frame);
+          const transport = this.swarmPeerTransports.get(sessionId);
+          if (!transport || !await transport.sendFrame(envelope)) this.sendBinary(envelope);
           return;
         }
-        this.sendBinary(encodeSwarmEnvelope(sessionId, frame));
+        const envelope = encodeSwarmEnvelope(sessionId, frame);
+        const transport = this.swarmPeerTransports.get(sessionId);
+        if (!transport || !await transport.sendFrame(envelope)) this.sendBinary(envelope);
       })
-      .catch(() => {});
+      .catch((error) => {
+        const metadata = this.swarmPeerMetadata.get(sessionId);
+        if (!metadata || this.swarmFailureReported.has(sessionId)) return;
+        this.swarmFailureReported.add(sessionId);
+        this.send({
+          type: 'swarm-error',
+          taskId: metadata.taskId,
+          sessionId,
+          attemptId: metadata.attemptId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   /**
@@ -515,17 +657,26 @@ class SignalingClient {
         (token: string) => {
           this.send({ type: 'progress', taskId, sessionId, token, attemptId });
         },
-        { maxCpuLoad: this.config.maxCpuLoad },
+        { maxCpuLoad: this.effectiveMaxCpuLoad() },
         {
           onFrame: (frame) => this.queueSwarmFrame(sessionId, frame),
           // Attempt ids are transport metadata owned by this client, so stamp
           // them onto the engine's control messages (swarm-token / swarm-done):
           // the coordinator only accepts session messages from the host attempt.
-          onMessage: (message) => this.send(
-            message && typeof message === 'object' && !('attemptId' in message)
+          onMessage: (message) => {
+            const outgoing = message && typeof message === 'object' && !('attemptId' in message)
               ? { ...message, attemptId }
-              : (message as Record<string, unknown>),
-          ),
+              : (message as Record<string, unknown>);
+            if (outgoing?.type === 'swarm-ready') {
+              const transport = this.swarmPeerTransports.get(sessionId);
+              void (async () => {
+                const peerReady = transport ? await transport.waitUntilReady() : false;
+                this.send({ ...outgoing, peerReady });
+              })();
+              return;
+            }
+            this.send(outgoing);
+          },
         },
       );
       if (!this.abortedTasks.delete(sessionId)) {
@@ -570,7 +721,7 @@ class SignalingClient {
           this.send({ type: 'progress', taskId: data.taskId, token, attemptId });
         },
         {
-          maxCpuLoad: this.config.maxCpuLoad,
+          maxCpuLoad: this.effectiveMaxCpuLoad(),
           fileSourceOrigins: validatedHttpsOrigins(this.config.fileSourceOrigins),
           containerImageOrigins: validatedHttpsOrigins(this.config.containerImageOrigins),
         },
@@ -585,22 +736,94 @@ class SignalingClient {
     }
   }
 
-  private setupVisibilityHandler() {
-    this.removeVisibilityHandler();
-    this.visibilityHandler = () => {
-      if (document.hidden) {
-        this.suspend();
-      } else if (this.suspended) {
-        this.resume();
-      }
-    };
-    document.addEventListener('visibilitychange', this.visibilityHandler);
+  private listenForLifecycle(target: EventTarget, type: string, listener: EventListener) {
+    target.addEventListener(type, listener);
+    this.lifecycleCleanup.push(() => target.removeEventListener(type, listener));
   }
 
-  private removeVisibilityHandler() {
-    if (this.visibilityHandler) {
-      document.removeEventListener('visibilitychange', this.visibilityHandler);
-      this.visibilityHandler = null;
+  private setupMobileLifecycleHandlers() {
+    this.removeMobileLifecycleHandlers();
+    const epoch = this.lifecycleEpoch;
+    this.lifecyclePageHidden = document.hidden;
+    this.lifecycleOffline = navigator.onLine === false;
+    const nav = navigator as Navigator & {
+      connection?: EventTarget & { effectiveType?: string; saveData?: boolean };
+      getBattery?: () => Promise<EventTarget & { level: number; charging: boolean }>;
+    };
+    this.networkState = nav.connection ?? null;
+
+    this.listenForLifecycle(document, 'visibilitychange', () => {
+      this.lifecyclePageHidden = document.hidden;
+      this.refreshMobileLifecycle();
+    });
+    this.listenForLifecycle(window, 'offline', () => {
+      this.lifecycleOffline = true;
+      this.refreshMobileLifecycle();
+    });
+    this.listenForLifecycle(window, 'online', () => {
+      this.lifecycleOffline = false;
+      this.refreshMobileLifecycle();
+    });
+    this.listenForLifecycle(window, 'pagehide', () => {
+      this.lifecyclePageHidden = true;
+      this.refreshMobileLifecycle();
+    });
+    this.listenForLifecycle(window, 'pageshow', () => {
+      this.lifecyclePageHidden = false;
+      this.refreshMobileLifecycle();
+    });
+    if (this.networkState) {
+      this.listenForLifecycle(this.networkState, 'change', () => this.refreshMobileLifecycle());
+    }
+
+    if (typeof nav.getBattery === 'function') {
+      try {
+        void nav.getBattery.call(navigator).then((battery) => {
+          if (this.destroyed || epoch !== this.lifecycleEpoch) return;
+          this.batteryState = battery;
+          const update = () => this.refreshMobileLifecycle();
+          this.listenForLifecycle(battery, 'levelchange', update);
+          this.listenForLifecycle(battery, 'chargingchange', update);
+          this.refreshMobileLifecycle();
+        }).catch(() => {
+          // The Battery Status API is optional and unavailable in several mobile browsers.
+        });
+      } catch {
+        // Some browsers expose getBattery but reject direct calls by policy.
+      }
+    }
+    this.refreshMobileLifecycle();
+  }
+
+  private removeMobileLifecycleHandlers() {
+    this.lifecycleEpoch++;
+    for (const cleanup of this.lifecycleCleanup.splice(0)) cleanup();
+    this.batteryState = null;
+    this.networkState = null;
+  }
+
+  private mobileLifecycleDecision() {
+    return evaluateMobileLifecycle({
+      hidden: document.hidden,
+      pageHidden: this.lifecyclePageHidden,
+      online: !this.lifecycleOffline && navigator.onLine !== false,
+      batteryLevel: this.batteryState?.level,
+      batteryCharging: this.batteryState?.charging,
+      effectiveType: this.networkState?.effectiveType,
+      saveData: this.networkState?.saveData,
+    }, this.config.maxCpuLoad);
+  }
+
+  private effectiveMaxCpuLoad() {
+    return this.mobileLifecycleDecision().maxCpuLoad;
+  }
+
+  private refreshMobileLifecycle() {
+    const decision = this.mobileLifecycleDecision();
+    if (decision.suspend) {
+      this.suspend();
+    } else if (this.suspended) {
+      this.resume();
     }
   }
 }

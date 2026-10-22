@@ -11,7 +11,10 @@ vi.mock('../../executor/memoryProbe', () => probeMockFactory());
 
 // The swarm runtime pulls in the vendored engine; the controller is stubbed so
 // the test only exercises the worker's own message validation.
-vi.mock('../../swarm/runtime', () => ({ createSwarmRuntime: () => ({}) }));
+vi.mock('../../swarm/runtime', () => ({
+  createSwarmRuntime: () => ({}),
+  getSwarmModelCacheSnapshot: () => ({ version: 1, sampledAt: Date.now(), expiresAt: Date.now() + 60_000, entries: [] }),
+}));
 
 const { handleControl, handleFrame, abort, controllerCtor } = vi.hoisted(() => {
   // The real controller settles its task through the callbacks it was given, so

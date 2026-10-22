@@ -84,4 +84,15 @@ describe('wrapPooledEngine', () => {
     delete (engine as { dispose?: unknown }).dispose;
     expect(() => wrapPooledEngine(engine).dispose()).not.toThrow();
   });
+
+  it('notifies the cache lifecycle after device disposal exactly once', () => {
+    const { engine } = fakeEngine();
+    const onDisposed = vi.fn();
+    const device = { destroy: vi.fn() };
+    const adapter = wrapPooledEngine(engine, device, onDisposed);
+    adapter.dispose();
+    adapter.dispose();
+    expect(device.destroy).toHaveBeenCalledTimes(1);
+    expect(onDisposed).toHaveBeenCalledTimes(1);
+  });
 });
