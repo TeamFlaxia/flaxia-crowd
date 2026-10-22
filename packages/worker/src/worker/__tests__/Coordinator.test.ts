@@ -917,6 +917,22 @@ describe('Coordinator', () => {
     });
   });
 
+  it('ages old background work ahead of fresh interactive work and records queue wait', async () => {
+    stub = newStub();
+    await connectNode('fair-node', 'capabilities=ai-inference');
+    const now = Date.now();
+    const background = makeTask({ id: 'background', tenantId: TENANT, priority: 0, createdAt: now - 4 * 60_000 });
+    const interactive = makeTask({ id: 'interactive', tenantId: OTHER_TENANT, priority: 3, createdAt: now });
+    await seedPending([interactive, background], ['fair-node']);
+
+    await runAssign();
+
+    const assigned = await getTask(background.id);
+    expect(assigned.status).toBe('processing');
+    expect(assigned.queueWaitMs).toBeGreaterThanOrEqual(4 * 60_000);
+    expect((await getTask(interactive.id, OTHER_TENANT)).status).toBe('pending');
+  });
+
   it('ignores active idle-index leases and reuses a node when the lease expires', async () => {
     stub = newStub();
     await connectNode('node-leased', 'capabilities=ai-inference');
