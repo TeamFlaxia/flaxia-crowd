@@ -20,7 +20,9 @@ export interface NodeProtocolTrust {
 export type ProtocolTrustState = Record<string, NodeProtocolTrust>;
 
 function cleanState(state: ProtocolTrustState | undefined, now: number): ProtocolTrustState {
-  const cleaned: ProtocolTrustState = {};
+  // Node ids are dictionary keys. A null prototype keeps special property
+  // names from mutating the trust-state object itself.
+  const cleaned = Object.create(null) as ProtocolTrustState;
   for (const [nodeId, value] of Object.entries(state ?? {}).slice(0, MAX_TRACKED_PROTOCOL_NODES * 2)) {
     if (!nodeId || nodeId.length > 128 || !value || !Array.isArray(value.faults)) continue;
     const faults = value.faults
