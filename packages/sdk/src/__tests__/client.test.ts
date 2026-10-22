@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FlaxiaClient } from '../client';
 import type { TaskRecord, TaskPayload } from '../types';
-import { TaskNotFoundError, FlaxiaError, AuthenticationError } from '../errors';
+import { TaskNotFoundError, FlaxiaError, AuthenticationError, ValidationError } from '../errors';
 
 describe('FlaxiaClient', () => {
   const apiKey = 'fc_test_abc123';
@@ -88,6 +88,18 @@ describe('FlaxiaClient', () => {
 
       const body = JSON.parse((fetch as any).mock.calls[0][1].body);
       expect(body.callbackUrl).toBe('https://example.com/callback');
+    });
+
+    it('includes a validated scheduling priority', async () => {
+      (fetch as any).mockResolvedValue({ ok: true, json: async () => mockTask });
+      await client.submit({ workload: 'ai-inference', payload: { task: 'test', model: 'test', input: 'hi' }, priority: 2 });
+      expect(JSON.parse((fetch as any).mock.calls[0][1].body).priority).toBe(2);
+    });
+
+    it('rejects invalid scheduling priorities before sending a request', async () => {
+      await expect(client.submit({ workload: 'ai-inference', payload: { task: 'test', model: 'test', input: 'hi' }, priority: 4 as any }))
+        .rejects.toThrow(ValidationError);
+      expect(fetch).not.toHaveBeenCalled();
     });
 
     it('throws ValidationError for missing workload', async () => {
@@ -185,20 +197,72 @@ describe('FlaxiaClient', () => {
     });
   });
 
+  describe('getQueueStats', () => {
+    it('returns tenant queue stats from the authenticated endpoint', async () => {
+      const stats = {
+        pendingCount: 1,
+        pendingByPriority: { 0: 1, 1: 0, 2: 0, 3: 0 },
+        assignedByPriority: { 0: 2, 1: 3, 2: 0, 3: 1 },
+        rejectionCounts: { 'global-cap': 0, 'tenant-cap': 1, 'enqueue-rate': 0 },
+        oldestPendingWaitMs: 12_000,
+        lastAssignmentWaitMs: 800,
+        maxAssignmentWaitMs: 12_000,
+        updatedAt: Date.now(),
+      };
+      (fetch as any).mockResolvedValue({ ok: true, json: async () => stats });
+
+      await expect(client.getQueueStats()).resolves.toEqual(stats);
+      expect(fetch).toHaveBeenCalledWith(`${baseUrl}/crowd/queue/stats`, {
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+      });
+    });
+  });
+
+  describe('prewarmSwarmModel', () => {
+    it('submits a bounded request for a supported model', async () => {
+      const response = { message: 'queued', taskId: 'warm-1', id: 'warm-1', status: 'pending', createdAt: 1 };
+      (fetch as any).mockResolvedValue({ ok: true, json: async () => response });
+
+      await expect(client.prewarmSwarmModel({ model: 'qwen3.5-2b' })).resolves.toEqual(response);
+      expect(fetch).toHaveBeenCalledWith(`${baseUrl}/crowd/swarm/prewarm`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ model: 'qwen3.5-2b', minNodes: 2, maxNodes: 4 }),
+      });
+    });
+
+    it('rejects unsupported models and node counts before sending', async () => {
+      await expect(client.prewarmSwarmModel({ model: 'https://attacker.example/model' as any }))
+        .rejects.toThrow(ValidationError);
+      await expect(client.prewarmSwarmModel({ model: 'qwen3.5-2b', minNodes: 1 }))
+        .rejects.toThrow(ValidationError);
+      await expect(client.prewarmSwarmModel({ model: 'qwen3.5-2b', minNodes: 3, maxNodes: 2 }))
+        .rejects.toThrow(ValidationError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe('subscribe', () => {
     class MockWebSocket {
       static instances: MockWebSocket[] = [];
+      static OPEN = 1;
       onopen: (() => void) | null = null;
       onmessage: ((ev: MessageEvent) => void) | null = null;
       onerror: (() => void) | null = null;
       closed = false;
+      readyState = 0;
+      sent: string[] = [];
 
       constructor(public url: string, public protocols?: string[]) {
         MockWebSocket.instances.push(this);
-        queueMicrotask(() => this.onopen?.());
+        queueMicrotask(() => { this.readyState = 1; this.onopen?.(); });
       }
 
-      close() { this.closed = true; }
+      send(message: string) { this.sent.push(message); }
+      close() { this.closed = true; this.readyState = 3; }
     }
 
     beforeEach(() => {
@@ -266,6 +330,71 @@ describe('FlaxiaClient', () => {
       expect(MockWebSocket.instances[0].protocols).toEqual(['flaxia-subscribe-v1', 'bearer.explicit']);
       expect(fetch).not.toHaveBeenCalled();
     });
+
+    it('buffers tokens until a consumer is attached and acknowledges only after it finishes', async () => {
+      const subscription = await client.subscribe('task_5', { subscribeToken: 'explicit' });
+      const socket = MockWebSocket.instances[0];
+      expect(JSON.parse(socket.sent[0])).toEqual({ type: 'flow-control', version: 1 });
+      socket.onmessage?.({ data: JSON.stringify({ type: 'token', token: 'first', sequence: 4 }) } as MessageEvent);
+
+      let release!: () => void;
+      const received: string[] = [];
+      subscription.onToken(async (token) => {
+        received.push(token);
+        await new Promise<void>((resolve) => { release = resolve; });
+      });
+      await vi.waitFor(() => expect(received).toEqual(['first']));
+      expect(socket.sent.some((item) => JSON.parse(item).type === 'ack')).toBe(false);
+
+      release();
+      await vi.waitFor(() => expect(socket.sent.map((item) => JSON.parse(item)).some(
+        (item) => item.type === 'ack' && item.sequence === 4,
+      )).toBe(true));
+    });
+
+    it('serializes async token sinks, retry resets and terminal results', async () => {
+      const subscription = await client.subscribe('ordered-stream', { subscribeToken: 'explicit' });
+      const socket = MockWebSocket.instances[0];
+      const events: string[] = [];
+      let release!: () => void;
+      subscription.onToken(async (token) => {
+        if (token === 'old') await new Promise<void>((resolve) => { release = resolve; });
+        events.push(token);
+      });
+      subscription.onReset(async () => { await Promise.resolve(); events.push('reset'); });
+      subscription.onDone(() => events.push('done'));
+      for (const message of [
+        { type: 'token', token: 'old', sequence: 1 },
+        { type: 'reset', epoch: 1 },
+        { type: 'token', token: 'fresh', sequence: 2 },
+        { type: 'done', result: {} },
+      ]) socket.onmessage?.({ data: JSON.stringify(message) } as MessageEvent);
+      expect(events).toEqual([]);
+      release();
+      await vi.waitFor(() => expect(events).toEqual(['old', 'reset', 'fresh', 'done']));
+    });
+
+    it('closes instead of growing beyond the bounded SDK token queue', async () => {
+      const subscription = await client.subscribe('task_6', { subscribeToken: 'explicit' });
+      const socket = MockWebSocket.instances[0];
+      for (let sequence = 1; sequence <= 33; sequence++) {
+        socket.onmessage?.({ data: JSON.stringify({ type: 'token', token: 'x', sequence }) } as MessageEvent);
+      }
+      expect(socket.closed).toBe(true);
+      const onError = vi.fn();
+      subscription.onError(onError);
+      expect(onError).toHaveBeenCalledWith(expect.stringMatching(/too slow/));
+    });
+
+    it('delivers re-prefill reset epochs to streaming consumers', async () => {
+      const subscription = await client.subscribe('task-reset', { subscribeToken: 'explicit' });
+      const resets: number[] = [];
+      subscription.onReset(({ epoch }) => { resets.push(epoch); });
+      const socket = MockWebSocket.instances[0];
+      socket.onmessage?.({ data: JSON.stringify({ type: 'reset', epoch: 2 }) } as MessageEvent);
+      socket.onmessage?.({ data: JSON.stringify({ type: 'reset', epoch: -1 }) } as MessageEvent);
+      expect(resets).toEqual([2]);
+    });
   });
 
   describe('waitForTask', () => {
@@ -289,6 +418,15 @@ describe('FlaxiaClient', () => {
       const result = await client.waitForTask('task_1', 10, 5000);
       expect(result.status).toBe('done');
       expect(result.result).toEqual({ output: 'result' });
+    });
+
+    it('consumes stream tokens while waiting for completion', async () => {
+      const onToken = vi.fn();
+      vi.spyOn(client, 'subscribe').mockResolvedValue({ onToken, onReset: vi.fn(), onDone: vi.fn(), onError: vi.fn(), close: vi.fn() });
+      (fetch as any).mockResolvedValue({ ok: true, json: async () => ({ status: 'done' }) });
+      await client.waitForTask('wait-stream', 10, 1000);
+      expect(onToken).toHaveBeenCalledWith(expect.any(Function));
+      expect(onToken.mock.calls[0][0]('discarded')).toBeUndefined();
     });
 
     it('returns task when failed', async () => {

@@ -149,7 +149,7 @@ export async function loadPooledEngineModule(
  * alive would keep the whole model resident in the GPU on a worker that is
  * reused for the next task. Calling it twice is a no-op.
  */
-export function wrapPooledEngine(engine: RawPooledEngine, device?: unknown): SwarmEngineAdapter {
+export function wrapPooledEngine(engine: RawPooledEngine, device?: unknown, onDisposed?: () => void): SwarmEngineAdapter {
   let disposed = false;
   return {
     get dim() {
@@ -175,6 +175,7 @@ export function wrapPooledEngine(engine: RawPooledEngine, device?: unknown): Swa
       try {
         (device as { destroy?: () => void } | undefined)?.destroy?.();
       } catch {}
+      try { onDisposed?.(); } catch {}
     },
   };
 }

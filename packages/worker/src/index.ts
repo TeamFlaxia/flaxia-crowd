@@ -20,6 +20,8 @@ export interface Env {
   WEBHOOK_SIGNING_SECRET: string
   /** Signs short-lived `/crowd/subscribe` tokens (separate from node tokens). */
   SUBSCRIBE_TOKEN_SECRET: string
+  /** Optional JSON object mapping tenant IDs to fair-queue weights from 1 to 4. */
+  TENANT_SCHEDULING_WEIGHTS?: string
 }
 
 const app: Hono<{ Bindings: Env }> = new Hono<{ Bindings: Env }>()

@@ -1,4 +1,8 @@
 import {
+  NODE_MODEL_CACHE_TTL_MS,
+  type ModelCacheEntryStatus,
+  type NodeModelCacheSnapshot,
+  type SupportedSwarmModelId,
   buildSwarmChain,
   type SwarmChainNode,
   type SwarmMember,
@@ -27,7 +31,7 @@ import { SESSION_MAX_SEQ, type SwarmSemantics } from './session';
  */
 
 /** GGUF sources for the models the swarm engine can split. */
-const SWARM_GGUF_URLS: Record<string, string> = {
+const SWARM_GGUF_URLS: Record<SupportedSwarmModelId, string> = {
   // Qwen3.5 / 3.8 are Gated-DeltaNet hybrids ("qwen35" in GGUF), handled by
   // Qwen35Engine — not DenseEngine.
   'qwen3.5-2b':
@@ -42,6 +46,53 @@ const CACHE_NAME = 'flaxia-swarm-weights-v1';
 const HEADER_START_BYTES = 12 * 1024 * 1024;
 const HEADER_MAX_BYTES = 256 * 1024 * 1024;
 
+const activeSwarmModels = new Map<string, { status: ModelCacheEntryStatus; failedExpiresAt?: number }>();
+
+function setSwarmModelStatus(key: string, status: ModelCacheEntryStatus): void {
+  activeSwarmModels.set(key, {
+    status,
+    failedExpiresAt: status.state === 'failed' ? Date.now() + 30_000 : undefined,
+  });
+}
+
+/** Describe the executable swarm slice; persistent CacheStorage weights are tracked separately. */
+export function createSwarmModelCacheEntryStatus(
+  modelId: string,
+  slice: SwarmSlice,
+  state: ModelCacheEntryStatus['state'],
+  referenceCount: number,
+): ModelCacheEntryStatus {
+  const url = resolveModelUrl(modelId);
+  const revision = /\/resolve\/([^/]+)\//.exec(new URL(url).pathname)?.[1] ?? 'unknown';
+  const dtype = /-(q\d+_\d+)\.gguf/i.exec(url)?.[1] ?? 'unknown';
+  return {
+    modelId,
+    revision,
+    dtype,
+    backend: 'webgpu',
+    layerRange: [slice.start, slice.end],
+    state,
+    referenceCount,
+  };
+}
+
+export function getSwarmModelCacheSnapshot(now = Date.now()): NodeModelCacheSnapshot {
+  const entries: ModelCacheEntryStatus[] = [];
+  for (const [key, value] of activeSwarmModels) {
+    if (value.failedExpiresAt !== undefined && value.failedExpiresAt <= now) {
+      activeSwarmModels.delete(key);
+      continue;
+    }
+    entries.push(value.status);
+  }
+  return {
+    version: 1,
+    sampledAt: now,
+    expiresAt: now + NODE_MODEL_CACHE_TTL_MS,
+    entries: entries.slice(0, 8),
+  };
+}
+
 /**
  * Resolve a task payload's `model` to the GGUF it loads.
  *
@@ -50,7 +101,9 @@ const HEADER_MAX_BYTES = 256 * 1024 * 1024;
  * range-fetch an arbitrary host of the submitter's choosing.
  */
 export function resolveModelUrl(model: string): string {
-  const url = SWARM_GGUF_URLS[model];
+  const url = Object.prototype.hasOwnProperty.call(SWARM_GGUF_URLS, model)
+    ? SWARM_GGUF_URLS[model as SupportedSwarmModelId]
+    : undefined;
   if (url) return url;
   throw new SwarmEngineUnavailableError(`unknown swarm model: ${model}`);
 }
@@ -253,53 +306,70 @@ export function createSwarmRuntime(): SwarmRuntime {
     async load(slice: SwarmSlice, model: string) {
       rangeCacheHits = 0;
       rangeCacheMisses = 0;
-      const { mod, url, gguf } = await resolve(model);
+      const statusKey = JSON.stringify([model, slice.start, slice.end]);
+      setSwarmModelStatus(statusKey, createSwarmModelCacheEntryStatus(model, slice, 'loading', 1));
+      let device: unknown;
+      let engineOwnsDevice = false;
+      try {
+        const { mod, url, gguf } = await resolve(model);
+        device = await requestDevice();
+        const tokenizer = mod.makeTokenizer(mod.tokenizerFromGGUF(gguf.meta));
+        const semantics = buildSemantics(mod, tokenizer);
+        const bytesOf = (info: PooledTensorInfo) =>
+          rangeFetch(url, info.byteOffset, info.byteOffset + info.byteLength - 1);
 
-      const device = await requestDevice();
-      const tokenizer = mod.makeTokenizer(mod.tokenizerFromGGUF(gguf.meta));
-      const bytesOf = (info: PooledTensorInfo) =>
-        rangeFetch(url, info.byteOffset, info.byteOffset + info.byteLength - 1);
-
-      // Large Q4_0/Q8_0 matrices are streamed straight into GPU buffers, and the
-      // rest are uploaded with writeBuffer: a mappedAtCreation copy of the ~254 MB
-      // tied embedding is what a naive load cannot allocate.
-      gguf.streamEntry = (info) =>
-        mod.streamEntryToGPU(
-          device,
-          info,
-          (i) => rangeFetchResponse(url, i.byteOffset, i.byteOffset + i.byteLength - 1),
-          { staging: 4 * 1024 * 1024 },
+        // Large Q4_0/Q8_0 matrices are streamed straight into GPU buffers, and the
+        // rest are uploaded with writeBuffer: a mappedAtCreation copy of the ~254 MB
+        // tied embedding is what a naive load cannot allocate.
+        gguf.streamEntry = (info) =>
+          mod.streamEntryToGPU(
+            device,
+            info,
+            (i) => rangeFetchResponse(url, i.byteOffset, i.byteOffset + i.byteLength - 1),
+            { staging: 4 * 1024 * 1024 },
+          );
+        const weights = await mod.qwen35Weights(
+          gguf,
+          bytesOf,
+          {
+            lo: slice.start,
+            hi: slice.end,
+            hasEmbed: slice.hasEmbed,
+            hasHead: slice.hasHead,
+            mtp: slice.hasHead,
+          },
+          undefined,
+          // Keep the embedding on the CPU: the host does per-token row lookups.
+          (entry, name) => mod.gpuUploadEntry(device, entry, name === mod.GGML_EMBED),
         );
-      const weights = await mod.qwen35Weights(
-        gguf,
-        bytesOf,
-        {
-          lo: slice.start,
-          hi: slice.end,
+
+        const vocabSize = gguf.tensors[mod.GGML_EMBED]?.shape[0] ?? 0;
+        const engine = await mod.Qwen35Engine.create({
+          device,
+          meta: gguf.meta,
+          layerRange: [slice.start, slice.end],
           hasEmbed: slice.hasEmbed,
           hasHead: slice.hasHead,
-          mtp: slice.hasHead,
-        },
-        undefined,
-        // Keep the embedding on the CPU: the host does per-token row lookups.
-        (entry, name) => mod.gpuUploadEntry(device, entry, name === mod.GGML_EMBED),
-      );
-
-      const vocabSize = gguf.tensors[mod.GGML_EMBED]?.shape[0] ?? 0;
-      const engine = await mod.Qwen35Engine.create({
-        device,
-        meta: gguf.meta,
-        layerRange: [slice.start, slice.end],
-        hasEmbed: slice.hasEmbed,
-        hasHead: slice.hasHead,
-        vocab: vocabSize,
-        maxSeq: Math.min(SESSION_MAX_SEQ, Number(gguf.meta['qwen35.context_length']) || SESSION_MAX_SEQ),
-        batchCols: 4,
-        weights,
-      });
-
-      const warm = rangeCacheHits > 0 && rangeCacheMisses === 0;
-      return { engine: wrapPooledEngine(engine, device), semantics: buildSemantics(mod, tokenizer), warm };
+          vocab: vocabSize,
+          maxSeq: Math.min(SESSION_MAX_SEQ, Number(gguf.meta['qwen35.context_length']) || SESSION_MAX_SEQ),
+          batchCols: 4,
+          weights,
+        });
+        const adapter = wrapPooledEngine(engine, device, () => {
+          setSwarmModelStatus(statusKey, createSwarmModelCacheEntryStatus(model, slice, 'evicting', 0));
+          queueMicrotask(() => activeSwarmModels.delete(statusKey));
+        });
+        engineOwnsDevice = true;
+        setSwarmModelStatus(statusKey, createSwarmModelCacheEntryStatus(model, slice, 'ready', 1));
+        const warm = rangeCacheHits > 0 && rangeCacheMisses === 0;
+        return { engine: adapter, semantics, warm };
+      } catch (error) {
+        setSwarmModelStatus(statusKey, createSwarmModelCacheEntryStatus(model, slice, 'failed', 0));
+        if (!engineOwnsDevice) {
+          try { (device as { destroy?: () => void } | undefined)?.destroy?.(); } catch {}
+        }
+        throw error;
+      }
     },
   };
 }

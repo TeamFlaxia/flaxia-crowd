@@ -1,5 +1,6 @@
 import { env, pipeline, TextStreamer } from '@huggingface/transformers';
 import type { AiInferencePayload, AiInferenceResult, AiInferenceOptions } from '@flaxia/sdk';
+import type { ModelCacheBackend, NodeModelCacheSnapshot } from '@flaxia/sdk';
 import {
   MAX_AI_MODEL_MAX_BYTES,
   applyGenerationOptions,
@@ -9,6 +10,7 @@ import {
   resolveAiModel,
   type AiModelDefinition,
 } from './ai-model-registry';
+import { ModelPipelineCache, modelPipelineKey } from './model-pipeline-cache';
 
 // Re-exported so hosts configure the allowlist through the workload module they
 // already import (`@flaxia/node`'s public entry point stays untouched).
@@ -35,8 +37,10 @@ const SUPPORTED_TASKS = [
   'image-to-image', 'depth-estimation', 'feature-extraction', 'image-feature-extraction'
 ] as const;
 
-const pipelineCache = new Map<string, any>();
-const MAX_CACHED_PIPELINES = 2;
+const pipelineCache = new ModelPipelineCache<any>();
+/** Bound work queued behind TextStreamer's synchronous callback API. */
+export const MAX_PENDING_TOKEN_CALLBACKS = 64;
+export const MAX_PENDING_TOKEN_CHARS = 256 * 1024;
 
 /**
  * Drops all cached model pipelines so the (potentially hundreds of MB of)
@@ -44,8 +48,11 @@ const MAX_CACHED_PIPELINES = 2;
  * worker after an idle period so a node does not pin every model it ever saw.
  */
 export const releaseCache = (): void => {
-  pipelineCache.clear();
+  void pipelineCache.releaseAll();
 };
+
+/** Current executable pipelines; weight files in the Transformers cache are a separate disk-cache layer. */
+export const getModelCacheSnapshot = (): NodeModelCacheSnapshot => pipelineCache.getSnapshot();
 
 const createBufferedTokenCallback = (
   onToken: (token: string) => void | Promise<void>,
@@ -54,11 +61,20 @@ const createBufferedTokenCallback = (
   let buffer = '';
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pending: Promise<void> = Promise.resolve();
+  let pendingCount = 0;
+  let pendingChars = 0;
   let failure: unknown;
   let failed = false;
   let closed = false;
 
   const dispatch = (text: string): void => {
+    if (pendingCount >= MAX_PENDING_TOKEN_CALLBACKS || pendingChars + text.length > MAX_PENDING_TOKEN_CHARS) {
+      failed = true;
+      failure = new Error('ai-inference token consumer is too slow; generation stopped at the bounded stream buffer');
+      throw failure;
+    }
+    pendingCount++;
+    pendingChars += text.length;
     // TextStreamer invokes callbacks synchronously. Queue each async sink call
     // in order, retaining failures for the inference promise instead of leaving
     // a rejected promise behind in a timer callback.
@@ -67,7 +83,10 @@ const createBufferedTokenCallback = (
     }).then(
       () => undefined,
       (error: unknown) => { failed = true; failure = error; },
-    );
+    ).finally(() => {
+      pendingCount--;
+      pendingChars -= text.length;
+    });
   };
   const flush = (): void => {
     if (timer !== null) clearTimeout(timer);
@@ -82,6 +101,11 @@ const createBufferedTokenCallback = (
     if (!options.tokenBuffer) {
       dispatch(text);
       return;
+    }
+    if (buffer.length + text.length > MAX_PENDING_TOKEN_CHARS) {
+      failed = true;
+      failure = new Error('ai-inference token consumer is too slow; generation stopped at the bounded stream buffer');
+      throw failure;
     }
     buffer += text;
     if (timer === null) timer = setTimeout(flush, options.tokenBufferIntervalMs ?? 50);
@@ -154,73 +178,98 @@ export const handleAiInference = async (
   const generationOptions: Record<string, unknown> = {};
   applyGenerationOptions(generationOptions, options as Record<string, unknown>);
 
-  const cacheKey = `${task}:${definition.repo}:${dtype ?? 'q4f16'}:${device ?? 'wasm'}`;
-  let generator = pipelineCache.get(cacheKey);
-  if (!generator) {
-    // Bound the cache so a stream of distinct models cannot grow without limit.
-    if (pipelineCache.size >= MAX_CACHED_PIPELINES) {
-      const oldestKey = pipelineCache.keys().next().value as string;
-      pipelineCache.delete(oldestKey);
-    }
-    const pipelineOpts: Record<string, unknown> = {
-      dtype: dtype ?? 'q4f16',
-      device,
-    };
-    const loadStartedAt = performance.now();
-    console.log(`[flaxia-node] ai-inference: loading pipeline task=${task} model=${definition.repo} revision=${definition.revision} dtype=${pipelineOpts.dtype} device=${device ?? 'wasm'}`);
-    try {
-      generator = await pipeline(task as any, definition.repo, pipelineOpts);
-    } catch (err) {
-      if (device && device !== 'wasm') {
-        console.warn(`[AiInference] ${device} failed, falling back to wasm:`, err);
-        pipelineOpts.device = 'wasm';
-        generator = await pipeline(task as any, definition.repo, pipelineOpts);
-      } else {
-        console.error(
-          `[flaxia-node] ai-inference: pipeline load FAILED task=${task} model=${definition.repo} error=${err instanceof Error ? err.message : String(err)}`,
-        );
-        throw err;
+  const resolvedDtype = dtype ?? 'q4f16';
+  const requestedBackend = (device ?? 'wasm') as ModelCacheBackend;
+  const cacheKey = modelPipelineKey({
+    task,
+    modelId: model,
+    revision: definition.revision,
+    dtype: resolvedDtype,
+    backend: requestedBackend,
+  });
+  const loadStartedAt = performance.now();
+  const lease = await pipelineCache.acquire(
+    cacheKey,
+    {
+      modelId: model,
+      revision: definition.revision,
+      dtype: resolvedDtype,
+      backend: requestedBackend,
+    },
+    async () => {
+      const pipelineOpts: Record<string, unknown> = {
+        dtype: resolvedDtype,
+        device,
+        revision: definition.revision,
+      };
+      console.log(`[flaxia-node] ai-inference: loading pipeline task=${task} model=${definition.repo} revision=${definition.revision} dtype=${pipelineOpts.dtype} device=${device ?? 'wasm'}`);
+      let loaded: any;
+      try {
+        loaded = await pipeline(task as any, definition.repo, pipelineOpts);
+      } catch (err) {
+        if (device && device !== 'wasm') {
+          console.warn(`[AiInference] ${device} failed, falling back to wasm:`, err);
+          pipelineOpts.device = 'wasm';
+          loaded = await pipeline(task as any, definition.repo, pipelineOpts);
+        } else {
+          console.error(
+            `[flaxia-node] ai-inference: pipeline load FAILED task=${task} model=${definition.repo} error=${err instanceof Error ? err.message : String(err)}`,
+          );
+          throw err;
+        }
       }
-    }
-    console.log(
-      `[flaxia-node] ai-inference: pipeline ready task=${task} model=${definition.repo} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
-    );
-    pipelineCache.set(cacheKey, generator);
-  }
-
-  const genOptions: Record<string, unknown> = {
-    max_new_tokens: (generationOptions.max_new_tokens as number | undefined) ?? 128,
-    do_sample: (generationOptions.do_sample as boolean | undefined) ?? false,
-  };
-  for (const [key, value] of Object.entries(generationOptions)) {
-    if (key === 'max_new_tokens' || key === 'do_sample') continue;
-    genOptions[key] = value;
-  }
-
-  const tokens = onToken && generator.tokenizer
-    ? createBufferedTokenCallback(onToken, options)
-    : null;
-  if (tokens) {
-    genOptions.streamer = new TextStreamer(generator.tokenizer, {
-      skip_prompt: true,
-      skip_special_tokens: true,
-      callback_function: tokens.callback,
-    });
-  }
-
-  const inputStart = performance.now();
-  let output: any;
-  try {
-    output = await generator(safeInput, genOptions);
-  } catch (error) {
-    // Drain in-flight sink calls, but do not emit a partial tail after a failed
-    // generation. A sink failure takes precedence over a generator failure.
-    if (tokens) await tokens.cancel();
-    throw error;
-  }
-  await tokens?.finish();
-  console.log(
-    `[flaxia-node] ai-inference: done task=${task} model=${definition.repo} execMs=${Math.round(performance.now() - inputStart)} inputLen=${String(safeInput).length}`,
+      console.log(
+        `[flaxia-node] ai-inference: pipeline ready task=${task} model=${definition.repo} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
+      );
+      return {
+        value: loaded,
+        descriptor: { backend: (pipelineOpts.device ?? 'wasm') as ModelCacheBackend },
+      };
+    },
+    (loaded) => loaded.dispose?.(),
   );
-  return { output };
+  const generator = lease.value;
+
+  try {
+    const genOptions: Record<string, unknown> = {
+      max_new_tokens: (generationOptions.max_new_tokens as number | undefined) ?? 128,
+      do_sample: (generationOptions.do_sample as boolean | undefined) ?? false,
+    };
+    for (const [key, value] of Object.entries(generationOptions)) {
+      if (key === 'max_new_tokens' || key === 'do_sample') continue;
+      genOptions[key] = value;
+    }
+
+    const tokens = onToken && generator.tokenizer
+      ? createBufferedTokenCallback(onToken, options)
+      : null;
+    if (tokens) {
+      genOptions.streamer = new TextStreamer(generator.tokenizer, {
+        skip_prompt: true,
+        skip_special_tokens: true,
+        callback_function: tokens.callback,
+      });
+    }
+
+    const inputStart = performance.now();
+    let output: any;
+    try {
+      output = await generator(safeInput, genOptions);
+    } catch (error) {
+      if (/out of memory|oom|allocation failed|could not allocate/i.test(error instanceof Error ? error.message : String(error))) {
+        lease.invalidate();
+      }
+      // Drain in-flight sink calls, but do not emit a partial tail after a failed
+      // generation. A sink failure takes precedence over a generator failure.
+      if (tokens) await tokens.cancel();
+      throw error;
+    }
+    await tokens?.finish();
+    console.log(
+      `[flaxia-node] ai-inference: done task=${task} model=${definition.repo} execMs=${Math.round(performance.now() - inputStart)} inputLen=${String(safeInput).length}`,
+    );
+    return { output };
+  } finally {
+    await lease.release();
+  }
 };

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleAiInference, registerAiModels, listAiModels } from '../ai-inference';
+import { handleAiInference, registerAiModels, listAiModels, MAX_PENDING_TOKEN_CALLBACKS } from '../ai-inference';
 
 const mockGenerate = vi.fn().mockResolvedValue([{ label: 'POSITIVE', score: 0.99 }]);
 const mockPipeline = vi.fn();
@@ -212,6 +212,26 @@ describe('AI Inference streaming sink', () => {
     rejectFirst(new Error('first failed'));
     await expect(result).rejects.toThrow('first failed');
     expect(sink).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops generation before a slow token sink can grow an unbounded callback queue', async () => {
+    const sink = vi.fn();
+    mockGenerate.mockImplementationOnce(async (_input, options) => {
+      emit(options, ...Array.from({ length: MAX_PENDING_TOKEN_CALLBACKS + 1 }, () => 'x'));
+      return 'generated';
+    });
+
+    await expect(handleAiInference(payload(false), sink)).rejects.toThrow(/bounded stream buffer/);
+    expect(sink).toHaveBeenCalledTimes(0);
+  });
+
+  it('caps a buffered TextStreamer chunk before its flush timer runs', async () => {
+    mockGenerate.mockImplementationOnce(async (_input, options) => {
+      emit(options, 'x'.repeat(256 * 1024 + 1));
+      return 'generated';
+    });
+
+    await expect(handleAiInference(payload(true), vi.fn())).rejects.toThrow(/bounded stream buffer/);
   });
 
   it('flushes a buffered tail immediately when generation finishes', async () => {

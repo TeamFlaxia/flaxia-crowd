@@ -1,4 +1,4 @@
-import type { WorkloadType, SwarmInitMessage, SwarmSliceMessage } from '@flaxia/sdk';
+import type { WorkloadType, SwarmInitMessage, SwarmSliceMessage, NodeModelCacheSnapshot } from '@flaxia/sdk';
 import { HEAVY_WORKLOADS } from '@flaxia/sdk';
 import { CpuThrottle, DEFAULT_WAIT_SLOT_MS, ThrottleBusyError } from '../executor/throttle';
 import {
@@ -7,7 +7,7 @@ import {
   probeMaxWasmMemoryBytes,
 } from '../executor/memoryProbe';
 import { SwarmController } from '../swarm/controller';
-import { createSwarmRuntime } from '../swarm/runtime';
+import { createSwarmRuntime, getSwarmModelCacheSnapshot } from '../swarm/runtime';
 import { isSwarmControlEnvelope } from '../swarm/messages';
 
 let throttle: CpuThrottle | null = null;
@@ -25,6 +25,25 @@ const SLOT_RETRY_COOLDOWN_MS = 15_000;
 
 /** Task ids the coordinator asked us to abort, with the reason to surface. */
 const cancelRequested = new Map<string, string>();
+const tokenFlowPaused = new Set<string>();
+const tokenFlowWaiters = new Map<string, Set<() => void>>();
+
+function releaseTokenFlow(id: string) {
+  tokenFlowPaused.delete(id);
+  const waiters = tokenFlowWaiters.get(id);
+  if (!waiters) return;
+  tokenFlowWaiters.delete(id);
+  for (const resolve of waiters) resolve();
+}
+
+function waitForTokenFlow(id: string): Promise<void> {
+  if (!tokenFlowPaused.has(id)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const waiters = tokenFlowWaiters.get(id) ?? new Set<() => void>();
+    waiters.add(resolve);
+    tokenFlowWaiters.set(id, waiters);
+  });
+}
 
 // The active swarm session, if any. One task at a time, so a single slot is
 // enough; control messages and frames from the main thread route here.
@@ -76,6 +95,7 @@ function createTokenSink(id: string): (token: string) => Promise<void> {
     self.postMessage({ id, type: 'token', token });
   };
   return async (token: string): Promise<void> => {
+    await waitForTokenFlow(id);
     postToken(token);
     await throttle?.yieldIfOverloaded();
   };
@@ -100,6 +120,8 @@ function hasEnoughMemoryForHeavyWorkload(): boolean {
 // (transformers / onnxruntime, vector indexes) can be dropped after an idle
 // period instead of pinning hundreds of MB for the life of the worker.
 const cacheReleasers = new Map<string, () => void>();
+const cacheSnapshotters = new Map<string, () => NodeModelCacheSnapshot>();
+cacheSnapshotters.set('swarm-inference', getSwarmModelCacheSnapshot);
 let idleEvictTimer: ReturnType<typeof setTimeout> | null = null;
 
 function releaseLoadedCaches(): void {
@@ -107,6 +129,16 @@ function releaseLoadedCaches(): void {
     try { release(); } catch {}
   }
   cacheReleasers.clear();
+  cacheSnapshotters.clear();
+  cacheSnapshotters.set('swarm-inference', getSwarmModelCacheSnapshot);
+}
+
+function getModelCacheSnapshot(): NodeModelCacheSnapshot {
+  const sampledAt = Date.now();
+  const entries = [...cacheSnapshotters.values()].flatMap((snapshot) => {
+    try { return snapshot().entries; } catch { return []; }
+  }).slice(0, 8);
+  return { version: 1, sampledAt, expiresAt: sampledAt + 60_000, entries };
 }
 
 function armIdleEviction(): void {
@@ -127,6 +159,7 @@ async function runWorkload(
     case 'ai-inference':
       const ai = await import('../workloads/ai-inference');
       cacheReleasers.set(workload, ai.releaseCache);
+      cacheSnapshotters.set(workload, ai.getModelCacheSnapshot);
       return await ai.handleAiInference(payload as any, emitToken);
     case 'image-process':
       const image = await import('../workloads/image-process');
@@ -192,6 +225,15 @@ function startSwarmTask(id: string, initial: SwarmInitMessage | SwarmSliceMessag
 self.onmessage = async (e: MessageEvent) => {
   const data = e.data;
 
+  if (data?.type === 'token-flow') {
+    const id = typeof data.id === 'string' ? data.id : '';
+    if (id && activeTaskId === id && typeof data.paused === 'boolean') {
+      if (data.paused) tokenFlowPaused.add(id);
+      else releaseTokenFlow(id);
+    }
+    return;
+  }
+
   if (data?.type === 'swarm-control') {
     // The main thread forwards whatever the coordinator sent; it is untrusted
     // input. Only a well-formed control envelope reaches the session, so a
@@ -216,6 +258,7 @@ self.onmessage = async (e: MessageEvent) => {
   if (data?.type === 'abort') {
     const id = data.id as string;
     const reason = typeof data.reason === 'string' && data.reason ? data.reason : 'aborted by the coordinator';
+    releaseTokenFlow(id);
     if (activeSwarm && activeSwarmTaskId === id) {
       // Settling the controller posts the error this pool needs to release the
       // slot; nothing waits on this message's reply.
@@ -231,6 +274,7 @@ self.onmessage = async (e: MessageEvent) => {
   const { id, workload, payload, config } = data;
   const taskStartedAt = performance.now();
   activeTaskId = id;
+  releaseTokenFlow(id);
 
   try {
     if (!throttle) {
@@ -262,6 +306,7 @@ self.onmessage = async (e: MessageEvent) => {
         id,
         type: 'heartbeat',
         cpuLoad: throttle?.lastMeasuredLoad ?? 0,
+        modelCache: getModelCacheSnapshot(),
       });
     }, 10000);
 
@@ -278,13 +323,14 @@ self.onmessage = async (e: MessageEvent) => {
         ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage, emitToken)
         : await runWorkload(workload as WorkloadType, payload, emitToken, { fileSourceOrigins, containerImageOrigins });
 
-      self.postMessage({ id, type: 'done', result });
+      self.postMessage({ id, type: 'done', result, modelCache: getModelCacheSnapshot() });
       console.log(
         `[flaxia-node:worker] task done id=${id} workload=${workload} durationMs=${Math.round(performance.now() - taskStartedAt)}`,
       );
     } finally {
       activeTaskId = null;
       cancelRequested.delete(id);
+      releaseTokenFlow(id);
       clearInterval(heartbeat);
       throttle.markTaskComplete(performance.now() - taskStart);
       armIdleEviction();
@@ -293,6 +339,7 @@ self.onmessage = async (e: MessageEvent) => {
     const error = err instanceof Error ? err.message : String(err);
     console.error(`[flaxia-node:worker] task error id=${id} workload=${workload} error=${error}`);
     if (activeTaskId === id) activeTaskId = null;
-    self.postMessage({ id, type: 'error', error });
+    releaseTokenFlow(id);
+    self.postMessage({ id, type: 'error', error, modelCache: getModelCacheSnapshot() });
   }
 };

@@ -1,4 +1,5 @@
-import type { WorkloadType } from "@flaxia/sdk";
+import { isNodeModelCacheSnapshot } from "@flaxia/sdk";
+import type { NodeModelCacheSnapshot, WorkloadType } from "@flaxia/sdk";
 
 const log = (...args: unknown[]) => console.log("[flaxia-node]", ...args);
 
@@ -45,6 +46,8 @@ export class WorkerPool {
   private pendingControls: Array<{ taskId: string; message: unknown }> = [];
   private static readonly MAX_PENDING_CONTROLS = 64;
   private _lastCpuLoad = 0;
+  private _hasCpuLoadSample = false;
+  private _modelCacheSnapshot: NodeModelCacheSnapshot | null = null;
 
   constructor(workerUrl?: string, timeoutMs = 300000) {
     this.workerUrl = workerUrl || '/worker.js';
@@ -130,6 +133,10 @@ export class WorkerPool {
       const { id: resId, type, result, error, token, cpuLoad } = event.data;
       if (resId !== id) return;
 
+      if (isNodeModelCacheSnapshot(event.data.modelCache)) {
+        this._modelCacheSnapshot = event.data.modelCache;
+      }
+
       if (type === 'token') {
         onToken?.(token);
         return;
@@ -137,6 +144,7 @@ export class WorkerPool {
       if (type === 'heartbeat') {
         if (typeof cpuLoad === 'number' && Number.isFinite(cpuLoad)) {
           this._lastCpuLoad = Math.min(1, Math.max(0, cpuLoad));
+          this._hasCpuLoadSample = true;
         }
         return;
       }
@@ -224,6 +232,12 @@ export class WorkerPool {
     return this.postToActive({ type: 'swarm-frame', frame }, [frame]);
   }
 
+  /** Pause or resume a normal workload's asynchronous token sink. */
+  setTokenFlow(taskId: string, paused: boolean): boolean {
+    if (this.active?.id !== taskId) return false;
+    return this.postToActive({ type: 'token-flow', paused });
+  }
+
   /**
    * The coordinator settled this task elsewhere (timeout, a peer failed, the
    * plan was rejected): stop it.
@@ -273,6 +287,7 @@ export class WorkerPool {
       this.worker.terminate();
       this.worker = null;
     }
+    this._modelCacheSnapshot = null;
     this.initWorker();
   }
 
@@ -292,6 +307,7 @@ export class WorkerPool {
       this.worker.terminate();
       this.worker = null;
     }
+    this._modelCacheSnapshot = null;
   }
 
   resume() {
@@ -302,5 +318,15 @@ export class WorkerPool {
 
   get lastCpuLoad(): number {
     return this._lastCpuLoad;
+  }
+
+  get hasCpuLoadSample(): boolean {
+    return this._hasCpuLoadSample;
+  }
+
+  get modelCacheSnapshot(): NodeModelCacheSnapshot | null {
+    const snapshot = this._modelCacheSnapshot;
+    if (!snapshot || snapshot.expiresAt <= Date.now()) return null;
+    return snapshot;
   }
 }

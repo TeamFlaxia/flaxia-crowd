@@ -4,22 +4,59 @@ import type {
   SwarmChainNode,
   SwarmInferencePayload,
   SwarmInitMessage,
+  SwarmPeerQualityReport,
   SwarmSessionPlan,
   TaskRecord,
+  TaskQueueStats,
+  NodeResourceReport,
+  NodeModelCacheSnapshot,
   WarmModelRange,
   WorkloadType,
 } from "@flaxia/sdk";
 import {
   HEAVY_WORKLOADS,
   isValidSwarmChain,
+  isSwarmPeerSignalMessage,
+  isSwarmPeerQualityMessage,
+  MAX_SUBSCRIBER_INFLIGHT_TOKENS,
+  MAX_SUBSCRIBER_INFLIGHT_BYTES,
+  SUBSCRIBER_ACK_TIMEOUT_MS,
+  SUBSCRIBER_PAUSE_AT_TOKENS,
+  SUBSCRIBER_RESUME_AT_TOKENS,
   swarmChainIndex,
   swarmNextHopIndex,
   decodeSwarmEnvelope,
+  validateNodeResourceReport,
+  isNodeModelCacheSnapshot,
   MIN_SWARM_NODES,
   MAX_SWARM_NODES,
+  isSupportedSwarmModelId,
 } from "@flaxia/sdk";
 import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
+import { mergePeerQualitySnapshot } from "./peer-quality";
+import { reserveSwarmRelayBytes, swarmRelayBudgetKey } from "./relay-budget";
+import {
+  rankPlacementCandidates,
+  reservationBlocksAllocation,
+  reservationMatches,
+  type NodeReservation,
+  type PlacementCandidate,
+} from "./scheduler";
+import { orderPendingTasks, parseTenantSchedulingWeights, TASK_PRIORITY_DEFAULT } from "./queue-scheduler";
+import { mergePeerLinkHistory, type PeerLinkHistory } from "./peer-link-history";
+import { planSparseSwarmMesh } from "./mesh-planner";
+import {
+  findPeerRttDisagreements,
+  mergePeerRttDisagreementLog,
+  type PeerRttDisagreement,
+} from "./peer-quality-anomalies";
+import {
+  isNodeProtocolQuarantined,
+  recordProtocolViolation,
+  type ProtocolTrustState,
+  type ProtocolViolationKind,
+} from "./protocol-trust";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_RETRIES = 3;
@@ -58,6 +95,8 @@ export const MAX_RESULT_BYTES = 4 * 1024 * 1024;
 /** Progress token ceiling (#21) and per-task send rate. */
 export const MAX_PROGRESS_TOKEN_CHARS = 4096;
 export const MAX_PROGRESS_PER_SECOND = 50;
+/** WebSocket bytes queued for an older SDK without per-token acknowledgements. */
+const MAX_LEGACY_SUBSCRIBER_BUFFERED_BYTES = 256 * 1024;
 
 interface NodeRecord {
   id: string;
@@ -84,8 +123,14 @@ interface NodeRecord {
   maxStorageBufferBindingSize?: number;
   /** Model layer spans already cached on the node. */
   warmModels?: WarmModelRange[];
+  /** Short-lived self-reported measurements; used only as scheduling hints. */
+  resources?: NodeResourceReport;
+  /** Self-reported executable model state; a short-lived scheduling hint only. */
+  modelCache?: NodeModelCacheSnapshot;
   /** Tasks handed to this node so far, used as a fairness tie-break. */
   assignedCount?: number;
+  /** Lease for the task currently holding this node; fenced by attempt generation. */
+  reservation?: NodeReservation;
 }
 
 /** True for container tasks whose bytes are fetched from a scoped reference. */
@@ -104,11 +149,18 @@ function taskNeedsFileSources(task: TaskRecord): boolean {
 interface SwarmRecord {
   sessionId: string;
   taskId: string;
+  attemptId: string;
   hostNodeId: string;
   members: Array<{ nodeId: string; capacity: number }>;
+  generation: string;
+  reservationExpiresAt: number;
   ready: string[];
   plan?: SwarmSessionPlan;
   started?: boolean;
+  peerReadiness: Record<string, boolean>;
+  flowPaused?: boolean;
+  /** Latest bounded, self-reported measurements for adjacent session links. */
+  peerQuality?: Record<string, SwarmPeerQualityReport>;
 }
 
 /**
@@ -118,6 +170,7 @@ interface SwarmRecord {
  */
 interface AttemptRecord {
   attemptId: string;
+  generation: string;
   nodeId: string;
   tenantId: string;
 }
@@ -125,6 +178,33 @@ interface AttemptRecord {
 interface RateEntry {
   count: number;
   resetAt: number;
+}
+
+interface SubscriberAttachment {
+  sentSequence: number;
+  ackSequence: number;
+  unackedTokenBytes: number[];
+  inflightBytes: number;
+  flowControl: boolean;
+  lastAckAt: number;
+}
+
+interface TenantQueueCounters {
+  assignedByPriority: Record<0 | 1 | 2 | 3, number>;
+  rejectionCounts: Record<"global-cap" | "tenant-cap" | "enqueue-rate", number>;
+  lastAssignmentWaitMs: number | null;
+  maxAssignmentWaitMs: number | null;
+  updatedAt: number | null;
+}
+
+function emptyTenantQueueCounters(): TenantQueueCounters {
+  return {
+    assignedByPriority: { 0: 0, 1: 0, 2: 0, 3: 0 },
+    rejectionCounts: { "global-cap": 0, "tenant-cap": 0, "enqueue-rate": 0 },
+    lastAssignmentWaitMs: null,
+    maxAssignmentWaitMs: null,
+    updatedAt: null,
+  };
 }
 
 /**
@@ -176,6 +256,14 @@ export class Coordinator extends DurableObject<Env> {
 
     if (url.pathname === "/enqueue") {
       return this.handleEnqueue(request);
+    }
+
+    if (url.pathname === "/prewarm") {
+      return this.handlePrewarm(request, url);
+    }
+
+    if (url.pathname === "/queue-stats") {
+      return this.handleQueueStats(url);
     }
 
     // `/task/<tenantId>/<taskId>`: the tenant is part of the key, so a caller
@@ -259,10 +347,18 @@ export class Coordinator extends DurableObject<Env> {
       id: nodeId,
       status: resumeTask ? "busy" : "idle",
       capabilities,
-      cpuLoad: existing?.cpuLoad ?? 0,
+      // An unmeasured node must not receive the best possible load score.
+      cpuLoad: existing?.cpuLoad ?? 1,
       connectedAt: existing?.connectedAt ?? Date.now(),
       lastPongAt: Date.now(),
       currentTaskId: resumeTask?.id,
+      reservation: resumeTask
+        ? existing?.reservation ?? {
+            taskId: resumeTask.id,
+            generation: crypto.randomUUID(),
+            expiresAt: (resumeTask.assignedAt ?? Date.now()) + (resumeTask.timeoutMs || DEFAULT_TIMEOUT_MS),
+          }
+        : undefined,
       lowMemory: url.searchParams.get("lowMemory") === "true",
       siteId,
       fileSources: url.searchParams.get("fileSources") === "true",
@@ -303,14 +399,15 @@ export class Coordinator extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const tags = this.ctx.getTags(ws);
-    const nodeId = tags[0];
+    const connectionId = tags[0];
 
-    if (!nodeId || nodeId.startsWith("client:")) return;
+    if (!connectionId) return;
+    const subscriber = connectionId.startsWith("client:");
 
     // A binary frame is a swarm hidden state: route it to the next chain hop
     // without decoding the payload.
     if (message instanceof ArrayBuffer) {
-      await this.relaySwarmFrame(nodeId, message);
+      if (!subscriber) await this.relaySwarmFrame(connectionId, message);
       return;
     }
 
@@ -322,6 +419,12 @@ export class Coordinator extends DurableObject<Env> {
     }
 
     try {
+      if (subscriber) {
+        await this.handleSubscriberControl(ws, connectionId.slice("client:".length), data);
+        return;
+      }
+
+      const nodeId = connectionId;
       if (data.type === "pong") {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (node) {
@@ -332,18 +435,46 @@ export class Coordinator extends DurableObject<Env> {
           if (typeof rawLoad === "number" && Number.isFinite(rawLoad)) {
             node.cpuLoad = Math.min(1, Math.max(0, rawLoad));
           }
+          const resources = validateNodeResourceReport(data.resources);
+          if (resources) {
+            node.resources = resources;
+            // Device loss is a current eligibility signal. A later successful
+            // bounded probe can restore this hint; telemetry is never a trust
+            // decision and cannot establish identity or tenant permission.
+            if (resources.gpu.status === "device-lost" || resources.gpu.status === "unsupported" ||
+                resources.gpu.status === "unavailable") {
+              node.webgpu = false;
+            } else if (resources.gpu.status === "available" && node.capabilities.includes("swarm-inference")) {
+              node.webgpu = true;
+            }
+          }
+          if (data.modelCache === null) {
+            delete node.modelCache;
+          } else if (isNodeModelCacheSnapshot(data.modelCache)) {
+            node.modelCache = data.modelCache;
+          }
           await this.ctx.storage.put(`node:${nodeId}`, node);
         }
         return;
       }
 
       if (data.type === "swarm-plan") {
-        await this.handleSwarmPlan(nodeId, data);
+        await this.handleSwarmPlan(ws, nodeId, data);
+        return;
+      }
+
+      if (data.type === "swarm-peer-signal") {
+        await this.handleSwarmPeerSignal(ws, nodeId, data);
+        return;
+      }
+
+      if (data.type === "swarm-peer-quality") {
+        await this.handleSwarmPeerQuality(ws, nodeId, data);
         return;
       }
 
       if (data.type === "swarm-ready") {
-        await this.handleSwarmReady(nodeId, data.sessionId);
+        await this.handleSwarmReady(nodeId, data.sessionId, data.peerReady === true);
         return;
       }
 
@@ -393,7 +524,12 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   private async recordAttempt(taskId: string, nodeId: string, tenantId: string, attemptId: string) {
-    await this.ctx.storage.put(`attempt:${taskId}`, { attemptId, nodeId, tenantId } satisfies AttemptRecord);
+    await this.ctx.storage.put(`attempt:${taskId}`, {
+      attemptId,
+      generation: attemptId,
+      nodeId,
+      tenantId,
+    } satisfies AttemptRecord);
   }
 
   private async retireAttempt(taskId: string) {
@@ -414,6 +550,10 @@ export class Coordinator extends DurableObject<Env> {
     if (typeof rawAttemptId !== "string" || !rawAttemptId) return null;
     const attempt = await this.ctx.storage.get<AttemptRecord>(`attempt:${taskId}`);
     if (!attempt || attempt.attemptId !== rawAttemptId || attempt.nodeId !== nodeId) return null;
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    const generation = attempt.generation ?? attempt.attemptId;
+    if (node?.reservation && (!reservationMatches(node.reservation, taskId, generation) ||
+        node.reservation.expiresAt <= Date.now())) return null;
     let attachment: { attemptId?: string } | undefined;
     try {
       attachment = ws.deserializeAttachment() as { attemptId?: string } | undefined;
@@ -438,7 +578,139 @@ export class Coordinator extends DurableObject<Env> {
     if (index < 0) return;
     const next = plan.chain[swarmNextHopIndex(plan.chain.length, index)];
     if (!next) return;
+
+    // Reserve full frame bytes transactionally. The task key spans retries so
+    // parallel frames cannot race past the compatibility-relay ceiling.
+    const budgetKey = swarmRelayBudgetKey(taskId);
+    const reserved = await this.ctx.storage.transaction(async (transaction) => {
+      const used = await transaction.get<number>(budgetKey) ?? 0;
+      const nextUsed = reserveSwarmRelayBytes(used, frame.byteLength);
+      if (nextUsed === null) return false;
+      await transaction.put(budgetKey, nextUsed);
+      return true;
+    });
+    if (!reserved) {
+      await this.failTask(taskId, "Coordinator swarm relay byte budget exceeded", undefined, true, true);
+      return;
+    }
     this.sendToNode(next.nodeId, null, frame);
+  }
+
+  /** Relay only bounded signaling between authenticated, adjacent members of the current attempt. */
+  private async handleSwarmPeerSignal(ws: WebSocket, nodeId: string, data: Record<string, unknown>) {
+    if (!isSwarmPeerSignalMessage(data) || data.fromNodeId !== undefined) return;
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    if (!node || node.currentTaskId !== data.taskId) return;
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${data.taskId}`);
+    if (
+      !swarm ||
+      !swarm.plan ||
+      !swarm.plan.chain.length ||
+      swarm.sessionId !== data.sessionId ||
+      swarm.attemptId !== data.attemptId ||
+      !swarm.members.some((member) => member.nodeId === nodeId)
+    ) return;
+
+    let attachment: { attemptId?: string } | undefined;
+    try {
+      attachment = ws.deserializeAttachment() as { attemptId?: string } | undefined;
+    } catch {
+      return;
+    }
+    if (attachment?.attemptId !== swarm.attemptId) return;
+
+    const index = swarmChainIndex(swarm.plan, nodeId);
+    if (index < 0) return;
+    const previous = swarm.plan.chain[(index - 1 + swarm.plan.chain.length) % swarm.plan.chain.length];
+    const next = swarm.plan.chain[swarmNextHopIndex(swarm.plan.chain.length, index)];
+    if (data.toNodeId !== previous?.nodeId && data.toNodeId !== next?.nodeId) return;
+
+    const signal = data.signal.kind === "description"
+      ? { kind: "description", description: { type: data.signal.description.type, sdp: data.signal.description.sdp } }
+      : {
+          kind: "candidate",
+          candidate: data.signal.candidate === null
+            ? null
+            : {
+                candidate: data.signal.candidate.candidate,
+                sdpMid: data.signal.candidate.sdpMid,
+                sdpMLineIndex: data.signal.candidate.sdpMLineIndex,
+                usernameFragment: data.signal.candidate.usernameFragment,
+              },
+        };
+    this.sendAttemptToNode(data.toNodeId, {
+      type: "swarm-peer-signal",
+      taskId: swarm.taskId,
+      sessionId: swarm.sessionId,
+      attemptId: swarm.attemptId,
+      fromNodeId: nodeId,
+      toNodeId: data.toNodeId,
+      signal,
+    }, swarm.attemptId);
+  }
+
+  /** Store only fresh, bounded measurements for a node's current adjacent links. */
+  private async handleSwarmPeerQuality(ws: WebSocket, nodeId: string, data: Record<string, unknown>) {
+    if (data.type !== "swarm-peer-quality" || typeof data.taskId !== "string" ||
+        typeof data.sessionId !== "string" || typeof data.attemptId !== "string" ||
+        !Array.isArray(data.reports) || data.reports.length < 1 || data.reports.length > 2) return;
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(data);
+    } catch {
+      return;
+    }
+    if (serialized.length > 4096) return;
+    const now = Date.now();
+    if (!isSwarmPeerQualityMessage(data, now)) return;
+
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+    if (!node || node.currentTaskId !== data.taskId) return;
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${data.taskId}`);
+    if (!swarm || !swarm.plan || swarm.sessionId !== data.sessionId || swarm.attemptId !== data.attemptId ||
+        !swarm.members.some((member) => member.nodeId === nodeId)) return;
+
+    let attachment: { attemptId?: string } | undefined;
+    try {
+      attachment = ws.deserializeAttachment() as { attemptId?: string } | undefined;
+    } catch {
+      return;
+    }
+    if (attachment?.attemptId !== swarm.attemptId) return;
+    if (!(await this.checkRateLimitKey(`rate:peer-quality:${swarm.sessionId}:${nodeId}`, 4))) return;
+
+    const index = swarmChainIndex(swarm.plan, nodeId);
+    if (index < 0) return;
+    const length = swarm.plan.chain.length;
+    const adjacent = new Set([
+      swarm.plan.chain[(index - 1 + length) % length]?.nodeId,
+      swarm.plan.chain[swarmNextHopIndex(length, index)]?.nodeId,
+    ]);
+    const maxEntries = Math.max(2, swarm.plan.chain.length * 2);
+    const result = mergePeerQualitySnapshot(swarm.peerQuality, nodeId, data.reports, adjacent, now, maxEntries);
+    if (!result.accepted) return;
+    // These are self-reported scheduling hints, not proof of peer identity or quality.
+    swarm.peerQuality = result.snapshot;
+    await this.ctx.storage.put(`swarm:${data.taskId}`, swarm);
+
+    const history = await this.ctx.storage.get<PeerLinkHistory>("peer-quality:history");
+    const persisted = mergePeerLinkHistory(history, nodeId, data.reports, adjacent, now);
+    if (persisted.accepted) {
+      await this.ctx.storage.put("peer-quality:history", persisted.history);
+    }
+    // This diagnostic compares two measurements reported by one browser.
+    // Keep it advisory: it is not an independent signal for scoring or quarantine.
+    const anomalies = findPeerRttDisagreements(nodeId, data.reports, adjacent, now);
+    if (anomalies.length) {
+      const previous = await this.ctx.storage.get<PeerRttDisagreement[]>("trust:peer-quality-anomalies");
+      const diagnosticLog = mergePeerRttDisagreementLog(previous, anomalies, now);
+      await this.ctx.storage.put("trust:peer-quality-anomalies", diagnosticLog);
+      console.warn("swarm peer RTT measurements disagree; retained as advisory diagnostics", {
+        taskId: data.taskId,
+        sessionId: swarm.sessionId,
+        anomalies,
+      });
+    }
   }
 
   /**
@@ -456,7 +728,22 @@ export class Coordinator extends DurableObject<Env> {
     await this.tryAssignAll();
   }
 
-  private async handleSwarmPlan(nodeId: string, data: Record<string, unknown>) {
+  private async recordActiveProtocolViolation(nodeId: string, kind: ProtocolViolationKind) {
+    const now = Date.now();
+    const current = await this.ctx.storage.get<ProtocolTrustState>("trust:protocol-faults");
+    const result = recordProtocolViolation(current, nodeId, kind, now);
+    await this.ctx.storage.put("trust:protocol-faults", result.state);
+    if (result.quarantineUntil) {
+      console.warn("swarm node temporarily quarantined after repeated active-attempt protocol faults", {
+        nodeId,
+        kind,
+        faultCount: result.faultCount,
+        quarantineUntil: result.quarantineUntil,
+      });
+    }
+  }
+
+  private async handleSwarmPlan(ws: WebSocket, nodeId: string, data: Record<string, unknown>) {
     const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     const taskId = node?.currentTaskId;
     if (!taskId) return;
@@ -464,6 +751,9 @@ export class Coordinator extends DurableObject<Env> {
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
     if (!swarm) return;
     if (data.sessionId !== swarm.sessionId) return;
+    // Stale plans do not count as faults. Only the current delivery socket and
+    // attempt can contribute to a node's temporary protocol quarantine.
+    if (!(await this.acceptAttempt(ws, taskId, nodeId, data.attemptId))) return;
     // The plan is host-authoritative. A non-host member may be malicious or
     // stale; ignore its message without letting it fail the shared task.
     if (swarm.hostNodeId !== nodeId) return;
@@ -474,6 +764,7 @@ export class Coordinator extends DurableObject<Env> {
     // slices, at most MAX_SWARM_LAYERS total and MAX_SWARM_SLICE_LAYERS per
     // node. Without them a host could hand a volunteer `end: 1e9` and OOM it.
     if (!isValidSwarmChain(chain)) {
+      await this.recordActiveProtocolViolation(nodeId, "invalid-swarm-plan");
       await this.rejectSwarmPlan(
         taskId,
         swarm.sessionId,
@@ -486,6 +777,7 @@ export class Coordinator extends DurableObject<Env> {
     // The host is authoritative for placement, but every member must appear.
     const plannedIds = new Set(chain.map((c) => c.nodeId));
     if (plannedIds.size !== swarm.members.length || !swarm.members.every((m) => plannedIds.has(m.nodeId))) {
+      await this.recordActiveProtocolViolation(nodeId, "incomplete-swarm-plan");
       await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan does not cover every member");
       return;
     }
@@ -515,23 +807,26 @@ export class Coordinator extends DurableObject<Env> {
     for (let i = 0; i < chain.length; i++) {
       const inboundKey = chain.length > 1 ? hopKeys[(i - 1 + chain.length) % chain.length] : undefined;
       const outboundKey = chain.length > 1 ? hopKeys[i] : undefined;
-      this.sendToNode(chain[i].nodeId, {
+      this.sendAttemptToNode(chain[i].nodeId, {
         type: "swarm-slice",
         sessionId: swarm.sessionId,
         taskId,
+        attemptId: swarm.attemptId,
         model: (task.payload as SwarmInferencePayload)?.model ?? "",
         timeoutMs: task.timeoutMs,
         index: i,
         chainLength: chain.length,
+        previousNodeId: chain.length > 1 ? chain[(i - 1 + chain.length) % chain.length].nodeId : undefined,
+        nextNodeId: chain.length > 1 ? chain[swarmNextHopIndex(chain.length, i)].nodeId : undefined,
         role: chain[i].role,
         slice: chain[i].slice,
         inboundKey,
         outboundKey,
-      });
+      }, swarm.attemptId);
     }
   }
 
-  private async handleSwarmReady(nodeId: string, sessionId: unknown) {
+  private async handleSwarmReady(nodeId: string, sessionId: unknown, peerReady: boolean) {
     const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     const taskId = node?.currentTaskId;
     if (!taskId) return;
@@ -542,10 +837,20 @@ export class Coordinator extends DurableObject<Env> {
     if (!swarm.members.some((m) => m.nodeId === nodeId)) return;
 
     if (!swarm.ready.includes(nodeId)) swarm.ready.push(nodeId);
+    swarm.peerReadiness[nodeId] = peerReady;
     if (swarm.ready.length >= swarm.members.length) {
       swarm.started = true;
       await this.ctx.storage.put(`swarm:${taskId}`, swarm);
-      this.sendToNode(swarm.hostNodeId, { type: "swarm-start", sessionId: swarm.sessionId, taskId });
+      const mode = swarm.members.every((member) => swarm.peerReadiness[member.nodeId] === true) ? "peer" : "relay";
+      for (const member of swarm.members) {
+        this.sendAttemptToNode(member.nodeId, {
+          type: "swarm-transport",
+          sessionId: swarm.sessionId,
+          taskId,
+          mode,
+        }, swarm.attemptId);
+      }
+      this.sendAttemptToNode(swarm.hostNodeId, { type: "swarm-start", sessionId: swarm.sessionId, taskId }, swarm.attemptId);
     } else {
       await this.ctx.storage.put(`swarm:${taskId}`, swarm);
     }
@@ -627,10 +932,42 @@ export class Coordinator extends DurableObject<Env> {
     if (!(await this.checkRateLimitKey(`rate:progress:${taskId}`, MAX_PROGRESS_PER_SECOND, 1000))) return;
 
     const subs = this.ctx.getWebSockets(`client:${taskId}`);
-    const msg = JSON.stringify({ type: "token", token });
+    const excluded = new Set<WebSocket>();
     for (const sub of subs) {
-      try { sub.send(msg); } catch {}
+      const attachment = this.readSubscriberAttachment(sub);
+      const inflight = attachment.sentSequence - attachment.ackSequence;
+      const bufferedAmount = (sub as WebSocket & { bufferedAmount?: number }).bufferedAmount;
+      const sequence = attachment.sentSequence + 1;
+      const message = JSON.stringify({ type: "token", token, sequence });
+      const messageBytes = new TextEncoder().encode(message).byteLength;
+      if (
+        inflight >= MAX_SUBSCRIBER_INFLIGHT_TOKENS ||
+        attachment.inflightBytes + messageBytes > MAX_SUBSCRIBER_INFLIGHT_BYTES ||
+        (typeof bufferedAmount === "number" && bufferedAmount > MAX_SUBSCRIBER_INFLIGHT_BYTES) ||
+        (!attachment.flowControl && typeof bufferedAmount === "number" && bufferedAmount > MAX_LEGACY_SUBSCRIBER_BUFFERED_BYTES)
+      ) {
+        this.closeSlowSubscriber(sub);
+        excluded.add(sub);
+        continue;
+      }
+      try {
+        sub.send(message);
+        if (inflight === 0) attachment.lastAckAt = Date.now();
+        attachment.sentSequence = sequence;
+        attachment.unackedTokenBytes.push(messageBytes);
+        attachment.inflightBytes += messageBytes;
+        this.writeSubscriberAttachment(sub, attachment);
+        // Legacy SDKs do not acknowledge callback completion. Send at most one
+        // fixed window, then disconnect them to keep their browser-side queue finite.
+        if (!attachment.flowControl && sequence - attachment.ackSequence >= MAX_SUBSCRIBER_INFLIGHT_TOKENS) {
+          this.closeSlowSubscriber(sub);
+          excluded.add(sub);
+        }
+      } catch {
+        excluded.add(sub);
+      }
     }
+    await this.updateSubscriberFlow(taskId, excluded);
   }
 
   /**
@@ -660,6 +997,7 @@ export class Coordinator extends DurableObject<Env> {
 
     if (tag.startsWith("client:")) {
       try { ws.close(); } catch {}
+      await this.updateSubscriberFlow(tag.slice("client:".length), new Set([ws]));
       return;
     }
 
@@ -682,6 +1020,124 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   // --- WebSocket: Subscriber ---
+
+  private readSubscriberAttachment(ws: WebSocket): SubscriberAttachment {
+    try {
+      const value = ws.deserializeAttachment() as Partial<SubscriberAttachment> | undefined;
+      const sentSequence = Number.isSafeInteger(value?.sentSequence) && value!.sentSequence! >= 0
+        ? value!.sentSequence!
+        : 0;
+      const rawAckSequence = Number.isSafeInteger(value?.ackSequence) && value!.ackSequence! >= 0
+        ? value!.ackSequence!
+        : 0;
+      const ackSequence = Math.min(sentSequence, rawAckSequence);
+      const rawBytes = Array.isArray(value?.unackedTokenBytes)
+        ? value.unackedTokenBytes.filter((bytes) => Number.isSafeInteger(bytes) && bytes >= 0).slice(0, MAX_SUBSCRIBER_INFLIGHT_TOKENS)
+        : [];
+      if (rawBytes.length !== sentSequence - ackSequence) {
+        return { sentSequence: 0, ackSequence: 0, unackedTokenBytes: [], inflightBytes: 0, flowControl: false, lastAckAt: Date.now() };
+      }
+      return {
+        sentSequence,
+        ackSequence,
+        unackedTokenBytes: rawBytes,
+        inflightBytes: rawBytes.reduce((sum, bytes) => sum + bytes, 0),
+        flowControl: value?.flowControl === true,
+        lastAckAt: typeof value?.lastAckAt === "number" && Number.isFinite(value.lastAckAt) ? value.lastAckAt : Date.now(),
+      };
+    } catch {
+      return { sentSequence: 0, ackSequence: 0, unackedTokenBytes: [], inflightBytes: 0, flowControl: false, lastAckAt: Date.now() };
+    }
+  }
+
+  private writeSubscriberAttachment(ws: WebSocket, attachment: SubscriberAttachment) {
+    try { ws.serializeAttachment(attachment); } catch {}
+  }
+
+  private async handleSubscriberControl(ws: WebSocket, taskId: string, data: Record<string, unknown>) {
+    const attachment = this.readSubscriberAttachment(ws);
+    if (data.type === "flow-control" && data.version === 1) {
+      attachment.flowControl = true;
+      this.writeSubscriberAttachment(ws, attachment);
+      await this.updateSubscriberFlow(taskId);
+      return;
+    }
+    if (data.type !== "ack" || !attachment.flowControl) return;
+    const sequence = data.sequence;
+    if (!Number.isSafeInteger(sequence) || typeof sequence !== "number") return;
+    if (sequence <= attachment.ackSequence || sequence > attachment.sentSequence) return;
+    const acknowledged = sequence - attachment.ackSequence;
+    if (acknowledged > attachment.unackedTokenBytes.length) return;
+    attachment.unackedTokenBytes.splice(0, acknowledged);
+    attachment.inflightBytes = attachment.unackedTokenBytes.reduce((sum, bytes) => sum + bytes, 0);
+    attachment.ackSequence = sequence;
+    attachment.lastAckAt = Date.now();
+    this.writeSubscriberAttachment(ws, attachment);
+    await this.updateSubscriberFlow(taskId);
+  }
+
+  private closeSlowSubscriber(ws: WebSocket) {
+    try { ws.send(JSON.stringify({ type: "error", error: "Subscription closed because the token consumer is too slow" })); } catch {}
+    try { ws.close(1013, "slow token consumer"); } catch {}
+  }
+
+  /** Pause the producer at a token boundary while any current subscriber is above its high watermark. */
+  private async updateSubscriberFlow(taskId: string, excluded: Set<WebSocket> = new Set()) {
+    const task = await this.getTask(taskId);
+    if (!task || task.status !== "processing" || !task.assignedNodeId) return;
+
+    const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
+    const attempt = await this.ctx.storage.get<AttemptRecord>(`attempt:${taskId}`);
+    const flowKey = `flow:${taskId}`;
+    const previous = await this.ctx.storage.get<{ attemptId: string; paused: boolean }>(flowKey);
+    const wasPaused = swarm?.flowPaused ?? (previous?.attemptId === attempt?.attemptId && previous?.paused === true);
+    const now = Date.now();
+    let paused = false;
+    const subscribers = this.ctx.getWebSockets(`client:${taskId}`);
+    for (const sub of subscribers) {
+      if (excluded.has(sub)) continue;
+      const attachment = this.readSubscriberAttachment(sub);
+      const inflight = attachment.sentSequence - attachment.ackSequence;
+      if (inflight > 0 && now - attachment.lastAckAt >= SUBSCRIBER_ACK_TIMEOUT_MS) {
+        this.closeSlowSubscriber(sub);
+        continue;
+      }
+      const bufferedAmount = (sub as WebSocket & { bufferedAmount?: number }).bufferedAmount;
+      if (
+        inflight >= MAX_SUBSCRIBER_INFLIGHT_TOKENS ||
+        attachment.inflightBytes > MAX_SUBSCRIBER_INFLIGHT_BYTES ||
+        (typeof bufferedAmount === "number" && bufferedAmount > MAX_SUBSCRIBER_INFLIGHT_BYTES) ||
+        (!attachment.flowControl && typeof bufferedAmount === "number" && bufferedAmount > MAX_LEGACY_SUBSCRIBER_BUFFERED_BYTES)
+      ) {
+        this.closeSlowSubscriber(sub);
+        continue;
+      }
+      if (attachment.flowControl && (inflight >= SUBSCRIBER_PAUSE_AT_TOKENS ||
+          (wasPaused && inflight > SUBSCRIBER_RESUME_AT_TOKENS))) paused = true;
+    }
+
+    if (swarm) {
+      if (!swarm.started || swarm.flowPaused === paused) return;
+      swarm.flowPaused = paused;
+      await this.ctx.storage.put(`swarm:${taskId}`, swarm);
+      this.sendAttemptToNode(swarm.hostNodeId, {
+        type: "swarm-flow",
+        sessionId: swarm.sessionId,
+        taskId,
+        paused,
+      }, swarm.attemptId);
+      return;
+    }
+
+    if (!attempt) return;
+    if (previous?.attemptId === attempt.attemptId && previous.paused === paused) return;
+    if (previous?.attemptId !== attempt.attemptId && !paused) {
+      await this.ctx.storage.delete(flowKey);
+      return;
+    }
+    await this.ctx.storage.put(flowKey, { attemptId: attempt.attemptId, paused });
+    this.sendAttemptToNode(attempt.nodeId, { type: "task-flow", taskId, paused }, attempt.attemptId);
+  }
 
   private async handleSubscribe(request: Request, url: URL): Promise<Response> {
     const taskId = url.searchParams.get("taskId");
@@ -716,11 +1172,54 @@ export class Coordinator extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server, [`client:${taskId}`]);
-    server.send(JSON.stringify({ type: "subscribed", taskId }));
+    this.writeSubscriberAttachment(server, {
+      sentSequence: 0,
+      ackSequence: 0,
+      unackedTokenBytes: [],
+      inflightBytes: 0,
+      flowControl: false,
+      lastAckAt: Date.now(),
+    });
+    server.send(JSON.stringify({ type: "subscribed", taskId, flowControl: "ack-v1" }));
+    await this.updateSubscriberFlow(taskId);
     return new Response(null, { status: 101, webSocket: client });
   }
 
   // --- Task management ---
+
+  /** A prewarm request is an expensive model download and consumes a small hourly budget. */
+  private async handlePrewarm(request: Request, url: URL): Promise<Response> {
+    const tenantId = url.searchParams.get("tenantId");
+    if (!tenantId || tenantId.length > 128) return Response.json({ error: "Invalid tenant" }, { status: 400 });
+    let task: TaskRecord;
+    try {
+      task = await request.json() as TaskRecord;
+    } catch {
+      return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    if (!task || typeof task !== "object") {
+      return Response.json({ error: "Invalid bounded swarm prewarm task" }, { status: 400 });
+    }
+    const payload = task.payload as Record<string, unknown> | undefined;
+    const swarm = payload?.swarm as Record<string, unknown> | undefined;
+    const minNodes = swarm?.minNodes;
+    const maxNodes = swarm?.maxNodes;
+    if (task.tenantId !== tenantId || task.workload !== "swarm-inference" || task.priority !== 0 ||
+        !payload || !isSupportedSwarmModelId(payload.model) || payload.prompt !== "flaxia model cache warm-up" ||
+        payload.maxNewTokens !== 1 || !swarm || swarm.preferWarm !== false ||
+        typeof minNodes !== "number" || !Number.isInteger(minNodes) || minNodes < MIN_SWARM_NODES || minNodes > MAX_SWARM_NODES ||
+        typeof maxNodes !== "number" || !Number.isInteger(maxNodes) || maxNodes < minNodes || maxNodes > MAX_SWARM_NODES ||
+        task.callbackUrl !== undefined) {
+      return Response.json({ error: "Invalid bounded swarm prewarm task" }, { status: 400 });
+    }
+    if (!(await this.checkRateLimitKey(`rate:prewarm:${tenantId}`, 2, 60 * 60 * 1000))) {
+      return Response.json({ error: "Swarm prewarm limit reached (2 per hour)" }, { status: 429 });
+    }
+    return this.handleEnqueue(new Request("http://internal/enqueue", {
+      method: "POST",
+      body: JSON.stringify(task),
+    }));
+  }
 
   private async handleEnqueue(request: Request): Promise<Response> {
     let body: TaskRecord;
@@ -734,6 +1233,14 @@ export class Coordinator extends DurableObject<Env> {
     if (typeof body.tenantId !== "string" || !body.tenantId || body.tenantId.length > 128) {
       return Response.json({ error: "Task tenantId is required" }, { status: 400 });
     }
+    if (typeof body.createdAt !== "number" || !Number.isFinite(body.createdAt)) {
+      return Response.json({ error: "Task createdAt must be a finite timestamp" }, { status: 400 });
+    }
+    if (body.priority !== undefined &&
+        !(typeof body.priority === "number" && Number.isInteger(body.priority) && body.priority >= 0 && body.priority <= 3)) {
+      return Response.json({ error: "Task priority must be an integer between 0 and 3" }, { status: 400 });
+    }
+    body.priority ??= TASK_PRIORITY_DEFAULT;
     // Fail closed rather than deliver an unsigned (forgeable) webhook.
     if (body.callbackUrl && !this.env.WEBHOOK_SIGNING_SECRET) {
       return Response.json({ error: "Webhook signing is not configured" }, { status: 400 });
@@ -741,15 +1248,20 @@ export class Coordinator extends DurableObject<Env> {
 
     const pending = await this.getPending();
     if (pending.length >= MAX_PENDING_TASKS) {
+      await this.recordQueueRejection(body.tenantId, "global-cap");
       return Response.json({ error: "Task queue is full" }, { status: 429 });
     }
     const tenantPending = await this.getTenantPending(body.tenantId);
     if (tenantPending.length >= MAX_PENDING_TASKS_PER_TENANT) {
+      await this.recordQueueRejection(body.tenantId, "tenant-cap");
       return Response.json({ error: "Tenant pending-task limit reached" }, { status: 429 });
     }
     if (!(await this.checkRateLimitKey(`rate:enqueue:${body.tenantId}`, MAX_ENQUEUE_PER_MINUTE))) {
+      await this.recordQueueRejection(body.tenantId, "enqueue-rate");
       return Response.json({ error: "Enqueue rate limit exceeded" }, { status: 429 });
     }
+
+    if (typeof body.queuedAt !== "number" || !Number.isFinite(body.queuedAt)) body.queuedAt = body.createdAt;
 
     await this.ctx.storage.put(this.taskKey(body.tenantId, body.id), body);
     // Global task id -> tenant, so node messages can resolve their task without
@@ -776,6 +1288,60 @@ export class Coordinator extends DurableObject<Env> {
     return Response.json({ message: "Task submitted", taskId: body.id });
   }
 
+  private async handleQueueStats(url: URL): Promise<Response> {
+    const tenantId = url.searchParams.get("tenantId");
+    if (!tenantId || tenantId.length > 128) return Response.json({ error: "Invalid tenant" }, { status: 400 });
+    const counters = await this.ctx.storage.get<TenantQueueCounters>(`queue:stats:${tenantId}`) ?? emptyTenantQueueCounters();
+    const pendingByPriority: Record<0 | 1 | 2 | 3, number> = { 0: 0, 1: 0, 2: 0, 3: 0 };
+    const pendingIds = (await this.getTenantPending(tenantId)).slice(0, MAX_PENDING_TASKS_PER_TENANT);
+    let oldestPendingWaitMs: number | null = null;
+    const now = Date.now();
+    for (const taskId of pendingIds) {
+      const task = await this.getTask(taskId, tenantId);
+      if (!task || task.status !== "pending") continue;
+      const priority = task.priority === 0 || task.priority === 2 || task.priority === 3 ? task.priority : 1;
+      pendingByPriority[priority]++;
+      const queueStartedAt = Number.isFinite(task.queuedAt) ? task.queuedAt! : task.createdAt;
+      const waitMs = Math.max(0, now - queueStartedAt);
+      oldestPendingWaitMs = oldestPendingWaitMs === null ? waitMs : Math.max(oldestPendingWaitMs, waitMs);
+    }
+    const stats: TaskQueueStats = {
+      pendingCount: Object.values(pendingByPriority).reduce((sum, value) => sum + value, 0),
+      pendingByPriority,
+      assignedByPriority: counters.assignedByPriority,
+      rejectionCounts: counters.rejectionCounts,
+      oldestPendingWaitMs,
+      lastAssignmentWaitMs: counters.lastAssignmentWaitMs,
+      maxAssignmentWaitMs: counters.maxAssignmentWaitMs,
+      updatedAt: counters.updatedAt,
+    };
+    return Response.json(stats);
+  }
+
+  private async readTenantQueueCounters(tenantId: string): Promise<TenantQueueCounters> {
+    return await this.ctx.storage.get<TenantQueueCounters>(`queue:stats:${tenantId}`) ?? emptyTenantQueueCounters();
+  }
+
+  private async recordQueueRejection(
+    tenantId: string,
+    reason: "global-cap" | "tenant-cap" | "enqueue-rate",
+  ) {
+    const stats = await this.readTenantQueueCounters(tenantId);
+    stats.rejectionCounts[reason] = Math.min(Number.MAX_SAFE_INTEGER, stats.rejectionCounts[reason] + 1);
+    stats.updatedAt = Date.now();
+    await this.ctx.storage.put(`queue:stats:${tenantId}`, stats);
+  }
+
+  private async recordQueueAssignment(task: TaskRecord) {
+    const stats = await this.readTenantQueueCounters(task.tenantId);
+    const priority = task.priority === 0 || task.priority === 2 || task.priority === 3 ? task.priority : 1;
+    stats.assignedByPriority[priority] = Math.min(Number.MAX_SAFE_INTEGER, stats.assignedByPriority[priority] + 1);
+    stats.lastAssignmentWaitMs = task.queueWaitMs ?? 0;
+    stats.maxAssignmentWaitMs = Math.max(stats.maxAssignmentWaitMs ?? 0, task.queueWaitMs ?? 0);
+    stats.updatedAt = Date.now();
+    await this.ctx.storage.put(`queue:stats:${task.tenantId}`, stats);
+  }
+
   private async completeTask(taskId: string, result: unknown, nodeId: string, attemptId: string) {
     const task = await this.getTask(taskId);
     if (!task || task.status !== "processing") return;
@@ -793,14 +1359,16 @@ export class Coordinator extends DurableObject<Env> {
     // routing on it (and a retry never inherits a previous attempt's plan).
     task.swarmSession = undefined;
     await this.ctx.storage.put(this.taskKey(task.tenantId, taskId), task);
+    await this.ctx.storage.delete(swarmRelayBudgetKey(taskId));
     await this.retireAttempt(taskId);
+    await this.ctx.storage.delete(`flow:${taskId}`);
     await this.removeFromTenantPending(task.tenantId, taskId);
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
     if (swarm) {
       await this.releaseSwarmMembers(taskId);
     } else {
-      await this.releaseNode(nodeId);
+      await this.releaseNode(nodeId, taskId, attemptId);
     }
 
     const processing = await this.getProcessing();
@@ -840,7 +1408,14 @@ export class Coordinator extends DurableObject<Env> {
     // not survive to route a later attempt's frames, and a retired attempt must
     // not be able to settle the task after this point.
     task.swarmSession = undefined;
+    const reservedNode = task.assignedNodeId
+      ? await this.ctx.storage.get<NodeRecord>(`node:${task.assignedNodeId}`)
+      : undefined;
+    const reservationGeneration = reservedNode?.reservation?.taskId === taskId
+      ? reservedNode.reservation.generation
+      : undefined;
     await this.retireAttempt(taskId);
+    await this.ctx.storage.delete(`flow:${taskId}`);
 
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
     // The session ends here either way, so every node still working on it must
@@ -859,7 +1434,7 @@ export class Coordinator extends DurableObject<Env> {
     if (swarm) {
       await this.releaseSwarmMembers(taskId);
     } else if (task.assignedNodeId && release) {
-      await this.releaseNode(task.assignedNodeId);
+      await this.releaseNode(task.assignedNodeId, taskId, reservationGeneration);
     }
 
     // Retry transient failures (timeout / disconnect) up to MAX_RETRIES times.
@@ -868,9 +1443,15 @@ export class Coordinator extends DurableObject<Env> {
     // permanently failed by a second overlapping failure signal.
     if (!permanent && task.retryCount < MAX_RETRIES) {
       if (task.status === "processing") task.retryCount++;
+      task.streamEpoch = (task.streamEpoch ?? 0) + 1;
+      const reset = JSON.stringify({ type: "reset", epoch: task.streamEpoch });
+      for (const sub of this.ctx.getWebSockets(`client:${taskId}`)) {
+        try { sub.send(reset); } catch {}
+      }
       task.status = "pending";
       task.assignedNodeId = undefined;
       task.assignedAt = undefined;
+      task.queuedAt = Date.now();
       await this.ctx.storage.put(this.taskKey(task.tenantId, taskId), task);
 
       const processing = await this.getProcessing();
@@ -895,6 +1476,7 @@ export class Coordinator extends DurableObject<Env> {
     task.error = error;
     task.completedAt = Date.now();
     await this.ctx.storage.put(this.taskKey(task.tenantId, taskId), task);
+    await this.ctx.storage.delete(swarmRelayBudgetKey(taskId));
 
     if (task.assignedNodeId) {
       const processing = await this.getProcessing();
@@ -920,11 +1502,14 @@ export class Coordinator extends DurableObject<Env> {
     }
   }
 
-  private async releaseNode(nodeId: string) {
+  private async releaseNode(nodeId: string, taskId?: string, generation?: string) {
     const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     if (!node) return;
+    if (taskId && node.currentTaskId && node.currentTaskId !== taskId) return;
+    if (taskId && node.reservation && !reservationMatches(node.reservation, taskId, generation)) return;
     node.status = "idle";
     node.currentTaskId = undefined;
+    node.reservation = undefined;
     await this.ctx.storage.put(`node:${nodeId}`, node);
 
     const idleNodes = await this.getIdleNodes();
@@ -940,7 +1525,7 @@ export class Coordinator extends DurableObject<Env> {
     for (const member of record.members) {
       const node = await this.ctx.storage.get<NodeRecord>(`node:${member.nodeId}`);
       if (node?.currentTaskId === taskId) {
-        await this.releaseNode(member.nodeId);
+        await this.releaseNode(member.nodeId, taskId, record.generation);
       }
     }
     await this.ctx.storage.delete(`swarm:${taskId}`);
@@ -985,9 +1570,18 @@ export class Coordinator extends DurableObject<Env> {
    * reconnect) gets a new attempt id, and only the receiving socket is allowed
    * to settle it, so a replayed or forged result cannot complete the task.
    */
-  private async deliverTask(task: TaskRecord, socket?: WebSocket): Promise<boolean> {
+  private async deliverTask(task: TaskRecord, socket?: WebSocket, generation = crypto.randomUUID()): Promise<boolean> {
     if (!task.assignedNodeId) return false;
-    const attemptId = crypto.randomUUID();
+    const attemptId = generation;
+    const node = await this.ctx.storage.get<NodeRecord>(`node:${task.assignedNodeId}`);
+    if (node?.currentTaskId === task.id) {
+      node.reservation = {
+        taskId: task.id,
+        generation,
+        expiresAt: (task.assignedAt ?? Date.now()) + (task.timeoutMs || DEFAULT_TIMEOUT_MS),
+      };
+      await this.ctx.storage.put(`node:${task.assignedNodeId}`, node);
+    }
     const message = JSON.stringify({
       type: "task",
       taskId: task.id,
@@ -1017,37 +1611,51 @@ export class Coordinator extends DurableObject<Env> {
     const idleNodes = await this.getIdleNodes();
     if (idleNodes.length === 0) return;
 
-    // Load the candidate nodes once instead of per (task, node) pair, and only
-    // examine the head of the queue: the pass must stay bounded even when the
-    // queue is at its cap.
+    // Load candidate nodes once. The queue has a hard 500-task cap, and the
+    // scheduler limits actual assignment attempts to MAX_ASSIGN_PER_PASS.
     const nodes = new Map<string, NodeRecord>();
     for (const id of idleNodes) {
       const node = await this.ctx.storage.get<NodeRecord>(`node:${id}`);
       if (node) nodes.set(id, node);
     }
     let remainingIdle = idleNodes.filter(id => nodes.has(id));
+    const taskRecords = await Promise.all(pendingIds.map((id) => this.getTask(id)));
+    const queueOrder = orderPendingTasks(
+      taskRecords.filter((task): task is TaskRecord => task?.status === "pending")
+        .map((task) => ({ id: task.id, tenantId: task.tenantId, createdAt: task.queuedAt ?? task.createdAt, priority: task.priority })),
+      Date.now(),
+      parseTenantSchedulingWeights(this.env.TENANT_SCHEDULING_WEIGHTS),
+      await this.ctx.storage.get<string>("queue:tenantCursor") ?? null,
+      await this.ctx.storage.get<number>("queue:tenantServed") ?? 0,
+    );
+    const orderedIds = queueOrder.ordered.map((task) => task.id);
+    let assignments = 0;
+    let servedCursor: { tenantId: string; served: number } | undefined;
+    let remainingPending = pendingIds.slice();
 
-    for (const taskId of pendingIds.slice(0, MAX_ASSIGN_PER_PASS)) {
+    for (const taskId of orderedIds) {
+      if (assignments >= MAX_ASSIGN_PER_PASS || !remainingIdle.length) break;
       const task = await this.getTask(taskId);
       if (!task || task.status !== "pending") continue;
 
       if (task.workload === "swarm-inference") {
         const chosen = await this.tryAssignSwarm(task, nodes, remainingIdle);
         if (chosen) {
+          assignments++;
+          servedCursor = queueOrder.cursorAfter[taskId];
           remainingIdle = remainingIdle.filter(id => !chosen.includes(id));
           await this.ctx.storage.put("nodes:idle", remainingIdle);
+          remainingPending = await this.getPending();
         }
         continue;
       }
 
-      let chosenNode: string | null = null;
-      let bestAssigned = Infinity;
-      let bestBucket = Infinity;
-      let bestConnectedAt = Infinity;
+      const candidates: PlacementCandidate[] = [];
 
       for (const nodeId of remainingIdle) {
         const node = nodes.get(nodeId);
         if (!node || node.status !== "idle") continue;
+        if (reservationBlocksAllocation(node.reservation, Date.now())) continue;
         if (taskNeedsFileSources(task) && !node.fileSources) continue;
         if (!node.capabilities.includes(task.workload as WorkloadType)) continue;
         // Never hand a heavy WASM workload to a low-memory / mobile node; the
@@ -1059,32 +1667,53 @@ export class Coordinator extends DurableObject<Env> {
         const sockets = this.ctx.getWebSockets(nodeId);
         if (sockets.length === 0) continue;
 
-        // `cpuLoad` is self-reported and cannot be verified, so it is only a
-        // tie-break inside an equal-use group: a node that lies about its load
-        // cannot monopolize the queue because the node with fewer assignments
-        // always wins first.
-        const assigned = node.assignedCount ?? 0;
-        const bucket = loadBucket(node.cpuLoad);
-        if (
-          assigned < bestAssigned ||
-          (assigned === bestAssigned && bucket < bestBucket) ||
-          (assigned === bestAssigned && bucket === bestBucket && node.connectedAt < bestConnectedAt)
-        ) {
-          chosenNode = nodeId;
-          bestAssigned = assigned;
-          bestBucket = bucket;
-          bestConnectedAt = node.connectedAt;
-        }
+        const now = Date.now();
+        const report = node.resources;
+        const gpuMetric = report?.gpu.computeCompletionMs;
+        const gpuCompletionMs = report && report.expiresAt > now && report.gpu.expiresAt > now &&
+          gpuMetric?.source === "measured" && gpuMetric.expiresAt > now && gpuMetric.value !== null
+          ? gpuMetric.value
+          : null;
+        const cpuMetric = report?.cpuLoad;
+        const cpuLoad = report && report.expiresAt > now && cpuMetric?.source === "measured" &&
+          cpuMetric.expiresAt > now && cpuMetric.value !== null
+          ? cpuMetric.value
+          : now - node.lastPongAt <= STALE_NODE_MS ? loadBucket(node.cpuLoad) : null;
+        const payload = task.payload as { model?: unknown } | null;
+        const model = typeof payload?.model === "string" ? payload.model : "";
+        candidates.push({
+          nodeId,
+          warmModel: !!model && (
+            !!node.warmModels?.some((entry) => entry.modelId === model) ||
+            !!(node.modelCache && node.modelCache.expiresAt > now && node.modelCache.entries.some((entry) => entry.modelId === model && entry.state === "ready"))
+          ),
+          gpuCompletionMs,
+          capacityBytes: clampByteCapacity(node.wasmMemoryBytes) ??
+            clampByteCapacity(node.maxStorageBufferBindingSize) ?? null,
+          cpuLoad,
+          assignedCount: node.assignedCount ?? 0,
+          connectedAt: node.connectedAt,
+        });
       }
 
+      const selected = rankPlacementCandidates(candidates)[0];
+      const chosenNode = selected?.candidate.nodeId ?? null;
+
       if (!chosenNode) continue;
+      assignments++;
+      servedCursor = queueOrder.cursorAfter[taskId];
+      task.placementReason = selected.reason;
 
       task.status = "processing";
       task.assignedNodeId = chosenNode;
       task.assignedAt = Date.now();
+      const queueStartedAt = Number.isFinite(task.queuedAt) ? task.queuedAt! : task.createdAt;
+      task.queueWaitMs = Math.max(0, task.assignedAt - queueStartedAt);
+      await this.recordQueueAssignment(task);
       await this.ctx.storage.put(this.taskKey(task.tenantId, taskId), task);
 
-      this.pendingCache = pendingIds.filter(id => id !== taskId);
+      remainingPending = remainingPending.filter(id => id !== taskId);
+      this.pendingCache = remainingPending;
       await this.ctx.storage.put("queue:pending", this.pendingCache);
       await this.removeFromTenantPending(task.tenantId, taskId);
 
@@ -1096,23 +1725,34 @@ export class Coordinator extends DurableObject<Env> {
       await this.ctx.storage.put("queue:processing", this.processingCache);
 
       const node = nodes.get(chosenNode);
+      const generation = crypto.randomUUID();
       if (node) {
         node.status = "busy";
         node.currentTaskId = taskId;
         node.assignedCount = (node.assignedCount ?? 0) + 1;
+        node.reservation = {
+          taskId,
+          generation,
+          expiresAt: task.assignedAt + (task.timeoutMs || DEFAULT_TIMEOUT_MS),
+        };
         await this.ctx.storage.put(`node:${chosenNode}`, node);
       }
 
       remainingIdle = remainingIdle.filter(id => id !== chosenNode);
       await this.ctx.storage.put("nodes:idle", remainingIdle);
 
-      const sent = await this.deliverTask(task);
+      const sent = await this.deliverTask(task, undefined, generation);
 
       // If the send failed, immediately fail the task (with retry) instead of
       // leaving it stuck in `processing`.
       if (!sent) {
         await this.failTask(taskId, "Failed to deliver task to node");
       }
+    }
+
+    if (servedCursor) {
+      await this.ctx.storage.put("queue:tenantCursor", servedCursor.tenantId);
+      await this.ctx.storage.put("queue:tenantServed", servedCursor.served);
     }
   }
 
@@ -1141,9 +1781,12 @@ export class Coordinator extends DurableObject<Env> {
     const maxNodes = Math.max(minNodes, asCount(opts.maxNodes, DEFAULT_MAX_SWARM_NODES));
 
     const eligible: NodeRecord[] = [];
+    const protocolTrust = await this.ctx.storage.get<ProtocolTrustState>("trust:protocol-faults") ?? {};
     for (const nodeId of idle) {
       const node = nodes.get(nodeId);
       if (!node || node.status !== "idle") continue;
+      if (reservationBlocksAllocation(node.reservation, Date.now())) continue;
+      if (isNodeProtocolQuarantined(protocolTrust, nodeId, Date.now())) continue;
       if (!node.capabilities.includes("swarm-inference")) continue;
       if (!node.webgpu) continue;
       if (node.lowMemory) continue;
@@ -1164,22 +1807,40 @@ export class Coordinator extends DurableObject<Env> {
     // sampling).
     const preferWarm = opts.preferWarm !== false;
     const wantedModel = typeof payload?.model === "string" ? payload.model : "";
-    const isWarm = (n: NodeRecord) =>
-      !!n.warmModels?.some((m) => m.modelId === wantedModel);
     const capacity = (n: NodeRecord) =>
       clampByteCapacity(n.wasmMemoryBytes) ?? clampByteCapacity(n.maxStorageBufferBindingSize) ?? 0;
-    eligible.sort(
-      (a, b) =>
-        (preferWarm ? Number(isWarm(b)) - Number(isWarm(a)) : 0) ||
-        capacity(b) - capacity(a) ||
-        (a.assignedCount ?? 0) - (b.assignedCount ?? 0) ||
-        a.connectedAt - b.connectedAt,
-    );
-    const chosen = eligible.slice(0, Math.min(maxNodes, eligible.length));
+    const now = Date.now();
+    const placementCandidates = eligible.map((node): PlacementCandidate => {
+      const report = node.resources;
+      const gpu = report?.gpu.computeCompletionMs;
+      const cpu = report?.cpuLoad;
+      return {
+        nodeId: node.id,
+        warmModel: preferWarm && !!wantedModel && (
+          !!node.warmModels?.some((entry) => entry.modelId === wantedModel) ||
+          !!(node.modelCache && node.modelCache.expiresAt > now && node.modelCache.entries.some((entry) => entry.modelId === wantedModel && entry.state === "ready"))
+        ),
+        gpuCompletionMs: report && report.expiresAt > now && report.gpu.expiresAt > now &&
+          gpu?.source === "measured" && gpu.expiresAt > now && gpu.value !== null ? gpu.value : null,
+        capacityBytes: capacity(node) || null,
+        cpuLoad: report && report.expiresAt > now && cpu?.source === "measured" &&
+          cpu.expiresAt > now && cpu.value !== null ? cpu.value : null,
+        assignedCount: node.assignedCount ?? 0,
+        connectedAt: node.connectedAt,
+      };
+    });
+    const ranked = rankPlacementCandidates(placementCandidates);
+    const byId = new Map(eligible.map((node) => [node.id, node]));
+    const qualityHistory = await this.ctx.storage.get<PeerLinkHistory>("peer-quality:history") ?? {};
+    const meshOrder = planSparseSwarmMesh(ranked.map(({ candidate }) => candidate.nodeId),
+      Math.min(maxNodes, ranked.length), qualityHistory, Date.now());
+    const chosen = meshOrder.map((nodeId) => byId.get(nodeId)!).filter(Boolean);
     if (chosen.length === 0) return null;
     const host = chosen[0];
     const sessionId = crypto.randomUUID();
     const attemptId = crypto.randomUUID();
+    const reservationExpiresAt = Date.now() + (task.timeoutMs || DEFAULT_TIMEOUT_MS);
+    task.placementReason = ranked[0].reason;
     const members = chosen.map((n) => ({
       nodeId: n.id,
       capacity: capacity(n) || 1,
@@ -1188,6 +1849,9 @@ export class Coordinator extends DurableObject<Env> {
     task.status = "processing";
     task.assignedNodeId = host.id;
     task.assignedAt = Date.now();
+    const queueStartedAt = Number.isFinite(task.queuedAt) ? task.queuedAt! : task.createdAt;
+    task.queueWaitMs = Math.max(0, task.assignedAt - queueStartedAt);
+    await this.recordQueueAssignment(task);
     await this.ctx.storage.put(this.taskKey(task.tenantId, task.id), task);
 
     this.pendingCache = (await this.getPending()).filter(id => id !== task.id);
@@ -1202,15 +1866,25 @@ export class Coordinator extends DurableObject<Env> {
       n.status = "busy";
       n.currentTaskId = task.id;
       n.assignedCount = (n.assignedCount ?? 0) + 1;
+      n.reservation = {
+        taskId: task.id,
+        generation: attemptId,
+        expiresAt: reservationExpiresAt,
+      };
       await this.ctx.storage.put(`node:${n.id}`, n);
     }
 
     const record: SwarmRecord = {
       sessionId,
       taskId: task.id,
+      attemptId,
       hostNodeId: host.id,
       members,
+      generation: attemptId,
+      reservationExpiresAt,
       ready: [],
+      peerReadiness: {},
+      flowPaused: false,
     };
     await this.ctx.storage.put(`swarm:${task.id}`, record);
 
@@ -1249,6 +1923,8 @@ export class Coordinator extends DurableObject<Env> {
       if (task.assignedAt && now - task.assignedAt > (task.timeoutMs || DEFAULT_TIMEOUT_MS)) {
         await this.failTask(taskId, "Task timed out");
       }
+      const current = await this.getTask(taskId);
+      if (current?.status === "processing") await this.updateSubscriberFlow(taskId);
     }
 
     // Sweep the pending queue: a task nobody can serve must fail instead of
@@ -1283,7 +1959,18 @@ export class Coordinator extends DurableObject<Env> {
 
     for (const [key, record] of nodeEntries) {
       const nodeId = key.slice("node:".length);
-      const node = record as unknown as NodeRecord;
+      let node = record as unknown as NodeRecord;
+
+      if (node.reservation && now >= node.reservation.expiresAt) {
+        const lease = node.reservation;
+        const task = await this.getTask(lease.taskId);
+        if (task?.status === "processing") {
+          await this.failTask(task.id, "Node reservation expired");
+        } else {
+          await this.releaseNode(nodeId, lease.taskId, lease.generation);
+        }
+        node = (await this.ctx.storage.get<NodeRecord>(key)) ?? node;
+      }
 
       if (now - node.lastPongAt > STALE_NODE_MS) {
         if (node.currentTaskId) {
@@ -1302,7 +1989,13 @@ export class Coordinator extends DurableObject<Env> {
         } catch {}
       }
     }
-    await this.ctx.storage.put("nodes:idle", idleNodes);
+    const idleIds = new Set([...idleNodes, ...(await this.getIdleNodes())]);
+    const reconciledIdle: string[] = [];
+    for (const nodeId of idleIds) {
+      const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
+      if (node?.status === "idle" && now - node.lastPongAt <= STALE_NODE_MS) reconciledIdle.push(nodeId);
+    }
+    await this.ctx.storage.put("nodes:idle", reconciledIdle);
 
     // GC expired rate-limit entries.
     const rateEntries = await this.ctx.storage.list({ prefix: "rate:" });
@@ -1313,10 +2006,18 @@ export class Coordinator extends DurableObject<Env> {
       }
     }
 
+    const previousAnomalies = await this.ctx.storage.get<PeerRttDisagreement[]>("trust:peer-quality-anomalies");
+    const activeAnomalies = mergePeerRttDisagreementLog(previousAnomalies, [], now);
+    if (previousAnomalies && activeAnomalies.length !== previousAnomalies.length) {
+      if (activeAnomalies.length) await this.ctx.storage.put("trust:peer-quality-anomalies", activeAnomalies);
+      else await this.ctx.storage.delete("trust:peer-quality-anomalies");
+    }
+
     const pending = await this.getPending();
     const processing = await this.getProcessing();
     const remainingIdle = await this.getIdleNodes();
-    if (pending.length > 0 || processing.length > 0 || remainingIdle.length > 0) {
+    if (pending.length > 0 && remainingIdle.length > 0) await this.tryAssignAll();
+    if (pending.length > 0 || processing.length > 0 || remainingIdle.length > 0 || activeAnomalies.length > 0) {
       await this.ctx.storage.setAlarm(now + ALARM_INTERVAL_MS);
     }
   }

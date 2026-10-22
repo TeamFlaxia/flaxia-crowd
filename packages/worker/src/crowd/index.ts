@@ -1,13 +1,16 @@
 import { Hono } from 'hono'
 import type { Env } from '../index'
 import type { SwarmNodeCapabilities, TaskRecord, WarmModelRange, WorkloadType } from '@flaxia/sdk'
+import { isTaskPriority, TASK_PRIORITY_DEFAULT } from '../worker/queue-scheduler'
 import {
   isRoutableWorkload,
   defaultTimeoutFor,
+  MIN_SWARM_NODES,
   MAX_SWARM_NODES,
   NODE_SIGNAL_PROTOCOL,
   SUBSCRIBE_PROTOCOL,
   parseBearerSubprotocol,
+  isSupportedSwarmModelId,
 } from '@flaxia/sdk'
 import {
   createNodeToken,
@@ -378,7 +381,7 @@ app.post('/tasks', async (c) => {
   const rawBody = await c.req.text()
   if (!validatePayloadSize(c.env, rawBody)) return c.json({ error: 'Payload too large' }, 413)
 
-  let body: { workload?: string; payload?: unknown; timeoutMs?: number; callbackUrl?: string }
+  let body: { workload?: string; payload?: unknown; timeoutMs?: number; callbackUrl?: string; priority?: unknown }
   try {
     body = JSON.parse(rawBody)
   } catch {
@@ -389,6 +392,9 @@ app.post('/tasks', async (c) => {
     return c.json({ error: 'Invalid workload type' }, 400)
   }
   if (!body.payload) return c.json({ error: 'payload is required' }, 400)
+  if (body.priority !== undefined && !isTaskPriority(body.priority)) {
+    return c.json({ error: 'priority must be an integer between 0 and 3' }, 400)
+  }
 
   if (body.workload === 'swarm-inference') {
     const swarmError = validateSwarmPayload(body.payload)
@@ -427,14 +433,17 @@ app.post('/tasks', async (c) => {
   }
 
   const taskId = crypto.randomUUID()
+  const createdAt = Date.now()
   const task: TaskRecord = {
     id: taskId,
     status: 'pending',
     workload: body.workload as WorkloadType,
     payload: body.payload as TaskRecord['payload'],
-    createdAt: Date.now(),
+    createdAt,
+    queuedAt: createdAt,
     tenantId,
     allowedSites,
+    priority: body.priority === undefined ? TASK_PRIORITY_DEFAULT : body.priority,
     retryCount: 0,
     timeoutMs,
     callbackUrl,
@@ -465,6 +474,86 @@ app.post('/tasks', async (c) => {
     id: taskId,
     status: task.status,
     createdAt: task.createdAt,
+    subscribeToken,
+    subscribeTokenExpiresAt: subscribeToken ? Date.now() + SUBSCRIBE_TOKEN_TTL_MS : undefined,
+  })
+})
+
+app.get('/queue/stats', async (c) => {
+  const tenantId = await resolveCallerTenant(c.env, c.req.header('Authorization'))
+  if (!tenantId) return c.json({ error: 'Unauthorized' }, 401)
+  const stub = getCoordinator(c)
+  const resp = await stub.fetch(`http://internal/queue-stats?tenantId=${encodeURIComponent(tenantId)}`)
+  return new Response(resp.body, { status: resp.status, headers: resp.headers })
+})
+
+/**
+ * Warm supported model weight ranges with a real one-token swarm run. Nodes
+ * advertise swarm capability only after explicit allowModelDownload opt-in.
+ */
+app.post('/swarm/prewarm', async (c) => {
+  const tenantId = await resolveCallerTenant(c.env, c.req.header('Authorization'))
+  if (!tenantId) return c.json({ error: 'Unauthorized' }, 401)
+  let body: { model?: unknown; minNodes?: unknown; maxNodes?: unknown }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400)
+  }
+  if (!body || typeof body !== 'object') return c.json({ error: 'Invalid request body' }, 400)
+  if (!isSupportedSwarmModelId(body.model)) {
+    return c.json({ error: 'model is not in the supported swarm model list' }, 400)
+  }
+  const minNodes = body.minNodes === undefined ? MIN_SWARM_NODES : body.minNodes
+  const maxNodes = body.maxNodes === undefined
+    ? (typeof minNodes === 'number' ? Math.max(minNodes, 4) : 4)
+    : body.maxNodes
+  if (typeof minNodes !== 'number' || !Number.isInteger(minNodes) || minNodes < MIN_SWARM_NODES || minNodes > MAX_SWARM_NODES ||
+      typeof maxNodes !== 'number' || !Number.isInteger(maxNodes) || maxNodes < minNodes || maxNodes > MAX_SWARM_NODES) {
+    return c.json({ error: `minNodes/maxNodes must be integers between ${MIN_SWARM_NODES} and ${MAX_SWARM_NODES}` }, 400)
+  }
+
+  const taskId = crypto.randomUUID()
+  const createdAt = Date.now()
+  const task: TaskRecord = {
+    id: taskId,
+    status: 'pending',
+    workload: 'swarm-inference',
+    payload: {
+      model: body.model,
+      prompt: 'flaxia model cache warm-up',
+      maxNewTokens: 1,
+      swarm: { minNodes, maxNodes, preferWarm: false },
+    },
+    createdAt,
+    queuedAt: createdAt,
+    tenantId,
+    priority: 0,
+    retryCount: 0,
+    timeoutMs: 10 * 60 * 1000,
+  }
+  const stub = getCoordinator(c)
+  const resp = await stub.fetch(new Request(`http://internal/prewarm?tenantId=${encodeURIComponent(tenantId)}`, {
+    method: 'POST',
+    body: JSON.stringify(task),
+  }))
+  if (!resp.ok) {
+    const detail = await resp.json().catch(() => null) as { error?: string } | null
+    return c.json({ error: detail?.error ?? 'Prewarm request rejected' }, resp.status === 429 ? 429 : 502)
+  }
+  const subscribeToken = c.env.SUBSCRIBE_TOKEN_SECRET
+    ? await createSubscribeToken(c.env.SUBSCRIBE_TOKEN_SECRET, {
+        tenantId,
+        taskId,
+        exp: Date.now() + SUBSCRIBE_TOKEN_TTL_MS,
+      })
+    : undefined
+  return c.json({
+    message: 'Swarm model prewarm task submitted',
+    taskId,
+    id: taskId,
+    status: task.status,
+    createdAt,
     subscribeToken,
     subscribeTokenExpiresAt: subscribeToken ? Date.now() + SUBSCRIBE_TOKEN_TTL_MS : undefined,
   })

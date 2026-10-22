@@ -1,0 +1,9 @@
+# Sparse swarm mesh selection
+
+The coordinator retains the existing sparse ring: each member connects only to its previous and next member. Before creating a session, it keeps the existing resource and warm-cache ranking, measures only the first 32 ranked candidates, and selects at most 16 nodes. The resource-ranked first candidate remains the host. The selected ring is arranged once at assignment time; it is not reshuffled while a request is running.
+
+Peer-link reports come from the authenticated adjacent peers of a current swarm attempt. The coordinator accepts at most two reports per message, validates the task/session/attempt and adjacency, applies a per-node report rate limit, and stores no more than 256 edges for 60 seconds. Application RTT is preferred; WebRTC RTT is used only when no application RTT is available. The two measurement sources are not averaged. When bandwidth is known, the planner adds an inverse-bandwidth penalty to RTT.
+
+Expired, missing, unreachable (over 800 ms), or very narrow (under 0.1 Mbps) links are treated as unknown. In that case resource/warm-cache order provides a deterministic fallback. The existing DataChannel setup can fall back to the coordinator relay when a complete peer mesh cannot be established; an active transport failure aborts the attempt for retry instead of changing topology mid-generation.
+
+These reports are advisory self-reported scheduling signals. They do not prove peer identity or performance. Resource and warm-state eligibility remain the primary constraints; fresh GPU/memory measurements and reservation leases are delivered by the resource/scheduler PRs. The pure tests exercise controlled RTT/bandwidth scenarios and bounds. Real network shaping, browser diversity, and route-quality comparisons require the multi-browser benchmark environment and are not claimed by this change.

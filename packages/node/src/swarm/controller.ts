@@ -63,6 +63,8 @@ export class SwarmController {
   private sliceLoaded = false;
   private generationStarted = false;
   private settled = false;
+  private flowPaused = false;
+  private flowWaiters = new Set<() => void>();
 
   constructor(private readonly options: SwarmControllerOptions) {}
 
@@ -106,6 +108,9 @@ export class SwarmController {
         // The coordinator rejected the session (bad plan, failed member, ...):
         // settle immediately instead of waiting for the task timeout.
         this.fail(new Error(message.error || 'swarm session aborted by the coordinator'));
+      } else if (message.type === 'swarm-flow') {
+        this.flowPaused = message.paused;
+        if (!this.flowPaused) this.releaseFlowWaiters();
       }
     } catch (err) {
       this.fail(err);
@@ -231,7 +236,11 @@ export class SwarmController {
       link: this.link(),
       semantics,
       eosIds: semantics.eosIds,
-      onToken: (id) => this.options.emitToken(semantics.decodeTokens!([id])),
+      onToken: async (id) => {
+        await this.waitForFlow();
+        if (this.settled) throw new Error('swarm session stopped while generation was paused');
+        await this.options.emitToken(semantics.decodeTokens!([id]));
+      },
     });
 
     const decode = semantics.decodeTokens;
@@ -277,6 +286,7 @@ export class SwarmController {
   private finish(result: unknown): void {
     if (this.settled) return;
     this.settled = true;
+    this.releaseFlowWaiters();
     this.teardown();
     this.options.onDone(result);
   }
@@ -284,8 +294,19 @@ export class SwarmController {
   private fail(err: unknown): void {
     if (this.settled) return;
     this.settled = true;
+    this.releaseFlowWaiters();
     this.teardown();
     this.options.onError(err instanceof Error ? err.message : String(err));
+  }
+
+  private waitForFlow(): Promise<void> {
+    if (!this.flowPaused || this.settled) return Promise.resolve();
+    return new Promise((resolve) => this.flowWaiters.add(resolve));
+  }
+
+  private releaseFlowWaiters(): void {
+    for (const resolve of this.flowWaiters) resolve();
+    this.flowWaiters.clear();
   }
 }
 

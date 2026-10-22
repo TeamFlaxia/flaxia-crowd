@@ -205,7 +205,7 @@ describe('M2: a rejected host plan must not stall the session silently', () => {
       { nodeId: 'n2', role: 'host', slice: { start: 0, end: 3, hasEmbed: true, hasHead: true } },
       { nodeId: 'n1', role: 'worker', slice: { start: 4, end: 8, hasEmbed: false, hasHead: false } },
     ];
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: broken }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: broken }));
     await sleep(100);
 
     // Today the coordinator returns without a word: no `swarm-error`, no
@@ -274,7 +274,7 @@ describe('M9: swarmSession must not outlive the session', () => {
     });
 
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await sleep(30);
     n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
     n2.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
