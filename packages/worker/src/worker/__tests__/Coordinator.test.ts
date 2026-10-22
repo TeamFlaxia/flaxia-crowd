@@ -1,6 +1,6 @@
 import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
-import type { NodeResourceReport, SwarmChainNode, TaskRecord } from '@flaxia/sdk';
+import type { NodeResourceReport, NodeModelCacheSnapshot, SwarmChainNode, TaskRecord } from '@flaxia/sdk';
 import { encodeSwarmEnvelope, MAX_RESOURCE_CAPACITY_BYTES, verifyCrowdWebhook } from '@flaxia/sdk';
 import { MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK } from '../Coordinator';
 import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
@@ -18,6 +18,7 @@ interface NodeRecord {
   siteId?: string;
   assignedCount?: number;
   resources?: NodeResourceReport;
+  modelCache?: NodeModelCacheSnapshot;
 }
 
 const TENANT = 'tenant-test';
@@ -796,7 +797,7 @@ describe('Coordinator', () => {
     });
   });
 
-  it('stores only fresh bounded resource reports from authenticated node heartbeats', async () => {
+  it('stores only fresh bounded resource and executable model snapshots from authenticated heartbeats', async () => {
     stub = newStub();
     const node = await connectNode('node-resource', 'capabilities=swarm-inference&webgpu=true');
     const now = Date.now();
@@ -825,20 +826,28 @@ describe('Coordinator', () => {
         memoryBytes: metric(null, 'bytes', 'unknown', 10 * 60 * 1000) as NodeResourceReport['gpu']['memoryBytes'],
       },
     };
-    node.socket.send(JSON.stringify({ type: 'pong', resources: valid }));
+    const modelCache: NodeModelCacheSnapshot = {
+      version: 1,
+      sampledAt: now,
+      expiresAt: now + 60_000,
+      entries: [{ modelId: 'qwen3-1.7b', revision: 'main', dtype: 'q4_0', backend: 'webgpu', layerRange: [0, 16], state: 'ready', referenceCount: 1 }],
+    };
+    node.socket.send(JSON.stringify({ type: 'pong', resources: valid, modelCache }));
     await new Promise(r => setTimeout(r, 30));
     await withStorage(async (storage) => {
       expect((await storage.get<NodeRecord>('node:node-resource'))!.resources?.gpu.computeCompletionMs.value).toBe(2);
+      expect((await storage.get<NodeRecord>('node:node-resource'))!.modelCache?.entries[0].layerRange).toEqual([0, 16]);
     });
 
     const invalid = structuredClone(valid);
     invalid.wasmMemoryLowerBound.value = MAX_RESOURCE_CAPACITY_BYTES + 1;
-    node.socket.send(JSON.stringify({ type: 'pong', resources: invalid }));
+    node.socket.send(JSON.stringify({ type: 'pong', resources: invalid, modelCache: { ...modelCache, entries: [{ ...modelCache.entries[0], referenceCount: -1 }] } }));
     await new Promise(r => setTimeout(r, 30));
     await withStorage(async (storage) => {
       // A malformed report must not replace the last valid measurement.
       expect((await storage.get<NodeRecord>('node:node-resource'))!.resources?.wasmMemoryLowerBound.value)
         .toBe(2 * 1024 ** 3);
+      expect((await storage.get<NodeRecord>('node:node-resource'))!.modelCache?.entries[0].referenceCount).toBe(1);
     });
   });
 
