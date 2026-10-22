@@ -1,5 +1,5 @@
 import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { NodeResourceReport, NodeModelCacheSnapshot, SwarmChainNode, TaskRecord } from '@flaxia/sdk';
 import { encodeSwarmEnvelope, MAX_RESOURCE_CAPACITY_BYTES, verifyCrowdWebhook } from '@flaxia/sdk';
 import type { PeerLinkHistory } from '../peer-link-history';
@@ -1460,8 +1460,14 @@ describe('Coordinator swarm sessions', () => {
     expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === false)).toBe(false);
 
     subscriber.send(JSON.stringify({ type: 'ack', sequence: 8 }));
-    await new Promise(resolve => setTimeout(resolve, 30));
-    expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === false)).toBe(true);
+    await vi.waitFor(async () => {
+      const snapshot = await runInDurableObject(stub, async (instance) => ({
+        flow: await (instance as any).ctx.storage.get(`flow:${task.id}`),
+        subscriber: (instance as any).ctx.getWebSockets(`client:${task.id}`)[0]?.deserializeAttachment(),
+      }));
+      expect(snapshot).toMatchObject({ flow: { paused: false }, subscriber: { ackSequence: 8 } });
+    });
+    await vi.waitFor(() => expect(jsonFrames(node).some(frame => frame.type === 'task-flow' && frame.paused === false)).toBe(true));
   });
 
   it('resets streamed output before a retry re-prefills the original prompt', async () => {
@@ -1732,7 +1738,9 @@ describe('swarm protocol quarantine', () => {
     stub = newStub();
     const worker = await connectNode('trust-worker', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
     const host = await connectNode('trust-host', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
-    const tasks = Array.from({ length: 4 }, () => makeTask({
+    const createdAt = Date.now();
+    const tasks = Array.from({ length: 4 }, (_, index) => makeTask({
+      createdAt: createdAt + index,
       workload: 'swarm-inference',
       payload: { model: 'qwen3-1.7b', prompt: 'hi' },
     }));
@@ -1741,8 +1749,8 @@ describe('swarm protocol quarantine', () => {
 
     for (let index = 0; index < 3; index++) {
       const task = tasks[index];
+      await vi.waitFor(() => expect(jsonFrames(host).some((frame) => frame.type === 'swarm-init' && frame.taskId === task.id)).toBe(true));
       const init = jsonFrames(host).find((frame) => frame.type === 'swarm-init' && frame.taskId === task.id);
-      expect(init).toBeTruthy();
 
       // A matching session with the wrong attempt must not add a strike or
       // settle the task.

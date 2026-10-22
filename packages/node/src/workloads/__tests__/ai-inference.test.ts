@@ -245,6 +245,33 @@ describe('AI Inference streaming sink', () => {
     expect(sink).toHaveBeenCalledWith('hello world');
   });
 
+  it('rejects timer-driven queue overflow through the inference promise', async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseSink!: () => void;
+      const sink = vi.fn(() => new Promise<void>((resolve) => { releaseSink = resolve; }));
+      let finishGeneration!: (output: string) => void;
+      let streamerOptions!: any;
+      mockGenerate.mockImplementationOnce((_input, options) => {
+        streamerOptions = options;
+        return new Promise<string>((resolve) => { finishGeneration = resolve; });
+      });
+      const result = handleAiInference(payload(true), sink);
+      await vi.advanceTimersByTimeAsync(1);
+      for (let i = 0; i <= MAX_PENDING_TOKEN_CALLBACKS; i++) {
+        emit(streamerOptions, 'x');
+        await vi.advanceTimersByTimeAsync(1000);
+      }
+      expect(sink).toHaveBeenCalledTimes(1);
+      releaseSink();
+      finishGeneration('generated');
+      await expect(result).rejects.toThrow(/bounded stream buffer/);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('serializes timer flushes with the tail and waits for both', async () => {
     vi.useFakeTimers();
     try {

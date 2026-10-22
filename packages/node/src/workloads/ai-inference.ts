@@ -108,7 +108,14 @@ const createBufferedTokenCallback = (
       throw failure;
     }
     buffer += text;
-    if (timer === null) timer = setTimeout(flush, options.tokenBufferIntervalMs ?? 50);
+    if (timer === null) timer = setTimeout(() => {
+      try { flush(); } catch (error) {
+        // Timer exceptions cannot be caught by the generation promise. Retain
+        // the failure so its next callback or final drain rejects normally.
+        failed = true;
+        failure = error;
+      }
+    }, options.tokenBufferIntervalMs ?? 50);
   };
   const settle = async (emitTail: boolean): Promise<void> => {
     closed = true;
