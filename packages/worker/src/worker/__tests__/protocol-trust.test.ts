@@ -39,4 +39,11 @@ describe('swarm protocol trust policy', () => {
     // The bound evicts oldest, non-quarantined entries first, including `current`.
     expect(Object.keys(state).some((nodeId) => nodeId === 'current')).toBe(false);
   });
+  it('treats node ids as data even when they match special object property names', () => {
+    let state: ProtocolTrustState = {};
+    for (let i = 0; i < 3; i++) {
+      state = recordProtocolViolation(state, '__proto__', 'invalid-swarm-plan', 10_000 + i).state;
+    }
+    expect(isNodeProtocolQuarantined(state, '__proto__', 10_003)).toBe(true);
+  });
 });
