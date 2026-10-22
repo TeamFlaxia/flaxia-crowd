@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FlaxiaClient } from '../client';
 import type { TaskRecord, TaskPayload } from '../types';
-import { TaskNotFoundError, FlaxiaError, AuthenticationError } from '../errors';
+import { TaskNotFoundError, FlaxiaError, AuthenticationError, ValidationError } from '../errors';
 
 describe('FlaxiaClient', () => {
   const apiKey = 'fc_test_abc123';
@@ -88,6 +88,18 @@ describe('FlaxiaClient', () => {
 
       const body = JSON.parse((fetch as any).mock.calls[0][1].body);
       expect(body.callbackUrl).toBe('https://example.com/callback');
+    });
+
+    it('includes a validated scheduling priority', async () => {
+      (fetch as any).mockResolvedValue({ ok: true, json: async () => mockTask });
+      await client.submit({ workload: 'ai-inference', payload: { task: 'test', model: 'test', input: 'hi' }, priority: 2 });
+      expect(JSON.parse((fetch as any).mock.calls[0][1].body).priority).toBe(2);
+    });
+
+    it('rejects invalid scheduling priorities before sending a request', async () => {
+      await expect(client.submit({ workload: 'ai-inference', payload: { task: 'test', model: 'test', input: 'hi' }, priority: 4 as any }))
+        .rejects.toThrow(ValidationError);
+      expect(fetch).not.toHaveBeenCalled();
     });
 
     it('throws ValidationError for missing workload', async () => {
@@ -182,6 +194,27 @@ describe('FlaxiaClient', () => {
         expect((e as FlaxiaError).code).toBe('FETCH_ERROR');
         expect((e as FlaxiaError).status).toBe(500);
       }
+    });
+  });
+
+  describe('getQueueStats', () => {
+    it('returns tenant queue stats from the authenticated endpoint', async () => {
+      const stats = {
+        pendingCount: 1,
+        pendingByPriority: { 0: 1, 1: 0, 2: 0, 3: 0 },
+        assignedByPriority: { 0: 2, 1: 3, 2: 0, 3: 1 },
+        rejectionCounts: { 'global-cap': 0, 'tenant-cap': 1, 'enqueue-rate': 0 },
+        oldestPendingWaitMs: 12_000,
+        lastAssignmentWaitMs: 800,
+        maxAssignmentWaitMs: 12_000,
+        updatedAt: Date.now(),
+      };
+      (fetch as any).mockResolvedValue({ ok: true, json: async () => stats });
+
+      await expect(client.getQueueStats()).resolves.toEqual(stats);
+      expect(fetch).toHaveBeenCalledWith(`${baseUrl}/crowd/queue/stats`, {
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+      });
     });
   });
 
