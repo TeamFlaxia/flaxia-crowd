@@ -1,0 +1,9 @@
+# Swarm protocol trust boundary
+
+The coordinator trusts the authenticated socket, current task, current swarm session, and current attempt as the source of a plan. It rejects stale or unauthenticated plans without attributing them to a node. After those checks, malformed layer chains and plans that omit assigned members are recorded as protocol faults.
+
+Three such faults for a node within ten minutes place it in a ten-minute quarantine from new swarm assignments. The state retains at most eight recent faults per node and at most 512 node entries; expired entries are discarded. A quarantine does not interrupt an active task, and ordinary non-swarm tasks remain eligible. When the cooldown expires, the node can rejoin without operator action. Coordinator warning logs include the node id, fault kind, count, and expiry for operations review.
+
+The transport checks authenticate signaling attempts and signed hidden-state envelopes, enforce replay/size limits, and rate-limit controls. These checks establish message origin and integrity, not that intermediate activations or final inference results are correct. Reported capabilities and link speeds remain distinguishable from measured telemetry and are only scheduling hints.
+
+Full recomputation and redundant inference are not enabled: open models may use different kernels, precisions, and sampling paths, so a universal activation tolerance cannot be justified without model/backend-specific measurements. Before accepting numerical output checks, benchmark the same revision and precision on supported backends, define per-tensor absolute/relative tolerances from those distributions, and include nondeterministic sampling in the evaluation. Until then, signed messages and host-authoritative results do not constitute correctness verification. Distributed placement also does not hide a prompt from the volunteer nodes that execute it.
