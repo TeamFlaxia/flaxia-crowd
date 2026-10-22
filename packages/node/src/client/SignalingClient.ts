@@ -321,6 +321,7 @@ class SignalingClient {
       type: 'pong',
       cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
       resources: report,
+      modelCache: this.workerPool.modelCacheSnapshot,
     });
   }
 
