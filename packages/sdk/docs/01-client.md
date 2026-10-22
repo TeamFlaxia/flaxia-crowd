@@ -112,3 +112,5 @@ fc_test_xxxxxxxxxxxxxxxxxxxxxxxxxx   テスト（ノードに流さずモック�
 | ブラウザ | モダンブラウザ |
 
 `fetch` はすべての対象環境でグローバルに存在するため、ポリフィル不要。
+
+Task submissions may set `priority` to an integer from 0 (background) to 3 (interactive); omitted priority defaults to 1. Waiting tasks gain priority through aging, so this field is a scheduling hint rather than a guarantee. `client.getQueueStats()` returns wait, pending, assignment, and admission-rejection counters scoped to the API key's tenant.
