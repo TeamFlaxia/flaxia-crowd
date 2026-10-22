@@ -1020,6 +1020,11 @@ export class Coordinator extends DurableObject<Env> {
     // permanently failed by a second overlapping failure signal.
     if (!permanent && task.retryCount < MAX_RETRIES) {
       if (task.status === "processing") task.retryCount++;
+      task.streamEpoch = (task.streamEpoch ?? 0) + 1;
+      const reset = JSON.stringify({ type: "reset", epoch: task.streamEpoch });
+      for (const sub of this.ctx.getWebSockets(`client:${taskId}`)) {
+        try { sub.send(reset); } catch {}
+      }
       task.status = "pending";
       task.assignedNodeId = undefined;
       task.assignedAt = undefined;
