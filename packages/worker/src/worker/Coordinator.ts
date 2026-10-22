@@ -7,6 +7,7 @@ import type {
   SwarmSessionPlan,
   TaskRecord,
   NodeResourceReport,
+  NodeModelCacheSnapshot,
   WarmModelRange,
   WorkloadType,
 } from "@flaxia/sdk";
@@ -17,6 +18,7 @@ import {
   swarmNextHopIndex,
   decodeSwarmEnvelope,
   validateNodeResourceReport,
+  isNodeModelCacheSnapshot,
   MIN_SWARM_NODES,
   MAX_SWARM_NODES,
 } from "@flaxia/sdk";
@@ -88,6 +90,8 @@ interface NodeRecord {
   warmModels?: WarmModelRange[];
   /** Short-lived self-reported measurements; used only as scheduling hints. */
   resources?: NodeResourceReport;
+  /** Self-reported executable model state; a short-lived scheduling hint only. */
+  modelCache?: NodeModelCacheSnapshot;
   /** Tasks handed to this node so far, used as a fairness tie-break. */
   assignedCount?: number;
 }
@@ -349,6 +353,11 @@ export class Coordinator extends DurableObject<Env> {
             } else if (resources.gpu.status === "available" && node.capabilities.includes("swarm-inference")) {
               node.webgpu = true;
             }
+          }
+          if (data.modelCache === null) {
+            delete node.modelCache;
+          } else if (isNodeModelCacheSnapshot(data.modelCache)) {
+            node.modelCache = data.modelCache;
           }
           await this.ctx.storage.put(`node:${nodeId}`, node);
         }
