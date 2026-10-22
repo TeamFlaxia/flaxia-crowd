@@ -407,6 +407,33 @@ describe('SignalingClient', () => {
     expect(MockWebSocket.mock.calls.length).toBeGreaterThan(afterInitCount);
   });
 
+  it('suspends while offline and reconnects after connectivity returns', async () => {
+    const mockClose = vi.fn();
+    const MockWebSocket = vi.fn().mockImplementation(function () {
+      return { close: mockClose, send: vi.fn() };
+    });
+    globalThis.WebSocket = MockWebSocket as any;
+    mockFetchToken();
+    seedGrantedConsent();
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+    });
+    await flush();
+    await flush();
+    const connectedSockets = MockWebSocket.mock.calls.length;
+
+    window.dispatchEvent(new Event('offline'));
+    expect(mockClose).toHaveBeenCalled();
+    window.dispatchEvent(new Event('online'));
+    await flush();
+    await flush();
+
+    expect(MockWebSocket.mock.calls.length).toBeGreaterThan(connectedSockets);
+  });
+
   it('should not execute a task that is already in flight (duplicate delivery)', async () => {
     const send = vi.fn();
     let wsInstance: {
