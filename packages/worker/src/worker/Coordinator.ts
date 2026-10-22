@@ -29,6 +29,7 @@ import {
 import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
 import { mergePeerQualitySnapshot } from "./peer-quality";
+import { reserveSwarmRelayBytes, swarmRelayBudgetKey } from "./relay-budget";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_RETRIES = 3;
@@ -480,6 +481,21 @@ export class Coordinator extends DurableObject<Env> {
     if (index < 0) return;
     const next = plan.chain[swarmNextHopIndex(plan.chain.length, index)];
     if (!next) return;
+
+    // Reserve full frame bytes transactionally. The task key spans retries so
+    // parallel frames cannot race past the compatibility-relay ceiling.
+    const budgetKey = swarmRelayBudgetKey(taskId);
+    const reserved = await this.ctx.storage.transaction(async (transaction) => {
+      const used = await transaction.get<number>(budgetKey) ?? 0;
+      const nextUsed = reserveSwarmRelayBytes(used, frame.byteLength);
+      if (nextUsed === null) return false;
+      await transaction.put(budgetKey, nextUsed);
+      return true;
+    });
+    if (!reserved) {
+      await this.failTask(taskId, "Coordinator swarm relay byte budget exceeded", undefined, true, true);
+      return;
+    }
     this.sendToNode(next.nodeId, null, frame);
   }
 
@@ -1103,6 +1119,7 @@ export class Coordinator extends DurableObject<Env> {
     // routing on it (and a retry never inherits a previous attempt's plan).
     task.swarmSession = undefined;
     await this.ctx.storage.put(this.taskKey(task.tenantId, taskId), task);
+    await this.ctx.storage.delete(swarmRelayBudgetKey(taskId));
     await this.retireAttempt(taskId);
     await this.ctx.storage.delete(`flow:${taskId}`);
     await this.removeFromTenantPending(task.tenantId, taskId);
@@ -1207,6 +1224,7 @@ export class Coordinator extends DurableObject<Env> {
     task.error = error;
     task.completedAt = Date.now();
     await this.ctx.storage.put(this.taskKey(task.tenantId, taskId), task);
+    await this.ctx.storage.delete(swarmRelayBudgetKey(taskId));
 
     if (task.assignedNodeId) {
       const processing = await this.getProcessing();
