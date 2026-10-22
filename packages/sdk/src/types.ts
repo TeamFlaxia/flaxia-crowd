@@ -438,6 +438,15 @@ export interface TaskRecord {
   assignedNodeId?: string;
   assignedCoordinatorNodeId?: string;
   assignedExpertNodeIds?: string[];
+  /** Compact explanation of the coordinator's selected placement heuristic. */
+  placementReason?:
+    | 'only-eligible-candidate'
+    | 'warm-model'
+    | 'measured-gpu'
+    | 'known-capacity'
+    | 'reported-load'
+    | 'assignment-count'
+    | 'stable-order';
   retryCount: number;
   timeoutMs: number;
   callbackUrl?: string;
