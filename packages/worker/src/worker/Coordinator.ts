@@ -30,6 +30,11 @@ import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateC
 import { parseWarmModels } from "../crowd";
 import { mergePeerQualitySnapshot } from "./peer-quality";
 import {
+  findPeerRttDisagreements,
+  mergePeerRttDisagreementLog,
+  type PeerRttDisagreement,
+} from "./peer-quality-anomalies";
+import {
   isNodeProtocolQuarantined,
   recordProtocolViolation,
   type ProtocolTrustState,
@@ -585,6 +590,20 @@ export class Coordinator extends DurableObject<Env> {
     // These are self-reported scheduling hints, not proof of peer identity or quality.
     swarm.peerQuality = result.snapshot;
     await this.ctx.storage.put(`swarm:${data.taskId}`, swarm);
+
+    // This diagnostic compares two measurements reported by one browser.
+    // Keep it advisory: it is not an independent signal for scoring or quarantine.
+    const anomalies = findPeerRttDisagreements(nodeId, data.reports, adjacent, now);
+    if (anomalies.length) {
+      const previous = await this.ctx.storage.get<PeerRttDisagreement[]>("trust:peer-quality-anomalies");
+      const diagnosticLog = mergePeerRttDisagreementLog(previous, anomalies, now);
+      await this.ctx.storage.put("trust:peer-quality-anomalies", diagnosticLog);
+      console.warn("swarm peer RTT measurements disagree; retained as advisory diagnostics", {
+        taskId: data.taskId,
+        sessionId: swarm.sessionId,
+        anomalies,
+      });
+    }
   }
 
   /**
@@ -1658,10 +1677,17 @@ export class Coordinator extends DurableObject<Env> {
       }
     }
 
+    const previousAnomalies = await this.ctx.storage.get<PeerRttDisagreement[]>("trust:peer-quality-anomalies");
+    const activeAnomalies = mergePeerRttDisagreementLog(previousAnomalies, [], now);
+    if (previousAnomalies && activeAnomalies.length !== previousAnomalies.length) {
+      if (activeAnomalies.length) await this.ctx.storage.put("trust:peer-quality-anomalies", activeAnomalies);
+      else await this.ctx.storage.delete("trust:peer-quality-anomalies");
+    }
+
     const pending = await this.getPending();
     const processing = await this.getProcessing();
     const remainingIdle = await this.getIdleNodes();
-    if (pending.length > 0 || processing.length > 0 || remainingIdle.length > 0) {
+    if (pending.length > 0 || processing.length > 0 || remainingIdle.length > 0 || activeAnomalies.length > 0) {
       await this.ctx.storage.setAlarm(now + ALARM_INTERVAL_MS);
     }
   }
