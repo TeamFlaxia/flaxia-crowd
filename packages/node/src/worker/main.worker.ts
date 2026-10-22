@@ -1,4 +1,4 @@
-import type { WorkloadType, SwarmInitMessage, SwarmSliceMessage } from '@flaxia/sdk';
+import type { WorkloadType, SwarmInitMessage, SwarmSliceMessage, NodeModelCacheSnapshot } from '@flaxia/sdk';
 import { HEAVY_WORKLOADS } from '@flaxia/sdk';
 import { CpuThrottle, DEFAULT_WAIT_SLOT_MS, ThrottleBusyError } from '../executor/throttle';
 import {
@@ -7,7 +7,7 @@ import {
   probeMaxWasmMemoryBytes,
 } from '../executor/memoryProbe';
 import { SwarmController } from '../swarm/controller';
-import { createSwarmRuntime } from '../swarm/runtime';
+import { createSwarmRuntime, getSwarmModelCacheSnapshot } from '../swarm/runtime';
 import { isSwarmControlEnvelope } from '../swarm/messages';
 
 let throttle: CpuThrottle | null = null;
@@ -100,6 +100,8 @@ function hasEnoughMemoryForHeavyWorkload(): boolean {
 // (transformers / onnxruntime, vector indexes) can be dropped after an idle
 // period instead of pinning hundreds of MB for the life of the worker.
 const cacheReleasers = new Map<string, () => void>();
+const cacheSnapshotters = new Map<string, () => NodeModelCacheSnapshot>();
+cacheSnapshotters.set('swarm-inference', getSwarmModelCacheSnapshot);
 let idleEvictTimer: ReturnType<typeof setTimeout> | null = null;
 
 function releaseLoadedCaches(): void {
@@ -107,6 +109,16 @@ function releaseLoadedCaches(): void {
     try { release(); } catch {}
   }
   cacheReleasers.clear();
+  cacheSnapshotters.clear();
+  cacheSnapshotters.set('swarm-inference', getSwarmModelCacheSnapshot);
+}
+
+function getModelCacheSnapshot(): NodeModelCacheSnapshot {
+  const sampledAt = Date.now();
+  const entries = [...cacheSnapshotters.values()].flatMap((snapshot) => {
+    try { return snapshot().entries; } catch { return []; }
+  }).slice(0, 8);
+  return { version: 1, sampledAt, expiresAt: sampledAt + 60_000, entries };
 }
 
 function armIdleEviction(): void {
@@ -127,6 +139,7 @@ async function runWorkload(
     case 'ai-inference':
       const ai = await import('../workloads/ai-inference');
       cacheReleasers.set(workload, ai.releaseCache);
+      cacheSnapshotters.set(workload, ai.getModelCacheSnapshot);
       return await ai.handleAiInference(payload as any, emitToken);
     case 'image-process':
       const image = await import('../workloads/image-process');
@@ -262,6 +275,7 @@ self.onmessage = async (e: MessageEvent) => {
         id,
         type: 'heartbeat',
         cpuLoad: throttle?.lastMeasuredLoad ?? 0,
+        modelCache: getModelCacheSnapshot(),
       });
     }, 10000);
 
@@ -278,7 +292,7 @@ self.onmessage = async (e: MessageEvent) => {
         ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage, emitToken)
         : await runWorkload(workload as WorkloadType, payload, emitToken, { fileSourceOrigins, containerImageOrigins });
 
-      self.postMessage({ id, type: 'done', result });
+      self.postMessage({ id, type: 'done', result, modelCache: getModelCacheSnapshot() });
       console.log(
         `[flaxia-node:worker] task done id=${id} workload=${workload} durationMs=${Math.round(performance.now() - taskStartedAt)}`,
       );
@@ -293,6 +307,6 @@ self.onmessage = async (e: MessageEvent) => {
     const error = err instanceof Error ? err.message : String(err);
     console.error(`[flaxia-node:worker] task error id=${id} workload=${workload} error=${error}`);
     if (activeTaskId === id) activeTaskId = null;
-    self.postMessage({ id, type: 'error', error });
+    self.postMessage({ id, type: 'error', error, modelCache: getModelCacheSnapshot() });
   }
 };
