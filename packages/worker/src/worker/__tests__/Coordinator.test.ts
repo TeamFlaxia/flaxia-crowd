@@ -1321,6 +1321,58 @@ describe('Coordinator swarm sessions', () => {
     expect(jsonFrames(n2).some(f => f.type === 'swarm-start')).toBe(true);
   });
 
+  it('records large adjacent peer RTT disagreements as advisory diagnostics only', async () => {
+    const { task, n1, n2 } = await setup();
+    const init = jsonFrames(n2).find((frame) => frame.type === 'swarm-init');
+    n2.socket.send(JSON.stringify({
+      type: 'swarm-plan',
+      sessionId: init.sessionId,
+      attemptId: init.attemptId,
+      chain: swarmChainFor(init),
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const now = Date.now();
+    const metric = (value: number | null, sampleCount = value === null ? 0 : 5) => ({
+      value, sampledAt: now, sampleCount,
+    });
+    const values = (rttMs: number) => ({
+      rttMs: metric(rttMs),
+      jitterMs: metric(null),
+      sendMbps: metric(null),
+      receiveMbps: metric(null),
+    });
+    n2.socket.send(JSON.stringify({
+      type: 'swarm-peer-quality',
+      taskId: task.id,
+      sessionId: init.sessionId,
+      attemptId: init.attemptId,
+      reports: [{
+        version: 1,
+        peerNodeId: 'n1',
+        sampledAt: now,
+        expiresAt: now + 30_000,
+        webRtc: values(50),
+        application: values(2_500),
+      }],
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const diagnostics = await withStorage(async (storage) =>
+      storage.get<any[]>('trust:peer-quality-anomalies'));
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      reporterNodeId: 'n2',
+      peerNodeId: 'n1',
+      webRtcRttMs: 50,
+      applicationRttMs: 2_500,
+      differenceMs: 2_450,
+    });
+    expect(await withStorage(async (storage) => storage.get('trust:protocol-faults'))).toBeUndefined();
+    expect(await getTask(task.id)).toMatchObject({ status: 'processing' });
+    expect(jsonFrames(n1).some((frame) => frame.type === 'swarm-error')).toBe(false);
+  });
+
   it('relays bounded peer signaling only between current adjacent members', async () => {
     const { task, n1, n2, n3 } = await setup();
     const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
