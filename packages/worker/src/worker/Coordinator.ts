@@ -6,6 +6,7 @@ import type {
   SwarmInitMessage,
   SwarmSessionPlan,
   TaskRecord,
+  TaskQueueStats,
   NodeResourceReport,
   NodeModelCacheSnapshot,
   WarmModelRange,
@@ -31,6 +32,7 @@ import {
   type NodeReservation,
   type PlacementCandidate,
 } from "./scheduler";
+import { orderPendingTasks, parseTenantSchedulingWeights, TASK_PRIORITY_DEFAULT } from "./queue-scheduler";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_RETRIES = 3;
@@ -147,6 +149,24 @@ interface RateEntry {
   resetAt: number;
 }
 
+interface TenantQueueCounters {
+  assignedByPriority: Record<0 | 1 | 2 | 3, number>;
+  rejectionCounts: Record<"global-cap" | "tenant-cap" | "enqueue-rate", number>;
+  lastAssignmentWaitMs: number | null;
+  maxAssignmentWaitMs: number | null;
+  updatedAt: number | null;
+}
+
+function emptyTenantQueueCounters(): TenantQueueCounters {
+  return {
+    assignedByPriority: { 0: 0, 1: 0, 2: 0, 3: 0 },
+    rejectionCounts: { "global-cap": 0, "tenant-cap": 0, "enqueue-rate": 0 },
+    lastAssignmentWaitMs: null,
+    maxAssignmentWaitMs: null,
+    updatedAt: null,
+  };
+}
+
 /**
  * A result is accepted only when it is a plain object within the size cap.
  * Malformed or oversized payloads are dropped without settling the task: an
@@ -196,6 +216,10 @@ export class Coordinator extends DurableObject<Env> {
 
     if (url.pathname === "/enqueue") {
       return this.handleEnqueue(request);
+    }
+
+    if (url.pathname === "/queue-stats") {
+      return this.handleQueueStats(url);
     }
 
     // `/task/<tenantId>/<taskId>`: the tenant is part of the key, so a caller
@@ -789,6 +813,14 @@ export class Coordinator extends DurableObject<Env> {
     if (typeof body.tenantId !== "string" || !body.tenantId || body.tenantId.length > 128) {
       return Response.json({ error: "Task tenantId is required" }, { status: 400 });
     }
+    if (typeof body.createdAt !== "number" || !Number.isFinite(body.createdAt)) {
+      return Response.json({ error: "Task createdAt must be a finite timestamp" }, { status: 400 });
+    }
+    if (body.priority !== undefined &&
+        !(typeof body.priority === "number" && Number.isInteger(body.priority) && body.priority >= 0 && body.priority <= 3)) {
+      return Response.json({ error: "Task priority must be an integer between 0 and 3" }, { status: 400 });
+    }
+    body.priority ??= TASK_PRIORITY_DEFAULT;
     // Fail closed rather than deliver an unsigned (forgeable) webhook.
     if (body.callbackUrl && !this.env.WEBHOOK_SIGNING_SECRET) {
       return Response.json({ error: "Webhook signing is not configured" }, { status: 400 });
@@ -796,15 +828,20 @@ export class Coordinator extends DurableObject<Env> {
 
     const pending = await this.getPending();
     if (pending.length >= MAX_PENDING_TASKS) {
+      await this.recordQueueRejection(body.tenantId, "global-cap");
       return Response.json({ error: "Task queue is full" }, { status: 429 });
     }
     const tenantPending = await this.getTenantPending(body.tenantId);
     if (tenantPending.length >= MAX_PENDING_TASKS_PER_TENANT) {
+      await this.recordQueueRejection(body.tenantId, "tenant-cap");
       return Response.json({ error: "Tenant pending-task limit reached" }, { status: 429 });
     }
     if (!(await this.checkRateLimitKey(`rate:enqueue:${body.tenantId}`, MAX_ENQUEUE_PER_MINUTE))) {
+      await this.recordQueueRejection(body.tenantId, "enqueue-rate");
       return Response.json({ error: "Enqueue rate limit exceeded" }, { status: 429 });
     }
+
+    if (typeof body.queuedAt !== "number" || !Number.isFinite(body.queuedAt)) body.queuedAt = body.createdAt;
 
     await this.ctx.storage.put(this.taskKey(body.tenantId, body.id), body);
     // Global task id -> tenant, so node messages can resolve their task without
@@ -829,6 +866,60 @@ export class Coordinator extends DurableObject<Env> {
     }
 
     return Response.json({ message: "Task submitted", taskId: body.id });
+  }
+
+  private async handleQueueStats(url: URL): Promise<Response> {
+    const tenantId = url.searchParams.get("tenantId");
+    if (!tenantId || tenantId.length > 128) return Response.json({ error: "Invalid tenant" }, { status: 400 });
+    const counters = await this.ctx.storage.get<TenantQueueCounters>(`queue:stats:${tenantId}`) ?? emptyTenantQueueCounters();
+    const pendingByPriority: Record<0 | 1 | 2 | 3, number> = { 0: 0, 1: 0, 2: 0, 3: 0 };
+    const pendingIds = (await this.getTenantPending(tenantId)).slice(0, MAX_PENDING_TASKS_PER_TENANT);
+    let oldestPendingWaitMs: number | null = null;
+    const now = Date.now();
+    for (const taskId of pendingIds) {
+      const task = await this.getTask(taskId, tenantId);
+      if (!task || task.status !== "pending") continue;
+      const priority = task.priority === 0 || task.priority === 2 || task.priority === 3 ? task.priority : 1;
+      pendingByPriority[priority]++;
+      const queueStartedAt = Number.isFinite(task.queuedAt) ? task.queuedAt! : task.createdAt;
+      const waitMs = Math.max(0, now - queueStartedAt);
+      oldestPendingWaitMs = oldestPendingWaitMs === null ? waitMs : Math.max(oldestPendingWaitMs, waitMs);
+    }
+    const stats: TaskQueueStats = {
+      pendingCount: Object.values(pendingByPriority).reduce((sum, value) => sum + value, 0),
+      pendingByPriority,
+      assignedByPriority: counters.assignedByPriority,
+      rejectionCounts: counters.rejectionCounts,
+      oldestPendingWaitMs,
+      lastAssignmentWaitMs: counters.lastAssignmentWaitMs,
+      maxAssignmentWaitMs: counters.maxAssignmentWaitMs,
+      updatedAt: counters.updatedAt,
+    };
+    return Response.json(stats);
+  }
+
+  private async readTenantQueueCounters(tenantId: string): Promise<TenantQueueCounters> {
+    return await this.ctx.storage.get<TenantQueueCounters>(`queue:stats:${tenantId}`) ?? emptyTenantQueueCounters();
+  }
+
+  private async recordQueueRejection(
+    tenantId: string,
+    reason: "global-cap" | "tenant-cap" | "enqueue-rate",
+  ) {
+    const stats = await this.readTenantQueueCounters(tenantId);
+    stats.rejectionCounts[reason] = Math.min(Number.MAX_SAFE_INTEGER, stats.rejectionCounts[reason] + 1);
+    stats.updatedAt = Date.now();
+    await this.ctx.storage.put(`queue:stats:${tenantId}`, stats);
+  }
+
+  private async recordQueueAssignment(task: TaskRecord) {
+    const stats = await this.readTenantQueueCounters(task.tenantId);
+    const priority = task.priority === 0 || task.priority === 2 || task.priority === 3 ? task.priority : 1;
+    stats.assignedByPriority[priority] = Math.min(Number.MAX_SAFE_INTEGER, stats.assignedByPriority[priority] + 1);
+    stats.lastAssignmentWaitMs = task.queueWaitMs ?? 0;
+    stats.maxAssignmentWaitMs = Math.max(stats.maxAssignmentWaitMs ?? 0, task.queueWaitMs ?? 0);
+    stats.updatedAt = Date.now();
+    await this.ctx.storage.put(`queue:stats:${task.tenantId}`, stats);
   }
 
   private async completeTask(taskId: string, result: unknown, nodeId: string, attemptId: string) {
@@ -932,6 +1023,7 @@ export class Coordinator extends DurableObject<Env> {
       task.status = "pending";
       task.assignedNodeId = undefined;
       task.assignedAt = undefined;
+      task.queuedAt = Date.now();
       await this.ctx.storage.put(this.taskKey(task.tenantId, taskId), task);
 
       const processing = await this.getProcessing();
@@ -1090,17 +1182,26 @@ export class Coordinator extends DurableObject<Env> {
     const idleNodes = await this.getIdleNodes();
     if (idleNodes.length === 0) return;
 
-    // Load the candidate nodes once instead of per (task, node) pair, and only
-    // examine the head of the queue: the pass must stay bounded even when the
-    // queue is at its cap.
+    // Load candidate nodes once. The queue has a hard 500-task cap, and the
+    // scheduler limits actual assignment attempts to MAX_ASSIGN_PER_PASS.
     const nodes = new Map<string, NodeRecord>();
     for (const id of idleNodes) {
       const node = await this.ctx.storage.get<NodeRecord>(`node:${id}`);
       if (node) nodes.set(id, node);
     }
     let remainingIdle = idleNodes.filter(id => nodes.has(id));
+    const taskRecords = await Promise.all(pendingIds.map((id) => this.getTask(id)));
+    const queueOrder = orderPendingTasks(
+      taskRecords.filter((task): task is TaskRecord => task?.status === "pending")
+        .map((task) => ({ id: task.id, tenantId: task.tenantId, createdAt: task.createdAt, priority: task.priority })),
+      Date.now(),
+      parseTenantSchedulingWeights(this.env.TENANT_SCHEDULING_WEIGHTS),
+      await this.ctx.storage.get<string>("queue:tenantCursor") ?? null,
+    );
+    const orderedIds = queueOrder.ordered.slice(0, MAX_ASSIGN_PER_PASS).map((task) => task.id);
+    let remainingPending = pendingIds.slice();
 
-    for (const taskId of pendingIds.slice(0, MAX_ASSIGN_PER_PASS)) {
+    for (const taskId of orderedIds) {
       const task = await this.getTask(taskId);
       if (!task || task.status !== "pending") continue;
 
@@ -1109,6 +1210,7 @@ export class Coordinator extends DurableObject<Env> {
         if (chosen) {
           remainingIdle = remainingIdle.filter(id => !chosen.includes(id));
           await this.ctx.storage.put("nodes:idle", remainingIdle);
+          remainingPending = await this.getPending();
         }
         continue;
       }
@@ -1168,9 +1270,13 @@ export class Coordinator extends DurableObject<Env> {
       task.status = "processing";
       task.assignedNodeId = chosenNode;
       task.assignedAt = Date.now();
+      const queueStartedAt = Number.isFinite(task.queuedAt) ? task.queuedAt! : task.createdAt;
+      task.queueWaitMs = Math.max(0, task.assignedAt - queueStartedAt);
+      await this.recordQueueAssignment(task);
       await this.ctx.storage.put(this.taskKey(task.tenantId, taskId), task);
 
-      this.pendingCache = pendingIds.filter(id => id !== taskId);
+      remainingPending = remainingPending.filter(id => id !== taskId);
+      this.pendingCache = remainingPending;
       await this.ctx.storage.put("queue:pending", this.pendingCache);
       await this.removeFromTenantPending(task.tenantId, taskId);
 
@@ -1205,6 +1311,10 @@ export class Coordinator extends DurableObject<Env> {
       if (!sent) {
         await this.failTask(taskId, "Failed to deliver task to node");
       }
+    }
+
+    if (queueOrder.nextTenantCursor) {
+      await this.ctx.storage.put("queue:tenantCursor", queueOrder.nextTenantCursor);
     }
   }
 
@@ -1298,6 +1408,9 @@ export class Coordinator extends DurableObject<Env> {
     task.status = "processing";
     task.assignedNodeId = host.id;
     task.assignedAt = Date.now();
+    const queueStartedAt = Number.isFinite(task.queuedAt) ? task.queuedAt! : task.createdAt;
+    task.queueWaitMs = Math.max(0, task.assignedAt - queueStartedAt);
+    await this.recordQueueAssignment(task);
     await this.ctx.storage.put(this.taskKey(task.tenantId, task.id), task);
 
     this.pendingCache = (await this.getPending()).filter(id => id !== task.id);
