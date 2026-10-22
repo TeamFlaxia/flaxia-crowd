@@ -1,6 +1,8 @@
 import type { TaskPayload, WorkloadType, TaskRecord, SubmitTaskResponse, TaskQueueStats } from './types';
 import { AuthenticationError, FlaxiaError, TaskNotFoundError, ValidationError } from './errors';
 import { SUBSCRIBE_PROTOCOL, buildSubscribeProtocols, buildWsUrl } from './handshake';
+import { MAX_SWARM_NODES, MIN_SWARM_NODES } from './swarm';
+import { isSupportedSwarmModelId, type SupportedSwarmModelId } from './swarm-models';
 
 export interface FlaxiaClientConfig {
   apiKey: string;
@@ -15,6 +17,12 @@ export interface SubmitTaskOptions {
   timeoutMs?: number;
   /** Scheduling class from 0 (background) through 3 (interactive). */
   priority?: 0 | 1 | 2 | 3;
+}
+
+export interface SwarmPrewarmOptions {
+  model: SupportedSwarmModelId;
+  minNodes?: number;
+  maxNodes?: number;
 }
 
 export interface TaskSubscription {
@@ -129,6 +137,35 @@ export class FlaxiaClient {
       throw new FlaxiaError(message, 'QUEUE_STATS_ERROR', response.status);
     }
     return response.json() as Promise<TaskQueueStats>;
+  }
+
+  /**
+   * Run one bounded real inference to populate consenting nodes' persistent
+   * browser weight caches. Returns the ordinary task id for status polling.
+   */
+  async prewarmSwarmModel(options: SwarmPrewarmOptions): Promise<SubmitTaskResponse> {
+    if (!options || !isSupportedSwarmModelId(options.model)) {
+      throw new ValidationError('model is not in the supported swarm model list');
+    }
+    const minNodes = options.minNodes ?? MIN_SWARM_NODES;
+    const maxNodes = options.maxNodes ?? Math.max(minNodes, 4);
+    if (!Number.isInteger(minNodes) || minNodes < MIN_SWARM_NODES || minNodes > MAX_SWARM_NODES ||
+        !Number.isInteger(maxNodes) || maxNodes < minNodes || maxNodes > MAX_SWARM_NODES) {
+      throw new ValidationError(`minNodes/maxNodes must be integers between ${MIN_SWARM_NODES} and ${MAX_SWARM_NODES}`);
+    }
+    const response = await fetch(`${this.baseUrl}/crowd/swarm/prewarm`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify({ model: options.model, minNodes, maxNodes }),
+    });
+    if (!response.ok) {
+      const message = await this.extractError(response);
+      throw new FlaxiaError(message, 'PREWARM_ERROR', response.status);
+    }
+    return response.json() as Promise<SubmitTaskResponse>;
   }
 
   async waitForTask(taskId: string, intervalMs = 2000, timeoutMs = 60000): Promise<TaskRecord> {
