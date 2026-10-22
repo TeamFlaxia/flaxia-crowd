@@ -7,4 +7,5 @@ export * from './nsfw';
 export * from './swarm';
 export * from './resources';
 export * from './model-cache';
+export * from './swarm-models';
 export * from './handshake';
