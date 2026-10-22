@@ -1,4 +1,5 @@
-import type { WorkloadType } from "@flaxia/sdk";
+import { isNodeModelCacheSnapshot } from "@flaxia/sdk";
+import type { NodeModelCacheSnapshot, WorkloadType } from "@flaxia/sdk";
 
 const log = (...args: unknown[]) => console.log("[flaxia-node]", ...args);
 
@@ -46,6 +47,7 @@ export class WorkerPool {
   private static readonly MAX_PENDING_CONTROLS = 64;
   private _lastCpuLoad = 0;
   private _hasCpuLoadSample = false;
+  private _modelCacheSnapshot: NodeModelCacheSnapshot | null = null;
 
   constructor(workerUrl?: string, timeoutMs = 300000) {
     this.workerUrl = workerUrl || '/worker.js';
@@ -130,6 +132,10 @@ export class WorkerPool {
     const handleMessage = (event: MessageEvent) => {
       const { id: resId, type, result, error, token, cpuLoad } = event.data;
       if (resId !== id) return;
+
+      if (isNodeModelCacheSnapshot(event.data.modelCache)) {
+        this._modelCacheSnapshot = event.data.modelCache;
+      }
 
       if (type === 'token') {
         onToken?.(token);
@@ -275,6 +281,7 @@ export class WorkerPool {
       this.worker.terminate();
       this.worker = null;
     }
+    this._modelCacheSnapshot = null;
     this.initWorker();
   }
 
@@ -294,6 +301,7 @@ export class WorkerPool {
       this.worker.terminate();
       this.worker = null;
     }
+    this._modelCacheSnapshot = null;
   }
 
   resume() {
@@ -308,5 +316,11 @@ export class WorkerPool {
 
   get hasCpuLoadSample(): boolean {
     return this._hasCpuLoadSample;
+  }
+
+  get modelCacheSnapshot(): NodeModelCacheSnapshot | null {
+    const snapshot = this._modelCacheSnapshot;
+    if (!snapshot || snapshot.expiresAt <= Date.now()) return null;
+    return snapshot;
   }
 }
