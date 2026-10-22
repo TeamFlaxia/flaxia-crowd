@@ -990,7 +990,7 @@ describe('Coordinator swarm sessions', () => {
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
     const chain = swarmChainFor(init);
 
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain }));
     await new Promise((r) => setTimeout(r, 30));
 
     const hostSlice = jsonFrames(n2).find((f) => f.type === 'swarm-slice');
@@ -1017,7 +1017,7 @@ describe('Coordinator swarm sessions', () => {
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
 
     n1.socket.send(JSON.stringify({
-      type: 'swarm-plan', sessionId: init.sessionId,
+      type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId,
       chain: [{ nodeId: 'n1', role: 'host', slice: { start: 0, end: 1e9, hasEmbed: true, hasHead: true } }],
     }));
     await new Promise((r) => setTimeout(r, 30));
@@ -1025,7 +1025,7 @@ describe('Coordinator swarm sessions', () => {
     expect(jsonFrames(n2).some((f) => f.type === 'swarm-error')).toBe(false);
 
     // The authenticated host can still submit the valid plan after the attack.
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
     expect((await getTask(task.id)).swarmSession?.chain.map((entry) => entry.nodeId)).toEqual(['n2', 'n1']);
   });
@@ -1040,7 +1040,7 @@ describe('Coordinator swarm sessions', () => {
       { nodeId: 'n2', role: 'host', slice: { start: 0, end: 6, hasEmbed: true, hasHead: true } },
       { nodeId: 'n1', role: 'worker', slice: { start: 6, end: 1e9, hasEmbed: false, hasHead: false } },
     ];
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: hostile }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: hostile }));
     await new Promise((r) => setTimeout(r, 50));
 
     const errors = jsonFrames(n2).filter((f) => f.type === 'swarm-error');
@@ -1056,7 +1056,7 @@ describe('Coordinator swarm sessions', () => {
   it('relays a binary hidden frame to the next hop', async () => {
     const { n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     // Host (n2, index 0) sends a hidden frame; it should reach n1 (index 1)
@@ -1072,7 +1072,7 @@ describe('Coordinator swarm sessions', () => {
   it('hands every member distinct per-hop frame keys', async () => {
     const { n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     // n2 is the host (index 0), n1 the worker (index 1). Each member gets the
@@ -1092,7 +1092,7 @@ describe('Coordinator swarm sessions', () => {
   it('accepts only the host result and releases every member', async () => {
     const { task, n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     // A worker's result is ignored, even with the session id and attempt id.
@@ -1124,7 +1124,7 @@ describe('Coordinator swarm sessions', () => {
   it('does not let a member fail another member\'s task', async () => {
     const { task, n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     // The worker reports a failure. It must not settle the task; the host owns
@@ -1158,7 +1158,7 @@ describe('Coordinator swarm sessions', () => {
   it('ignores swarm-token and swarm-done from a member', async () => {
     const { task, n1, n2 } = await setup();
     const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise((r) => setTimeout(r, 30));
 
     const subscriber = await stub.fetch(`http://internal/subscribe?taskId=${task.id}&tenantId=${TENANT}`, {
@@ -1269,7 +1269,7 @@ describe('Coordinator swarm sessions', () => {
   it.each(['n1', 'n2'])('restarts the whole swarm when %s reconnects', async (nodeId) => {
     const { task, n1, n2 } = await setup();
     const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise(r => setTimeout(r, 20));
     const replacement = await connectNode(nodeId,
       `capabilities=swarm-inference&webgpu=true&wasm=${nodeId === 'n2' ? 8000000000 : 4000000000}`);
@@ -1302,7 +1302,7 @@ describe('Coordinator swarm sessions', () => {
     n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: 'old-session', chain }));
     await new Promise(r => setTimeout(r, 20));
     expect(jsonFrames(n1).some(f => f.type === 'swarm-slice')).toBe(false);
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain }));
     await new Promise(r => setTimeout(r, 20));
     n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: 'old-session' }));
     n2.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
@@ -1324,7 +1324,7 @@ describe('Coordinator swarm sessions', () => {
   it('relays bounded peer signaling only between current adjacent members', async () => {
     const { task, n1, n2, n3 } = await setup();
     const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, chain: swarmChainFor(init) }));
+    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
     await new Promise(r => setTimeout(r, 30));
 
     const hostSlice = jsonFrames(n2).find(f => f.type === 'swarm-slice');
@@ -1351,5 +1351,53 @@ describe('Coordinator swarm sessions', () => {
     n3.socket.send(JSON.stringify({ ...offer, toNodeId: 'n2' }));
     await new Promise(r => setTimeout(r, 25));
     expect(jsonFrames(n1).filter(f => f.type === 'swarm-peer-signal')).toHaveLength(before);
+  });
+});
+
+
+    
+describe('swarm protocol quarantine', () => {
+  it('ignores wrong attempts, quarantines repeated malformed plans, and excludes the host from new swarms', async () => {
+    stub = newStub();
+    const worker = await connectNode('trust-worker', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
+    const host = await connectNode('trust-host', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
+    const tasks = Array.from({ length: 4 }, () => makeTask({
+      workload: 'swarm-inference',
+      payload: { model: 'qwen3-1.7b', prompt: 'hi' },
+    }));
+    await seedPending(tasks, ['trust-worker', 'trust-host']);
+    await runAssign();
+
+    for (let index = 0; index < 3; index++) {
+      const task = tasks[index];
+      const init = jsonFrames(host).find((frame) => frame.type === 'swarm-init' && frame.taskId === task.id);
+      expect(init).toBeTruthy();
+
+      // A matching session with the wrong attempt must not add a strike or
+      // settle the task.
+      host.socket.send(JSON.stringify({
+        type: 'swarm-plan', sessionId: init.sessionId, attemptId: 'wrong-attempt', chain: [],
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await withStorage(async (storage) => {
+        const trust = await storage.get<any>('trust:protocol-faults');
+        expect(trust?.['trust-host']?.faults ?? []).toHaveLength(index);
+      });
+
+      // The currently authenticated host attempt submits a malformed plan.
+      host.socket.send(JSON.stringify({
+        type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: [],
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(await getTask(task.id)).toMatchObject({ status: 'failed' });
+    }
+
+    const trust = await withStorage(async (storage) => storage.get<any>('trust:protocol-faults'));
+    expect(trust?.['trust-host']?.faults).toHaveLength(3);
+    expect(trust['trust-host'].quarantineUntil).toBeGreaterThan(Date.now());
+    // With the only host quarantined, one remaining candidate cannot form a
+    // swarm; the fourth task stays queued without reserving the worker.
+    expect(await getTask(tasks[3].id)).toMatchObject({ status: 'pending' });
+    expect(jsonFrames(worker).some((frame) => frame.type === 'swarm-init' && frame.taskId === tasks[3].id)).toBe(false);
   });
 });
