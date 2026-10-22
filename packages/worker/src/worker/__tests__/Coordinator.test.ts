@@ -2,6 +2,7 @@ import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 import type { SwarmChainNode, TaskRecord } from '@flaxia/sdk';
 import { encodeSwarmEnvelope, verifyCrowdWebhook } from '@flaxia/sdk';
+import type { PeerLinkHistory } from '../peer-link-history';
 import { MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK } from '../Coordinator';
 import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
@@ -968,6 +969,36 @@ describe('Coordinator swarm sessions', () => {
     // The non-WebGPU node is not a member, and only the host is asked to plan.
     expect(jsonFrames(n1).some((f) => f.type === 'swarm-init')).toBe(false);
     expect(jsonFrames(n3).some((f) => f.type === 'swarm-init')).toBe(false);
+  });
+
+  it('selects a fresh low-RTT peer while retaining the resource-ranked host', async () => {
+    stub = newStub();
+    const n1 = await connectNode('n1', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
+    const n2 = await connectNode('n2', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
+    await connectNode('n3', 'capabilities=swarm-inference&webgpu=true&wasm=6000000000');
+    const now = Date.now();
+    const history: PeerLinkHistory = {
+      'n2>n1': {
+        fromNodeId: 'n2', toNodeId: 'n1', sampledAt: now, expiresAt: now + 60_000,
+        applicationRttMs: 20, webRtcRttMs: null, bandwidthMbps: 100,
+      },
+      'n2>n3': {
+        fromNodeId: 'n2', toNodeId: 'n3', sampledAt: now, expiresAt: now + 60_000,
+        applicationRttMs: 150, webRtcRttMs: null, bandwidthMbps: 1,
+      },
+    };
+    await withStorage((storage) => storage.put('peer-quality:history', history));
+    const task = makeTask({
+      workload: 'swarm-inference',
+      payload: { model: 'qwen3-1.7b', prompt: 'hi', swarm: { minNodes: 2, maxNodes: 2 } },
+    });
+    await seedPending([task], ['n1', 'n2', 'n3']);
+
+    await runAssign();
+
+    const init = jsonFrames(n2).find((frame) => frame.type === 'swarm-init')!;
+    expect(init.members.map((member: { nodeId: string }) => member.nodeId)).toEqual(['n2', 'n1']);
+    expect((await getTask(task.id)).assignedNodeId).toBe('n2');
   });
 
   it('leaves a swarm task pending when only one candidate node is available', async () => {
