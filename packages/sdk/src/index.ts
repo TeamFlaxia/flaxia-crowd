@@ -6,4 +6,5 @@ export * from './webhook';
 export * from './nsfw';
 export * from './swarm';
 export * from './resources';
+export * from './model-cache';
 export * from './handshake';
