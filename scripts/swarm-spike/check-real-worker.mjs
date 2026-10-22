@@ -14,9 +14,12 @@ import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, statSy
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_CACHE } from './real-options.mjs';
 
 const CHROME = process.env.CHROME || '/usr/bin/google-chrome';
-const MODEL = process.env.MODEL || '/tmp/opencode/swarm-real.gguf';
+// Use a trusted local browser binary; this harness only navigates to its
+// loopback fixture and keeps the CDP endpoint bound to loopback.
+const MODEL = process.env.MODEL || DEFAULT_CACHE;
 const GPU = process.env.CHROME_GPU || 'real';
 const TOKENS = process.env.TOKENS || '6';
 const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 900000);
@@ -246,7 +249,7 @@ async function main() {
   const profile = mkdtempSync(path.join(tmpdir(), 'flaxia-real-'));
   const chrome = spawn(
     CHROME,
-    ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`, ...(GPU_FLAGS[GPU] || GPU_FLAGS.real), 'about:blank'],
+    ['--headless=new', '--disable-dev-shm-usage', '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`, ...(GPU_FLAGS[GPU] || GPU_FLAGS.real), 'about:blank'],
     { stdio: ['ignore', 'ignore', 'pipe'] },
   );
   let chromeErr = '';

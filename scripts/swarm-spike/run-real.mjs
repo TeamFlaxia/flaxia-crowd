@@ -1,14 +1,17 @@
 // Phase 0/1 validation: run the vendored Pooled engine on a REAL GGUF over
 // WebGPU (Deno), solo and split across two engines, and compare token streams.
 //
-//   deno run --unstable-webgpu --allow-read --allow-write --allow-net \
-//     scripts/swarm-spike/run-real.mjs --tokens 12
+//   npm run spike:swarm-real -- --tokens 12
 //
+// The npm script scopes Deno permissions to the vendored engine, one temporary
+// cache directory, the pinned Hugging Face model hosts, and loopback.
 // The GGUF is served from a local HTTP server with Range support, and every
 // tensor is range-fetched — the same streaming loader path the production
 // runtime uses (nothing tensor-sized is ever held in JS).
 import http from "node:http";
 import fs from "node:fs";
+import path from "node:path";
+import { resolveRealSpikeOptions } from "./real-options.mjs";
 import { Qwen35Engine } from "../../vendor/pooled/engine/qwen35.js";
 import {
   parseGGUFHeader,
@@ -25,10 +28,18 @@ const arg = (k, d) => {
   const i = argv.indexOf("--" + k);
   return i >= 0 ? argv[i + 1] : d;
 };
-const URL_ =
-  arg("url", "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf");
+const URL_ = arg("url", undefined);
 const TOKENS = +arg("tokens", 12);
-const CACHE = arg("cache", "/tmp/opencode/swarm-real.gguf");
+const CACHE = arg("cache", undefined);
+
+let modelUrl;
+let cachePath;
+try {
+  ({ modelUrl, cachePath } = resolveRealSpikeOptions(URL_, CACHE));
+} catch (error) {
+  console.error(`REAL SPIKE FAIL: ${error.message}`);
+  process.exit(1);
+}
 
 function fail(msg) {
   console.error("REAL SPIKE FAIL:", msg);
@@ -36,13 +47,14 @@ function fail(msg) {
 }
 
 async function ensureModel() {
-  if (fs.existsSync(CACHE)) return;
+  if (fs.existsSync(cachePath)) return;
   const t0 = performance.now();
-  console.log("downloading", URL_);
-  const response = await fetch(URL_);
+  console.log("downloading", modelUrl);
+  const response = await fetch(modelUrl);
   if (!response.ok) fail(`HTTP ${response.status}`);
   const bytes = new Uint8Array(await response.arrayBuffer());
-  fs.writeFileSync(CACHE, bytes);
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  fs.writeFileSync(cachePath, bytes);
   console.log(`model ${(bytes.length / 2 ** 20).toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
 }
 
@@ -66,7 +78,7 @@ function serveFile(file) {
 
 async function main() {
   await ensureModel();
-  const { server, urlBase } = await serveFile(CACHE);
+  const { server, urlBase } = await serveFile(cachePath);
 
   const rangeFetch = async (lo, hi) => {
     const r = await fetch(urlBase, { headers: { Range: `bytes=${lo}-${hi}` } });
