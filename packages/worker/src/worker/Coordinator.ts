@@ -22,6 +22,7 @@ import {
   isNodeModelCacheSnapshot,
   MIN_SWARM_NODES,
   MAX_SWARM_NODES,
+  isSupportedSwarmModelId,
 } from "@flaxia/sdk";
 import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
@@ -216,6 +217,10 @@ export class Coordinator extends DurableObject<Env> {
 
     if (url.pathname === "/enqueue") {
       return this.handleEnqueue(request);
+    }
+
+    if (url.pathname === "/prewarm") {
+      return this.handlePrewarm(request, url);
     }
 
     if (url.pathname === "/queue-stats") {
@@ -800,6 +805,40 @@ export class Coordinator extends DurableObject<Env> {
   }
 
   // --- Task management ---
+
+  /** A prewarm request is an expensive model download and consumes a small hourly budget. */
+  private async handlePrewarm(request: Request, url: URL): Promise<Response> {
+    const tenantId = url.searchParams.get("tenantId");
+    if (!tenantId || tenantId.length > 128) return Response.json({ error: "Invalid tenant" }, { status: 400 });
+    let task: TaskRecord;
+    try {
+      task = await request.json() as TaskRecord;
+    } catch {
+      return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    if (!task || typeof task !== "object") {
+      return Response.json({ error: "Invalid bounded swarm prewarm task" }, { status: 400 });
+    }
+    const payload = task.payload as Record<string, unknown> | undefined;
+    const swarm = payload?.swarm as Record<string, unknown> | undefined;
+    const minNodes = swarm?.minNodes;
+    const maxNodes = swarm?.maxNodes;
+    if (task.tenantId !== tenantId || task.workload !== "swarm-inference" || task.priority !== 0 ||
+        !payload || !isSupportedSwarmModelId(payload.model) || payload.prompt !== "flaxia model cache warm-up" ||
+        payload.maxNewTokens !== 1 || !swarm || swarm.preferWarm !== false ||
+        typeof minNodes !== "number" || !Number.isInteger(minNodes) || minNodes < MIN_SWARM_NODES || minNodes > MAX_SWARM_NODES ||
+        typeof maxNodes !== "number" || !Number.isInteger(maxNodes) || maxNodes < minNodes || maxNodes > MAX_SWARM_NODES ||
+        task.callbackUrl !== undefined) {
+      return Response.json({ error: "Invalid bounded swarm prewarm task" }, { status: 400 });
+    }
+    if (!(await this.checkRateLimitKey(`rate:prewarm:${tenantId}`, 2, 60 * 60 * 1000))) {
+      return Response.json({ error: "Swarm prewarm limit reached (2 per hour)" }, { status: 429 });
+    }
+    return this.handleEnqueue(new Request("http://internal/enqueue", {
+      method: "POST",
+      body: JSON.stringify(task),
+    }));
+  }
 
   private async handleEnqueue(request: Request): Promise<Response> {
     let body: TaskRecord;
