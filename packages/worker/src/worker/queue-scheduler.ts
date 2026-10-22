@@ -10,7 +10,7 @@ export interface PendingTaskSummary {
 export const TASK_PRIORITY_MIN = 0;
 export const TASK_PRIORITY_MAX = 3;
 export const TASK_PRIORITY_DEFAULT: TaskPriority = 1;
-export const TASK_AGING_INTERVAL_MS = 30_000;
+export const TASK_AGING_INTERVAL_MS = 20_000;
 export const TASK_EFFECTIVE_PRIORITY_MAX = 12;
 export const TENANT_WEIGHT_MIN = 1;
 export const TENANT_WEIGHT_MAX = 4;
