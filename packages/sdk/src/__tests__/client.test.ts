@@ -299,6 +299,16 @@ describe('FlaxiaClient', () => {
       expect(MockWebSocket.instances[0].protocols).toEqual(['flaxia-subscribe-v1', 'bearer.explicit']);
       expect(fetch).not.toHaveBeenCalled();
     });
+
+    it('delivers re-prefill reset epochs to streaming consumers', async () => {
+      const subscription = await client.subscribe('task-reset', { subscribeToken: 'explicit' });
+      const resets: number[] = [];
+      subscription.onReset(({ epoch }) => resets.push(epoch));
+      const socket = MockWebSocket.instances[0];
+      socket.onmessage?.({ data: JSON.stringify({ type: 'reset', epoch: 2 }) } as MessageEvent);
+      socket.onmessage?.({ data: JSON.stringify({ type: 'reset', epoch: -1 }) } as MessageEvent);
+      expect(resets).toEqual([2]);
+    });
   });
 
   describe('waitForTask', () => {
