@@ -29,6 +29,8 @@ import {
 import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
 import { mergePeerQualitySnapshot } from "./peer-quality";
+import { mergePeerLinkHistory, type PeerLinkHistory } from "./peer-link-history";
+import { planSparseSwarmMesh } from "./mesh-planner";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_RETRIES = 3;
@@ -579,6 +581,12 @@ export class Coordinator extends DurableObject<Env> {
     // These are self-reported scheduling hints, not proof of peer identity or quality.
     swarm.peerQuality = result.snapshot;
     await this.ctx.storage.put(`swarm:${data.taskId}`, swarm);
+
+    const history = await this.ctx.storage.get<PeerLinkHistory>("peer-quality:history");
+    const persisted = mergePeerLinkHistory(history, nodeId, data.reports, adjacent, now);
+    if (persisted.accepted) {
+      await this.ctx.storage.put("peer-quality:history", persisted.history);
+    }
   }
 
   /**
@@ -1487,7 +1495,19 @@ export class Coordinator extends DurableObject<Env> {
         (a.assignedCount ?? 0) - (b.assignedCount ?? 0) ||
         a.connectedAt - b.connectedAt,
     );
-    const chosen = eligible.slice(0, Math.min(maxNodes, eligible.length));
+    // Historical peer RTT/bandwidth is scoped to authenticated adjacent links
+    // and expires after 60 seconds. If it is unavailable, preserve the
+    // resource/warm-cache ranking above. The bounded planner keeps the same
+    // sparse ring topology and only runs once when a new task is assigned.
+    const qualityHistory = await this.ctx.storage.get<PeerLinkHistory>("peer-quality:history") ?? {};
+    const meshOrder = planSparseSwarmMesh(
+      eligible.map((node) => node.id),
+      Math.min(maxNodes, eligible.length),
+      qualityHistory,
+      Date.now(),
+    );
+    const eligibleById = new Map(eligible.map((node) => [node.id, node]));
+    const chosen = meshOrder.map((nodeId) => eligibleById.get(nodeId)!).filter(Boolean);
     if (chosen.length === 0) return null;
     const host = chosen[0];
     const sessionId = crypto.randomUUID();
