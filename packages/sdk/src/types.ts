@@ -440,6 +440,8 @@ export interface TaskRecord {
   assignedAt?: number;
   /** Milliseconds spent pending before the current assignment. */
   queueWaitMs?: number;
+  /** Incremented when a retried attempt re-prefills and resets streamed output. */
+  streamEpoch?: number;
   completedAt?: number;
   assignedNodeId?: string;
   assignedCoordinatorNodeId?: string;
@@ -483,6 +485,11 @@ export interface SubmitTaskResponse {
   /** Short-lived token required by `GET /crowd/subscribe` for this task. */
   subscribeToken?: string;
   subscribeTokenExpiresAt?: number;
+}
+
+/** Signals that the current attempt ended and a retry will restart from the prompt. */
+export interface TaskStreamReset {
+  epoch: number;
 }
 
 export interface TaskQueueStats {
