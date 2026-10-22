@@ -2,6 +2,7 @@ import {
   NODE_MODEL_CACHE_TTL_MS,
   type ModelCacheEntryStatus,
   type NodeModelCacheSnapshot,
+  type SupportedSwarmModelId,
   buildSwarmChain,
   type SwarmChainNode,
   type SwarmMember,
@@ -30,7 +31,7 @@ import { SESSION_MAX_SEQ, type SwarmSemantics } from './session';
  */
 
 /** GGUF sources for the models the swarm engine can split. */
-const SWARM_GGUF_URLS: Record<string, string> = {
+const SWARM_GGUF_URLS: Record<SupportedSwarmModelId, string> = {
   // Qwen3.5 / 3.8 are Gated-DeltaNet hybrids ("qwen35" in GGUF), handled by
   // Qwen35Engine — not DenseEngine.
   'qwen3.5-2b':
@@ -100,7 +101,9 @@ export function getSwarmModelCacheSnapshot(now = Date.now()): NodeModelCacheSnap
  * range-fetch an arbitrary host of the submitter's choosing.
  */
 export function resolveModelUrl(model: string): string {
-  const url = SWARM_GGUF_URLS[model];
+  const url = Object.prototype.hasOwnProperty.call(SWARM_GGUF_URLS, model)
+    ? SWARM_GGUF_URLS[model as SupportedSwarmModelId]
+    : undefined;
   if (url) return url;
   throw new SwarmEngineUnavailableError(`unknown swarm model: ${model}`);
 }
