@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { Env } from '../index'
 import type { SwarmNodeCapabilities, TaskRecord, WarmModelRange, WorkloadType } from '@flaxia/sdk'
+import { isTaskPriority, TASK_PRIORITY_DEFAULT } from '../worker/queue-scheduler'
 import {
   isRoutableWorkload,
   defaultTimeoutFor,
@@ -378,7 +379,7 @@ app.post('/tasks', async (c) => {
   const rawBody = await c.req.text()
   if (!validatePayloadSize(c.env, rawBody)) return c.json({ error: 'Payload too large' }, 413)
 
-  let body: { workload?: string; payload?: unknown; timeoutMs?: number; callbackUrl?: string }
+  let body: { workload?: string; payload?: unknown; timeoutMs?: number; callbackUrl?: string; priority?: unknown }
   try {
     body = JSON.parse(rawBody)
   } catch {
@@ -389,6 +390,9 @@ app.post('/tasks', async (c) => {
     return c.json({ error: 'Invalid workload type' }, 400)
   }
   if (!body.payload) return c.json({ error: 'payload is required' }, 400)
+  if (body.priority !== undefined && !isTaskPriority(body.priority)) {
+    return c.json({ error: 'priority must be an integer between 0 and 3' }, 400)
+  }
 
   if (body.workload === 'swarm-inference') {
     const swarmError = validateSwarmPayload(body.payload)
@@ -427,14 +431,17 @@ app.post('/tasks', async (c) => {
   }
 
   const taskId = crypto.randomUUID()
+  const createdAt = Date.now()
   const task: TaskRecord = {
     id: taskId,
     status: 'pending',
     workload: body.workload as WorkloadType,
     payload: body.payload as TaskRecord['payload'],
-    createdAt: Date.now(),
+    createdAt,
+    queuedAt: createdAt,
     tenantId,
     allowedSites,
+    priority: body.priority === undefined ? TASK_PRIORITY_DEFAULT : body.priority,
     retryCount: 0,
     timeoutMs,
     callbackUrl,
@@ -468,6 +475,14 @@ app.post('/tasks', async (c) => {
     subscribeToken,
     subscribeTokenExpiresAt: subscribeToken ? Date.now() + SUBSCRIBE_TOKEN_TTL_MS : undefined,
   })
+})
+
+app.get('/queue/stats', async (c) => {
+  const tenantId = await resolveCallerTenant(c.env, c.req.header('Authorization'))
+  if (!tenantId) return c.json({ error: 'Unauthorized' }, 401)
+  const stub = getCoordinator(c)
+  const resp = await stub.fetch(`http://internal/queue-stats?tenantId=${encodeURIComponent(tenantId)}`)
+  return new Response(resp.body, { status: resp.status, headers: resp.headers })
 })
 
 app.get('/tasks/:id', async (c) => {
