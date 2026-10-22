@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import type { SwarmChainNode, TaskRecord } from '@flaxia/sdk';
 import { encodeSwarmEnvelope, verifyCrowdWebhook } from '@flaxia/sdk';
 import { MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK } from '../Coordinator';
+import { MAX_SWARM_RELAY_BYTES_PER_TASK, swarmRelayBudgetKey } from '../relay-budget';
 import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
 
@@ -1319,6 +1320,37 @@ describe('Coordinator swarm sessions', () => {
     n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
     await new Promise(r => setTimeout(r, 20));
     expect(jsonFrames(n2).some(f => f.type === 'swarm-start')).toBe(true);
+  });
+
+  it('fails a swarm when its cumulative Coordinator relay byte budget is exceeded', async () => {
+    const { task, n1, n2 } = await setup();
+    const init = jsonFrames(n2).find((frame) => frame.type === 'swarm-init');
+    n2.socket.send(JSON.stringify({
+      type: 'swarm-plan',
+      sessionId: init.sessionId,
+      attemptId: init.attemptId,
+      chain: swarmChainFor(init),
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const frame = encodeSwarmEnvelope(init.sessionId, new ArrayBuffer(16));
+    await withStorage(async (storage) => {
+      await storage.put(
+        swarmRelayBudgetKey(task.id),
+        MAX_SWARM_RELAY_BYTES_PER_TASK - frame.byteLength + 1,
+      );
+    });
+    const relayedBefore = n2.frames.filter((value) => value instanceof ArrayBuffer).length;
+    n1.socket.send(frame);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(await getTask(task.id)).toMatchObject({
+      status: 'failed',
+      error: 'Coordinator swarm relay byte budget exceeded',
+    });
+    expect(n2.frames.filter((value) => value instanceof ArrayBuffer)).toHaveLength(relayedBefore);
+    expect(jsonFrames(n1).some((value) => value.type === 'abort')).toBe(true);
+    expect(await withStorage((storage) => storage.get(swarmRelayBudgetKey(task.id)))).toBeUndefined();
   });
 
   it('relays bounded peer signaling only between current adjacent members', async () => {
