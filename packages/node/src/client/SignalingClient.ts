@@ -14,6 +14,7 @@ import { WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
 import { collectNodeResourceReport } from '../executor/resourceReporter';
 import { assertPublicUrl } from '../executor/egress-guard';
+import { evaluateMobileLifecycle } from './mobile-lifecycle';
 import {
   buildNodeSignalProtocols,
   buildWsUrl,
@@ -76,7 +77,12 @@ class SignalingClient {
   private readonly MAX_RECONNECT_DELAY = 30000;
   private destroyed = false;
   private suspended = false;
-  private visibilityHandler: (() => void) | null = null;
+  private lifecycleCleanup: Array<() => void> = [];
+  private lifecyclePageHidden = false;
+  private lifecycleOffline = false;
+  private lifecycleEpoch = 0;
+  private batteryState: (EventTarget & { level: number; charging: boolean }) | null = null;
+  private networkState: (EventTarget & { effectiveType?: string; saveData?: boolean }) | null = null;
   private inflightTasks = new Set<string>();
   /** Tasks the coordinator told us to stop; their failure must not be echoed back. */
   private abortedTasks = new Set<string>();
@@ -130,9 +136,11 @@ class SignalingClient {
       this.ws = null;
     }
 
-    this.setupVisibilityHandler();
+    this.setupMobileLifecycleHandlers();
+    if (this.suspended) return;
 
     const token = await this.obtainToken();
+    if (this.destroyed || this.suspended) return;
     if (getConsentState() !== 'granted') {
       log('connect cancelled because consent was revoked while obtaining a token');
       return;
@@ -338,7 +346,7 @@ class SignalingClient {
     log(`disconnect nodeId=${this.nodeId}`);
     this.destroyed = true;
     this.suspended = false;
-    this.removeVisibilityHandler();
+    this.removeMobileLifecycleHandlers();
     try {
       this.ws?.close();
     } catch {}
@@ -544,7 +552,7 @@ class SignalingClient {
         (token: string) => {
           this.send({ type: 'progress', taskId, sessionId, token, attemptId });
         },
-        { maxCpuLoad: this.config.maxCpuLoad },
+        { maxCpuLoad: this.effectiveMaxCpuLoad() },
         {
           onFrame: (frame) => this.queueSwarmFrame(sessionId, frame),
           // Attempt ids are transport metadata owned by this client, so stamp
@@ -599,7 +607,7 @@ class SignalingClient {
           this.send({ type: 'progress', taskId: data.taskId, token, attemptId });
         },
         {
-          maxCpuLoad: this.config.maxCpuLoad,
+          maxCpuLoad: this.effectiveMaxCpuLoad(),
           fileSourceOrigins: validatedHttpsOrigins(this.config.fileSourceOrigins),
           containerImageOrigins: validatedHttpsOrigins(this.config.containerImageOrigins),
         },
@@ -614,22 +622,94 @@ class SignalingClient {
     }
   }
 
-  private setupVisibilityHandler() {
-    this.removeVisibilityHandler();
-    this.visibilityHandler = () => {
-      if (document.hidden) {
-        this.suspend();
-      } else if (this.suspended) {
-        this.resume();
-      }
-    };
-    document.addEventListener('visibilitychange', this.visibilityHandler);
+  private listenForLifecycle(target: EventTarget, type: string, listener: EventListener) {
+    target.addEventListener(type, listener);
+    this.lifecycleCleanup.push(() => target.removeEventListener(type, listener));
   }
 
-  private removeVisibilityHandler() {
-    if (this.visibilityHandler) {
-      document.removeEventListener('visibilitychange', this.visibilityHandler);
-      this.visibilityHandler = null;
+  private setupMobileLifecycleHandlers() {
+    this.removeMobileLifecycleHandlers();
+    const epoch = this.lifecycleEpoch;
+    this.lifecyclePageHidden = document.hidden;
+    this.lifecycleOffline = navigator.onLine === false;
+    const nav = navigator as Navigator & {
+      connection?: EventTarget & { effectiveType?: string; saveData?: boolean };
+      getBattery?: () => Promise<EventTarget & { level: number; charging: boolean }>;
+    };
+    this.networkState = nav.connection ?? null;
+
+    this.listenForLifecycle(document, 'visibilitychange', () => {
+      this.lifecyclePageHidden = document.hidden;
+      this.refreshMobileLifecycle();
+    });
+    this.listenForLifecycle(window, 'offline', () => {
+      this.lifecycleOffline = true;
+      this.refreshMobileLifecycle();
+    });
+    this.listenForLifecycle(window, 'online', () => {
+      this.lifecycleOffline = false;
+      this.refreshMobileLifecycle();
+    });
+    this.listenForLifecycle(window, 'pagehide', () => {
+      this.lifecyclePageHidden = true;
+      this.refreshMobileLifecycle();
+    });
+    this.listenForLifecycle(window, 'pageshow', () => {
+      this.lifecyclePageHidden = false;
+      this.refreshMobileLifecycle();
+    });
+    if (this.networkState) {
+      this.listenForLifecycle(this.networkState, 'change', () => this.refreshMobileLifecycle());
+    }
+
+    if (typeof nav.getBattery === 'function') {
+      try {
+        void nav.getBattery.call(navigator).then((battery) => {
+          if (this.destroyed || epoch !== this.lifecycleEpoch) return;
+          this.batteryState = battery;
+          const update = () => this.refreshMobileLifecycle();
+          this.listenForLifecycle(battery, 'levelchange', update);
+          this.listenForLifecycle(battery, 'chargingchange', update);
+          this.refreshMobileLifecycle();
+        }).catch(() => {
+          // The Battery Status API is optional and unavailable in several mobile browsers.
+        });
+      } catch {
+        // Some browsers expose getBattery but reject direct calls by policy.
+      }
+    }
+    this.refreshMobileLifecycle();
+  }
+
+  private removeMobileLifecycleHandlers() {
+    this.lifecycleEpoch++;
+    for (const cleanup of this.lifecycleCleanup.splice(0)) cleanup();
+    this.batteryState = null;
+    this.networkState = null;
+  }
+
+  private mobileLifecycleDecision() {
+    return evaluateMobileLifecycle({
+      hidden: document.hidden,
+      pageHidden: this.lifecyclePageHidden,
+      online: !this.lifecycleOffline && navigator.onLine !== false,
+      batteryLevel: this.batteryState?.level,
+      batteryCharging: this.batteryState?.charging,
+      effectiveType: this.networkState?.effectiveType,
+      saveData: this.networkState?.saveData,
+    }, this.config.maxCpuLoad);
+  }
+
+  private effectiveMaxCpuLoad() {
+    return this.mobileLifecycleDecision().maxCpuLoad;
+  }
+
+  private refreshMobileLifecycle() {
+    const decision = this.mobileLifecycleDecision();
+    if (decision.suspend) {
+      this.suspend();
+    } else if (this.suspended) {
+      this.resume();
     }
   }
 }
