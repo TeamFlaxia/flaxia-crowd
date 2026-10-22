@@ -29,6 +29,12 @@ import {
 import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
 import { mergePeerQualitySnapshot } from "./peer-quality";
+import {
+  isNodeProtocolQuarantined,
+  recordProtocolViolation,
+  type ProtocolTrustState,
+  type ProtocolViolationKind,
+} from "./protocol-trust";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
 export const MAX_RETRIES = 3;
@@ -370,7 +376,7 @@ export class Coordinator extends DurableObject<Env> {
       }
 
       if (data.type === "swarm-plan") {
-        await this.handleSwarmPlan(nodeId, data);
+        await this.handleSwarmPlan(ws, nodeId, data);
         return;
       }
 
@@ -596,7 +602,22 @@ export class Coordinator extends DurableObject<Env> {
     await this.tryAssignAll();
   }
 
-  private async handleSwarmPlan(nodeId: string, data: Record<string, unknown>) {
+  private async recordActiveProtocolViolation(nodeId: string, kind: ProtocolViolationKind) {
+    const now = Date.now();
+    const current = await this.ctx.storage.get<ProtocolTrustState>("trust:protocol-faults");
+    const result = recordProtocolViolation(current, nodeId, kind, now);
+    await this.ctx.storage.put("trust:protocol-faults", result.state);
+    if (result.quarantineUntil) {
+      console.warn("swarm node temporarily quarantined after repeated active-attempt protocol faults", {
+        nodeId,
+        kind,
+        faultCount: result.faultCount,
+        quarantineUntil: result.quarantineUntil,
+      });
+    }
+  }
+
+  private async handleSwarmPlan(ws: WebSocket, nodeId: string, data: Record<string, unknown>) {
     const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
     const taskId = node?.currentTaskId;
     if (!taskId) return;
@@ -604,6 +625,9 @@ export class Coordinator extends DurableObject<Env> {
     const swarm = await this.ctx.storage.get<SwarmRecord>(`swarm:${taskId}`);
     if (!swarm) return;
     if (data.sessionId !== swarm.sessionId) return;
+    // Stale plans do not count as faults. Only the current delivery socket and
+    // attempt can contribute to a node's temporary protocol quarantine.
+    if (!(await this.acceptAttempt(ws, taskId, nodeId, data.attemptId))) return;
     // The plan is host-authoritative. A non-host member may be malicious or
     // stale; ignore its message without letting it fail the shared task.
     if (swarm.hostNodeId !== nodeId) return;
@@ -614,6 +638,7 @@ export class Coordinator extends DurableObject<Env> {
     // slices, at most MAX_SWARM_LAYERS total and MAX_SWARM_SLICE_LAYERS per
     // node. Without them a host could hand a volunteer `end: 1e9` and OOM it.
     if (!isValidSwarmChain(chain)) {
+      await this.recordActiveProtocolViolation(nodeId, "invalid-swarm-plan");
       await this.rejectSwarmPlan(
         taskId,
         swarm.sessionId,
@@ -626,6 +651,7 @@ export class Coordinator extends DurableObject<Env> {
     // The host is authoritative for placement, but every member must appear.
     const plannedIds = new Set(chain.map((c) => c.nodeId));
     if (plannedIds.size !== swarm.members.length || !swarm.members.every((m) => plannedIds.has(m.nodeId))) {
+      await this.recordActiveProtocolViolation(nodeId, "incomplete-swarm-plan");
       await this.rejectSwarmPlan(taskId, swarm.sessionId, nodeId, "swarm plan does not cover every member");
       return;
     }
@@ -1453,9 +1479,11 @@ export class Coordinator extends DurableObject<Env> {
     const maxNodes = Math.max(minNodes, asCount(opts.maxNodes, DEFAULT_MAX_SWARM_NODES));
 
     const eligible: NodeRecord[] = [];
+    const protocolTrust = await this.ctx.storage.get<ProtocolTrustState>("trust:protocol-faults") ?? {};
     for (const nodeId of idle) {
       const node = nodes.get(nodeId);
       if (!node || node.status !== "idle") continue;
+      if (isNodeProtocolQuarantined(protocolTrust, nodeId, Date.now())) continue;
       if (!node.capabilities.includes("swarm-inference")) continue;
       if (!node.webgpu) continue;
       if (node.lowMemory) continue;
