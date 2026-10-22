@@ -433,7 +433,13 @@ export interface TaskRecord {
    * only nodes whose signed token carries a matching `siteId` may run the task.
    */
   allowedSites?: string[];
+  /** Caller-selected scheduling class. Lower values age into fair service. */
+  priority?: 0 | 1 | 2 | 3;
+  /** Start of the current pending interval; resets when a failed attempt is retried. */
+  queuedAt?: number;
   assignedAt?: number;
+  /** Milliseconds spent pending before the current assignment. */
+  queueWaitMs?: number;
   completedAt?: number;
   assignedNodeId?: string;
   assignedCoordinatorNodeId?: string;
@@ -477,6 +483,17 @@ export interface SubmitTaskResponse {
   /** Short-lived token required by `GET /crowd/subscribe` for this task. */
   subscribeToken?: string;
   subscribeTokenExpiresAt?: number;
+}
+
+export interface TaskQueueStats {
+  pendingCount: number;
+  pendingByPriority: Record<0 | 1 | 2 | 3, number>;
+  assignedByPriority: Record<0 | 1 | 2 | 3, number>;
+  rejectionCounts: Record<'global-cap' | 'tenant-cap' | 'enqueue-rate', number>;
+  oldestPendingWaitMs: number | null;
+  lastAssignmentWaitMs: number | null;
+  maxAssignmentWaitMs: number | null;
+  updatedAt: number | null;
 }
 
 /**
