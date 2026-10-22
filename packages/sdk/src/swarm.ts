@@ -346,6 +346,8 @@ export interface SwarmInitMessage {
 export interface SwarmPlanMessage {
   type: 'swarm-plan';
   sessionId: string;
+  /** Stamped by the signaling client before it reaches the coordinator. */
+  attemptId?: string;
   chain: SwarmChainNode[];
 }
 
