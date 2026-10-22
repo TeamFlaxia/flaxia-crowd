@@ -1376,6 +1376,46 @@ describe('Coordinator swarm sessions', () => {
     });
   });
 
+  it('re-prefills on a fresh swarm attempt after peer loss and rejects the old host result', async () => {
+    const { task, n1, n2 } = await setup();
+    const backup = await connectNode('n4', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
+    const firstInit = jsonFrames(n2).find((frame) => frame.type === 'swarm-init')!;
+
+    // The dropped member closes without sending a protocol-level error.
+    n1.socket.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const retry = await getTask(task.id);
+    expect(retry).toMatchObject({ status: 'processing', retryCount: 1, assignedNodeId: 'n2' });
+    const inits = jsonFrames(n2).filter((frame) => frame.type === 'swarm-init');
+    const nextInit = inits[inits.length - 1];
+    expect(nextInit.sessionId).not.toBe(firstInit.sessionId);
+    expect(nextInit.attemptId).not.toBe(firstInit.attemptId);
+    expect(nextInit.prompt).toEqual((task.payload as { prompt: string }).prompt);
+
+    n2.socket.send(JSON.stringify({
+      type: 'result', taskId: task.id, sessionId: firstInit.sessionId,
+      payload: { output: 'stale' }, attemptId: firstInit.attemptId,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect((await getTask(task.id)).status).toBe('processing');
+
+    n2.socket.send(JSON.stringify({
+      type: 'result', taskId: task.id, sessionId: nextInit.sessionId,
+      payload: { output: 'recovered' }, attemptId: nextInit.attemptId,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(await getTask(task.id)).toMatchObject({ status: 'done', result: { output: 'recovered' } });
+    await withStorage(async (storage) => {
+      for (const nodeId of ['n2', 'n4']) {
+        expect(await storage.get<NodeRecord>(`node:${nodeId}`)).toMatchObject({ status: 'idle' });
+        expect((await storage.get<NodeRecord>(`node:${nodeId}`))?.reservation).toBeUndefined();
+      }
+      expect((await storage.get<NodeRecord>('node:n1'))?.reservation).toBeUndefined();
+    });
+    expect(backup.frames.some((frame) => typeof frame === 'string' && JSON.parse(frame).type === 'swarm-init')).toBe(false);
+  });
+
   it('ignores stale attempts and errors from non-members', async () => {
     const { task, n1, n2, n3 } = await setup();
     const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
