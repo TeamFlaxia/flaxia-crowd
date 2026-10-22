@@ -1,4 +1,4 @@
-import type { TaskPayload, WorkloadType, TaskRecord, SubmitTaskResponse, TaskQueueStats } from './types';
+import type { TaskPayload, WorkloadType, TaskRecord, SubmitTaskResponse, TaskQueueStats, TaskStreamReset } from './types';
 import { AuthenticationError, FlaxiaError, TaskNotFoundError, ValidationError } from './errors';
 import { SUBSCRIBE_PROTOCOL, buildSubscribeProtocols, buildWsUrl } from './handshake';
 
@@ -19,6 +19,8 @@ export interface SubmitTaskOptions {
 
 export interface TaskSubscription {
   onToken: (callback: (token: string) => void) => void;
+  /** Clear accumulated output when a retry restarts from the prompt. */
+  onReset: (callback: (reset: TaskStreamReset) => void) => void;
   onDone: (callback: (result: unknown) => void) => void;
   onError: (callback: (error: string) => void) => void;
   close: () => void;
@@ -205,6 +207,7 @@ export class FlaxiaClient {
     const ws = new WebSocket(url, buildSubscribeProtocols(token));
 
     let tokenCallback: ((token: string) => void) | null = null;
+    let resetCallback: ((reset: TaskStreamReset) => void) | null = null;
     let doneCallback: ((result: unknown) => void) | null = null;
     let errorCallback: ((error: string) => void) | null = null;
 
@@ -212,6 +215,7 @@ export class FlaxiaClient {
       ws.onopen = () => {
         resolve({
           onToken: (cb) => { tokenCallback = cb; },
+          onReset: (cb) => { resetCallback = cb; },
           onDone: (cb) => { doneCallback = cb; },
           onError: (cb) => { errorCallback = cb; },
           close: () => { ws.close(); },
@@ -223,6 +227,8 @@ export class FlaxiaClient {
           const msg = JSON.parse(ev.data as string);
           if (msg.type === 'token' && tokenCallback) {
             tokenCallback(msg.token);
+          } else if (msg.type === 'reset' && resetCallback && Number.isSafeInteger(msg.epoch) && msg.epoch >= 0) {
+            resetCallback({ epoch: msg.epoch });
           } else if (msg.type === 'done' && doneCallback) {
             doneCallback(msg.result);
           } else if (msg.type === 'error' && errorCallback) {
