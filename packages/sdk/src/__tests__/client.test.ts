@@ -218,6 +218,33 @@ describe('FlaxiaClient', () => {
     });
   });
 
+  describe('prewarmSwarmModel', () => {
+    it('submits a bounded request for a supported model', async () => {
+      const response = { message: 'queued', taskId: 'warm-1', id: 'warm-1', status: 'pending', createdAt: 1 };
+      (fetch as any).mockResolvedValue({ ok: true, json: async () => response });
+
+      await expect(client.prewarmSwarmModel({ model: 'qwen3.5-2b' })).resolves.toEqual(response);
+      expect(fetch).toHaveBeenCalledWith(`${baseUrl}/crowd/swarm/prewarm`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ model: 'qwen3.5-2b', minNodes: 2, maxNodes: 4 }),
+      });
+    });
+
+    it('rejects unsupported models and node counts before sending', async () => {
+      await expect(client.prewarmSwarmModel({ model: 'https://attacker.example/model' as any }))
+        .rejects.toThrow(ValidationError);
+      await expect(client.prewarmSwarmModel({ model: 'qwen3.5-2b', minNodes: 1 }))
+        .rejects.toThrow(ValidationError);
+      await expect(client.prewarmSwarmModel({ model: 'qwen3.5-2b', minNodes: 3, maxNodes: 2 }))
+        .rejects.toThrow(ValidationError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe('subscribe', () => {
     class MockWebSocket {
       static instances: MockWebSocket[] = [];
