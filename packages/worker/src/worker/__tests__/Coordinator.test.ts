@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { NodeResourceReport, NodeModelCacheSnapshot, SwarmChainNode, TaskRecord } from '@flaxia/sdk';
 import { encodeSwarmEnvelope, MAX_RESOURCE_CAPACITY_BYTES, verifyCrowdWebhook } from '@flaxia/sdk';
 import type { PeerLinkHistory } from '../peer-link-history';
-import { MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK } from '../Coordinator';
+import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK } from '../Coordinator';
 import { MAX_SWARM_RELAY_BYTES_PER_TASK, swarmRelayBudgetKey } from '../relay-budget';
 import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
@@ -107,6 +107,44 @@ async function runAlarm() {
 }
 
 describe('Coordinator', () => {
+  it('starts and reschedules idle node heartbeats before any task is submitted', async () => {
+    stub = newStub();
+    expect(await withStorage((storage) => storage.getAlarm())).toBeNull();
+    const connectedAt = Date.now();
+    const node = await connectNode('native-idle', '');
+    const alarm = await withStorage((storage) => storage.getAlarm());
+    expect(alarm).not.toBeNull();
+    expect(alarm!).toBeGreaterThanOrEqual(connectedAt);
+    expect(alarm!).toBeLessThanOrEqual(Date.now() + ALARM_INTERVAL_MS);
+
+    await runAlarm();
+    await vi.waitFor(() => expect(jsonFrames(node)).toContainEqual({ type: 'ping' }));
+    const nextAlarm = await withStorage((storage) => storage.getAlarm());
+    expect(nextAlarm).not.toBeNull();
+    expect(nextAlarm!).toBeLessThanOrEqual(Date.now() + ALARM_INTERVAL_MS);
+    expect(jsonFrames(node).some((frame) => frame.type === 'task')).toBe(false);
+    node.socket.close();
+  });
+
+  it('brings a distant task alarm forward for a newly connected node heartbeat', async () => {
+    stub = newStub();
+    await withStorage((storage) => storage.setAlarm(Date.now() + 10 * ALARM_INTERVAL_MS));
+    const node = await connectNode('native-distant-alarm', '');
+    const alarm = await withStorage((storage) => storage.getAlarm());
+    expect(alarm).not.toBeNull();
+    expect(alarm!).toBeLessThanOrEqual(Date.now() + ALARM_INTERVAL_MS);
+    node.socket.close();
+  });
+
+  it('preserves an earlier task alarm when a node connects', async () => {
+    stub = newStub();
+    const earlierAlarm = Date.now() + 5_000;
+    await withStorage((storage) => storage.setAlarm(earlierAlarm));
+    const node = await connectNode('native-earlier-alarm', '');
+    expect(await withStorage((storage) => storage.getAlarm())).toBe(earlierAlarm);
+    node.socket.close();
+  });
+
   it('validates and rate-limits bounded tenant swarm prewarm tasks', async () => {
     stub = newStub();
     const makePrewarmTask = (model: string) => makeTask({

@@ -394,6 +394,15 @@ export class Coordinator extends DurableObject<Env> {
 
     await this.tryAssignAll();
 
+    // A signaling-only node can be the first activity in a fresh coordinator.
+    // Start heartbeats without waiting for a task to schedule the first alarm,
+    // and keep any earlier task deadline already pending.
+    const heartbeatAt = Date.now() + ALARM_INTERVAL_MS;
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm > heartbeatAt) {
+      await this.ctx.storage.setAlarm(heartbeatAt);
+    }
+
     return new Response(null, { status: 101, webSocket: client });
   }
 
