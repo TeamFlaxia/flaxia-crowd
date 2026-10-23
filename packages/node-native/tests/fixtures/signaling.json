@@ -1,0 +1,9 @@
+{
+  "registrationRequest": {
+    "siteId": "native-test",
+    "capabilities": [],
+    "fileSources": false
+  },
+  "protocols": ["flaxia-node-v1", "bearer.test-token"],
+  "pong": { "type": "pong", "cpuLoad": null }
+}

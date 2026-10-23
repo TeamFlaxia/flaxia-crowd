@@ -25,6 +25,7 @@ flaxia-crowd/
 ├── packages/
 │   ├── worker/    # Cloudflare Workers オーケストレーター (TaskQueue, Signaling)
 │   ├── node/      # ブラウザノードSDK (ConsentUI, WebRTC, WorkerPool)
+│   ├── node-native/ # Rust製常駐ノード（登録・接続維持。タスク実行は未対応）
 │   └── sdk/       # 依頼者用SDK (Task Submission, Types)
 ```
 
@@ -37,6 +38,7 @@ flaxia-crowd/
 - [導入ガイド (Getting Started)](docs/getting-started.md)
 - [依頼者向けSDKガイド](docs/sdk-guide.md)
 - [ノード提供者向けガイド](docs/node-guide.md)
+- [Rust製ネイティブノード](packages/node-native/README.md)
 - [ワーカーオーケストレーターガイド](docs/worker-guide.md)
 
 
