@@ -87,6 +87,7 @@ impl SwarmRunner {
         command.args([
             "run", "--no-config", "--no-lock", "--no-npm", "--cached-only",
             "--no-prompt", "--quiet", "--unstable-webgpu",
+            "--allow-env=DENO_WEBGPU_BACKEND",
             // Only the hardcoded production model registry may initiate fetches;
             // OS permissions additionally confine redirects to model hosting.
             "--allow-net=huggingface.co,cdn-lfs.huggingface.co,cdn-lfs-us-1.hf.co,cdn-lfs-eu-1.hf.co,cas-bridge.xethub.hf.co,transfer.xethub.hf.co",
@@ -94,6 +95,8 @@ impl SwarmRunner {
             .arg(&self.settings.helper)
             .env_clear()
             .env("DENO_NO_UPDATE_CHECK", "1")
+            // Fixed native Vulkan backend: never fall back to OpenGL/another API.
+            .env("DENO_WEBGPU_BACKEND", "vulkan")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .kill_on_drop(true);
         #[cfg(target_os = "linux")]
@@ -147,8 +150,8 @@ impl SwarmRunner {
             let value: Value =
                 serde_json::from_slice(&bytes).map_err(|_| "invalid native WebGPU probe")?;
             let caps = &value["capabilities"];
-            if value["kind"] != "probe" || caps["webgpu"] != true {
-                return Err("native WebGPU unavailable");
+            if value["kind"] != "probe" || value["backend"] != "vulkan" || caps["webgpu"] != true {
+                return Err("native Vulkan compute unavailable");
             }
             let maximum = caps["maxStorageBufferBindingSize"]
                 .as_u64()
@@ -163,6 +166,7 @@ impl SwarmRunner {
             .unwrap_or(Err("native WebGPU probe timed out"));
         terminate(&mut child).await;
         runner.capabilities = result?;
+        tracing::info!(gpu_backend = "vulkan", "native swarm executor ready");
         Ok(runner)
     }
 

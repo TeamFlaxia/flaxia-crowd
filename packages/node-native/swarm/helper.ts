@@ -1,4 +1,4 @@
-// Deno supplies native wgpu (Rust), without Chromium or a DOM.
+// Deno supplies native wgpu (Rust), fixed to Vulkan by the Rust supervisor.
 import { NativeSwarmBridge } from './bridge';
 import { probeWebGpuDetailed } from '../../node/src/executor/webgpuProbe';
 
@@ -13,9 +13,15 @@ async function output(value: unknown) {
   if ((value as any).kind === 'done') Deno.exit(0);
 }
 export async function runHelper(runtime: import('../../node/src/swarm/controller').SwarmRuntime) {
+  // Reject accidental direct starts using Deno's automatic backend selection.
+  // The only environment permission is this single backend selector.
+  if (Deno.env.get('DENO_WEBGPU_BACKEND') !== 'vulkan') {
+    await output({ kind: 'probe', backend: null, capabilities: { webgpu: false } });
+    Deno.exit(1);
+  }
   if (Deno.args[0] === '--probe') {
     const report = await probeWebGpuDetailed();
-    await output({ kind: 'probe', capabilities: report.capabilities });
+    await output({ kind: 'probe', backend: 'vulkan', capabilities: report.capabilities });
     Deno.exit(report.capabilities.webgpu ? 0 : 1);
   }
   const bridge = new NativeSwarmBridge(runtime, output);

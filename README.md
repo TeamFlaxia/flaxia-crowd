@@ -25,7 +25,7 @@ flaxia-crowd/
 ├── packages/
 │   ├── worker/    # Cloudflare Workers オーケストレーター (TaskQueue, Signaling)
 │   ├── node/      # ブラウザノードSDK (ConsentUI, WebRTC, WorkerPool)
-│   ├── node-native/ # Rust製常駐ノード（Linux画像処理・ネイティブWebGPU Swarm推論）
+│   ├── node-native/ # Rust製常駐ノード（Linux画像処理・Vulkan Swarm推論）
 │   └── sdk/       # 依頼者用SDK (Task Submission, Types)
 ```
 

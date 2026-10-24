@@ -334,7 +334,7 @@ impl SlowExecutor {
     fn swarm_config(&self) -> SwarmConfig {
         let marker = self.directory.join("started");
         let script = format!(
-            "#!/bin/sh\ncase \"$*\" in *--probe*) printf '%s' '{{\"kind\":\"probe\",\"capabilities\":{{\"webgpu\":true,\"maxStorageBufferBindingSize\":134217728}}}}'; exit 0;; esac\nIFS= read -r initial\nif [ -e '{}' ]; then printf '%s\\n' '{{\"kind\":\"control\",\"message\":{{\"type\":\"result\",\"taskId\":\"task-1\",\"attemptId\":\"new\",\"sessionId\":\"new\",\"payload\":{{\"confirmed\":true}}}}}}' '{{\"kind\":\"done\"}}'; exit 0; fi\n: > '{}'\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 30\n",
+            "#!/bin/sh\n[ \"$DENO_WEBGPU_BACKEND\" = vulkan ] || exit 1\ncase \"$*\" in *--probe*) printf '%s' '{{\"kind\":\"probe\",\"backend\":\"vulkan\",\"capabilities\":{{\"webgpu\":true,\"maxStorageBufferBindingSize\":134217728}}}}'; exit 0;; esac\nIFS= read -r initial\nif [ -e '{}' ]; then printf '%s\\n' '{{\"kind\":\"control\",\"message\":{{\"type\":\"result\",\"taskId\":\"task-1\",\"attemptId\":\"new\",\"sessionId\":\"new\",\"payload\":{{\"confirmed\":true}}}}}}' '{{\"kind\":\"done\"}}'; exit 0; fi\n: > '{}'\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 30\n",
             marker.display(),
             marker.display(),
             self.pid.display()
@@ -395,4 +395,24 @@ async fn swarm_timeout_disconnect_and_shutdown_reap_executor() {
         harness.finish().await;
         executor.assert_reaped(pid);
     }
+}
+
+#[tokio::test]
+async fn swarm_rejects_probe_without_vulkan_backend_confirmation() {
+    let executor = SlowExecutor::new();
+    let settings = executor.swarm_config();
+    let original = std::fs::read_to_string(&executor.executable).unwrap();
+    for report in ["", "opengl"] {
+        let script = original.replace(
+            "\"backend\":\"vulkan\"",
+            &format!("\"backend\":\"{report}\""),
+        );
+        std::fs::write(&executor.executable, script).unwrap();
+        assert!(
+            flaxia_node_native::swarm::SwarmRunner::prepare(settings.clone(), 5000)
+                .await
+                .is_err()
+        );
+    }
+    assert!(!executor.pid.exists());
 }

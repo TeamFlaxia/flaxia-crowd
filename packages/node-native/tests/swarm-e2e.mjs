@@ -28,7 +28,7 @@ async function until(check, milliseconds = 45000) {
 }
 
 test(
-  'SDK swarm generation uses two native GPU layer slices and reuses the nodes for another generation',
+  'SDK swarm generation uses two Vulkan layer slices and reuses the nodes for another generation',
   { timeout: 180000 },
   async () => {
     const directory = await mkdtemp(join(tmpdir(), 'flaxia-native-swarm-'));
@@ -93,6 +93,10 @@ test(
           assert.equal(child.exitCode, null, state.logs);
           return state.logs.includes('node connected');
         });
+      }
+      for (const state of children) {
+        assert.match(state.logs, /native swarm executor ready/);
+        assert.match(state.logs, /vulkan/);
       }
       const sdk = new FlaxiaClient({ baseUrl, apiKey: 'swarm-e2e-key' });
       for (let index = 0; index < 2; index++) {

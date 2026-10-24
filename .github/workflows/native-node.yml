@@ -52,6 +52,6 @@ jobs:
         run: deno test --no-config --no-npm --cached-only packages/node-native/dist/bridge.test.js
       - name: Install software Vulkan driver for real native GPU tests
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
-      - name: SDK to real worker to two native GPU slices
+      - name: SDK to real worker to two Vulkan slices
         working-directory: .
         run: node --test packages/node-native/tests/swarm-e2e.mjs
