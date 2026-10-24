@@ -8,6 +8,39 @@ pub struct Config {
     pub site_id: String,
     #[serde(default)]
     pub participate: bool,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionConfig {
+    pub image_process: bool,
+    pub memory_limit_mb: u64,
+    pub max_timeout_ms: u64,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            image_process: false,
+            memory_limit_mb: 512,
+            max_timeout_ms: 120_000,
+        }
+    }
+}
+
+impl ExecutionConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(256..=2048).contains(&self.memory_limit_mb)
+            || !(1..=600_000).contains(&self.max_timeout_ms)
+        {
+            return Err(
+                "execution limits: memory_limit_mb must be 256..2048 and max_timeout_ms 1..600000",
+            );
+        }
+        Ok(())
+    }
 }
 
 pub struct Endpoints {
@@ -17,6 +50,7 @@ pub struct Endpoints {
 
 impl Config {
     pub fn endpoints(&self) -> Result<Endpoints, &'static str> {
+        self.execution.validate()?;
         if !self.participate {
             return Err("Set participate = true to explicitly enable this node");
         }
@@ -66,6 +100,7 @@ mod tests {
             orchestrator_url: url.into(),
             site_id: "native-dev".into(),
             participate: true,
+            execution: ExecutionConfig::default(),
         }
     }
 
