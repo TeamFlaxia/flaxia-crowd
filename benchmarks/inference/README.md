@@ -28,7 +28,9 @@ MODEL=/absolute/path/Qwen3.5-2B-Q4_0.gguf CHROME=/usr/bin/google-chrome npm run 
 ```
 
 WebGPUバックエンドは通常の自動選択を使います。特定APIには固定しません。
-CIの `Qwen3.5-2B generation acceptance` はGPU付きのself-hosted Linux runnerで手動実行します。
+CIの `Qwen3.5-2B generation acceptance` はPR・main/developへのpushで自動実行し、手動実行も可能です。
+GitHub標準のUbuntu runnerでWeb / desktopを並列に実行します。WebはChromeのSwiftShader、desktopはMesaによるソフトウェアWebGPUを使う機能試験であり、実GPUハードウェアの性能測定ではありません。
+約1.21 GBの実モデルはSHA-256別にキャッシュし、キャッシュ使用時にもファイルを照合します。生成ログはActions artifactへ保存します。
 実モデルがない・GPUが使えない場合は失敗とし、合成モデルへフォールバックしません。
 結果ログにはtarget・model・quantization・SHA・生成結果を記録します。
 
