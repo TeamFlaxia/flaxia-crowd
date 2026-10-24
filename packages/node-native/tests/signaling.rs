@@ -168,6 +168,7 @@ impl Harness {
             orchestrator_url: self.url.clone(),
             site_id: "native-test".into(),
             participate: true,
+            execution: Default::default(),
         };
         tokio::spawn(run(cfg, stop))
     }
