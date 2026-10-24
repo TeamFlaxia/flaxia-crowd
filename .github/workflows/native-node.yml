@@ -3,12 +3,13 @@ name: Native node
 on:
   push:
     branches: [main, develop]
+  # Also validate stacked pull requests against feature branches.
   pull_request:
-    branches: [main, develop]
 
 jobs:
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/node-native
@@ -24,3 +25,16 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Install SDK and worker test dependencies
+        working-directory: .
+        run: npm ci
+      - name: Build SDK
+        working-directory: .
+        run: npm run build --workspace=@flaxia/sdk
+      - name: SDK to real worker to native node
+        working-directory: .
+        run: node --test packages/node-native/tests/worker-e2e.mjs
