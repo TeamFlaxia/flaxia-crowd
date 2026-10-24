@@ -1,4 +1,43 @@
-# Inference benchmark baseline
+# Generation acceptance baseline
+
+Flaxia Crowdの生成確認は、Web・デスクトップとも **Qwen3.5-2Bの実モデル**を基準にします。
+共通設定は `scripts/swarm-spike/generation-baseline.mjs` です。
+
+| 条件 | 共通値 |
+| --- | --- |
+| model id | `qwen3.5-2b` |
+| GGUF | `unsloth/Qwen3.5-2B-GGUF` / `Qwen3.5-2B-Q4_0.gguf` |
+| 検証 | ファイルサイズとSHA-256をGPU起動前に照合 |
+| prompt | `What is the capital of France? Answer in one sentence.` |
+| output limit | 12 tokens、greedy |
+| Web | 実Chromeのmodule workerでsoloと2-sliceのトークン列を比較 |
+| desktop | SDK → 実workerd → Rustノード2台のレイヤー分割、実モデルで生成 |
+
+両ターゲットで同じファイルを使います。合成GGUFを実モデルの代わりに渡すことはできません。
+標準の生成確認では回答にParisを含むことも確認します。生成品質全般のベンチマークを意味しません。
+
+GPU・Chrome・Deno・Rustを用意し、配布元から実モデルを取得したうえで実行します。
+（約1.21 GB。URLのmain更新によりSHAが変わった場合は、確認してbaselineを更新してください。）
+
+```sh
+npm ci
+npm run build --workspace=@flaxia/sdk
+cargo build --locked --release --manifest-path packages/node-native/Cargo.toml
+MODEL=/absolute/path/Qwen3.5-2B-Q4_0.gguf CHROME=/usr/bin/google-chrome npm run test:generation -- all
+# 個別実行: 最後のallをwebまたはdesktopに変更
+```
+
+WebGPUバックエンドは通常の自動選択を使います。特定APIには固定しません。
+CIの `Qwen3.5-2B generation acceptance` はGPU付きのself-hosted Linux runnerで手動実行します。
+実モデルがない・GPUが使えない場合は失敗とし、合成モデルへフォールバックしません。
+結果ログにはtarget・model・quantization・SHA・生成結果を記録します。
+
+## Synthetic engine/transport checks
+
+以下の小型モデルはCI・回帰試験用です。Qwen3.5-2Bの生成確認を完了した根拠には使いません。
+`packages/node-native/tests/swarm-e2e.mjs` の通常モードもsynthetic transport smoke testです。
+
+## Inference benchmark baseline
 
 This harness gives single-engine and two-slice runs the same synthetic GGUF, prompt token IDs, output limit, device, warmup count, and measured repetition count. It is a deterministic engine/measurement baseline; its layer split passes hidden states inside one Deno process and does not measure browser WebRTC or Internet transport.
 

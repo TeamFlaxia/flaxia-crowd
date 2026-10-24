@@ -52,6 +52,9 @@ jobs:
         run: deno test --no-config --no-npm --cached-only packages/node-native/dist/bridge.test.js
       - name: Install software Vulkan driver for real native GPU tests
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
-      - name: SDK to real worker to two Vulkan slices
+      - name: LM-head binding limits preserve GPU logits
+        working-directory: .
+        run: deno test --unstable-webgpu --no-config --no-npm --cached-only packages/node-native/dist/head-bindings.test.js
+      - name: Synthetic Swarm transport smoke test (real GPU kernels, not Qwen3.5-2B acceptance)
         working-directory: .
         run: node --test packages/node-native/tests/swarm-e2e.mjs

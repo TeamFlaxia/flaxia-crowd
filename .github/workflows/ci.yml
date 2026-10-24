@@ -55,3 +55,6 @@ jobs:
 
       - name: Run tests
         run: npm test --workspaces --if-present
+
+      - name: Shared Qwen3.5-2B generation baseline contracts
+        run: node --test scripts/swarm-spike/generation-baseline.test.mjs scripts/swarm-spike/real-options.test.mjs

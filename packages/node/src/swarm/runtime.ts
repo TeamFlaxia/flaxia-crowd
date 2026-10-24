@@ -315,6 +315,11 @@ export function createSwarmRuntime(
       try {
         const { mod, url, gguf } = await resolve(model);
         device = await requestDevice();
+        let gpuFailure: string | null = null;
+        const observedDevice = device as { addEventListener?: (name: string, handler: () => void) => void; lost?: Promise<unknown> };
+        observedDevice.addEventListener?.('uncapturederror', () => { gpuFailure = 'swarm GPU validation failed'; });
+        void observedDevice.lost?.then(() => { gpuFailure = 'swarm GPU device lost'; });
+        const checkDevice = () => { if (gpuFailure) throw new SwarmEngineUnavailableError(gpuFailure); };
         const tokenizer = mod.makeTokenizer(mod.tokenizerFromGGUF(gguf.meta));
         const semantics = buildSemantics(mod, tokenizer);
         const bytesOf = (info: PooledTensorInfo) =>
@@ -357,10 +362,11 @@ export function createSwarmRuntime(
           batchCols: 4,
           weights,
         });
+        checkDevice();
         const adapter = wrapPooledEngine(engine, device, () => {
           setSwarmModelStatus(statusKey, createSwarmModelCacheEntryStatus(model, slice, 'evicting', 0));
           queueMicrotask(() => activeSwarmModels.delete(statusKey));
-        });
+        }, checkDevice);
         engineOwnsDevice = true;
         setSwarmModelStatus(statusKey, createSwarmModelCacheEntryStatus(model, slice, 'ready', 1));
         const warm = rangeCacheHits > 0 && rangeCacheMisses === 0;

@@ -121,3 +121,11 @@ npm install @flaxia/worker @flaxia/sdk
 
 # wrangler.tomlへの追記は packages/worker/docs/06-wrangler.md を参照
 ```
+
+## 生成テストの基準
+
+- Web・デスクトップ共通で、実モデルの **Qwen3.5-2B Q4_0** を生成確認の基準にする。
+- モデル・SHA-256・共通プロンプトは `scripts/swarm-spike/generation-baseline.mjs`、実行手順は `benchmarks/inference/README.md` を参照する。
+- `npm run test:generation -- all` で両ターゲットを確認する。個別実行は `web` / `desktop`。
+- 小型の合成GGUFはunit・回帰・通信smoke test用。実モデルの生成確認に合格した根拠にはしない。
+- GPUやブラウザが利用できず実行できなかったターゲットは、未検証として報告する。

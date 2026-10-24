@@ -15,3 +15,13 @@ await build({
   loader: { '.gguf': 'binary' },
   alias: { '@flaxia/sdk': url('../../sdk/src/index.ts') },
 });
+
+await build({
+  entryPoints: [url('./head-bindings.test.ts')],
+  outfile: url('../dist/head-bindings.test.js'),
+  bundle: true,
+  format: 'esm',
+  platform: 'neutral',
+  target: 'es2022',
+  loader: { '.gguf': 'binary' },
+});

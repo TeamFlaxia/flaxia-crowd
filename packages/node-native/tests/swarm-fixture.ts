@@ -6,6 +6,8 @@ import * as engine from '../../node/src/swarm/engine-entry.js';
 import { runHelper } from '../swarm/helper';
 const padded = new Uint8Array(Math.max(bytes.length, 12 * 1024 * 1024));
 padded.set(bytes);
+// Test bytes must never be replaced by a persistent production weight cache.
+Object.defineProperty(globalThis, 'caches', { value: undefined, configurable: true });
 globalThis.fetch = async (input: any, options?: any) => {
   if (
     String(input) !==

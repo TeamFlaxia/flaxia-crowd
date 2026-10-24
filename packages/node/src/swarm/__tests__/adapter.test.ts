@@ -96,3 +96,11 @@ describe('wrapPooledEngine', () => {
     expect(onDisposed).toHaveBeenCalledTimes(1);
   });
 });
+
+it('does not publish GPU readback after an asynchronous device error', async () => {
+  const { engine } = fakeEngine();
+  let failed = false;
+  engine.headFromHidden = async () => { failed = true; return new Float32Array([0]); };
+  const adapter = wrapPooledEngine(engine, undefined, undefined, () => { if (failed) throw new Error('GPU validation failed'); });
+  await expect(adapter.headFromHidden(new Float32Array(8))).rejects.toThrow('GPU validation failed');
+});

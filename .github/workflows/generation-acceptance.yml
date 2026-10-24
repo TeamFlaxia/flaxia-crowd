@@ -1,0 +1,44 @@
+name: Qwen3.5-2B generation acceptance
+
+# GPU acceptance is explicitly run on an equipped desktop/browser runner.
+# The normal PR pipeline keeps synthetic transport smoke tests separate.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Generation target
+        type: choice
+        options: [all, web, desktop]
+        default: all
+      model_path:
+        description: Absolute path to the real Qwen3.5-2B Q4_0 GGUF on the runner (SHA-256 checked)
+        required: true
+        type: string
+      chrome_path:
+        description: Trusted Chrome/Chromium executable for the web target
+        default: /usr/bin/google-chrome
+        type: string
+
+jobs:
+  generation:
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 35
+    env:
+      MODEL: ${{ inputs.model_path }}
+      CHROME: ${{ inputs.chrome_path }}
+      GENERATION_TARGET: ${{ inputs.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run build --workspace=@flaxia/sdk
+      - run: cargo build --locked --release --manifest-path packages/node-native/Cargo.toml
+      - name: Web and desktop use the same verified model and prompt
+        run: npm run test:generation -- "$GENERATION_TARGET"

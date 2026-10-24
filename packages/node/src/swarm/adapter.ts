@@ -149,8 +149,14 @@ export async function loadPooledEngineModule(
  * alive would keep the whole model resident in the GPU on a worker that is
  * reused for the next task. Calling it twice is a no-op.
  */
-export function wrapPooledEngine(engine: RawPooledEngine, device?: unknown, onDisposed?: () => void): SwarmEngineAdapter {
+export function wrapPooledEngine(engine: RawPooledEngine, device?: unknown, onDisposed?: () => void, checkDevice?: () => void): SwarmEngineAdapter {
   let disposed = false;
+  const guarded = async (work: () => Promise<Float32Array>): Promise<Float32Array> => {
+    checkDevice?.();
+    const result = await work();
+    checkDevice?.();
+    return result;
+  };
   return {
     get dim() {
       return engine.dims.dim;
@@ -161,11 +167,11 @@ export function wrapPooledEngine(engine: RawPooledEngine, device?: unknown, onDi
     get maxSeq() {
       return engine.maxSeq;
     },
-    reset: () => engine.reset(),
-    embedRun: (token, pos) => engine.embedRun(token, pos),
-    runHidden: (hidden, pos) => engine.runHidden(hidden, pos),
-    headFromHidden: (hidden) => engine.headFromHidden(hidden),
-    setHidden: (hidden) => engine.setHidden(hidden),
+    reset: () => { checkDevice?.(); engine.reset(); },
+    embedRun: (token, pos) => guarded(() => engine.embedRun(token, pos)),
+    runHidden: (hidden, pos) => guarded(() => engine.runHidden(hidden, pos)),
+    headFromHidden: (hidden) => guarded(() => engine.headFromHidden(hidden)),
+    setHidden: (hidden) => { checkDevice?.(); engine.setHidden(hidden); },
     dispose: () => {
       if (disposed) return;
       disposed = true;

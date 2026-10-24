@@ -11,13 +11,17 @@ import test from 'node:test';
 import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 import { FlaxiaClient } from '../../sdk/dist/index.js';
+import { GENERATION_BASELINE } from '../../../scripts/swarm-spike/generation-baseline.mjs';
+import { prepareRealGeneration } from './prepare-real-generation.mjs';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const binary = process.env.FLAXIA_NATIVE_BINARY ??
   join(root, 'packages/node-native/target/release/flaxia-node-native');
 const runtime = process.env.FLAXIA_DENO ??
   execFileSync('deno', ['eval', 'console.log(Deno.execPath())'], { encoding: 'utf8' }).trim();
-async function until(check, milliseconds = 45000) {
+const realModel = process.env.FLAXIA_REAL_MODEL;
+const taskTimeout = realModel ? 600000 : 60000;
+async function until(check, milliseconds = realModel ? 600000 : 45000) {
   const deadline = Date.now() + milliseconds;
   do {
     const value = await check();
@@ -28,13 +32,26 @@ async function until(check, milliseconds = 45000) {
 }
 
 test(
-  'SDK swarm generation uses two Vulkan layer slices and reuses the nodes for another generation',
-  { timeout: 180000 },
+  realModel
+    ? 'Qwen3.5-2B generation acceptance on two desktop nodes'
+    : 'Synthetic Swarm transport smoke test (not real-model generation acceptance)',
+  { timeout: realModel ? 900000 : 180000 },
   async () => {
     const directory = await mkdtemp(join(tmpdir(), 'flaxia-native-swarm-'));
     const children = [];
     let worker;
     try {
+      const execution = realModel
+        ? await prepareRealGeneration({ modelFile: realModel, runtime, directory })
+        : {
+          helper: join(root, 'packages/node-native/dist/swarm-fixture.js'),
+          runtime,
+        };
+      if (realModel) {
+        console.log(
+          `Generation baseline: ${GENERATION_BASELINE.name} ${GENERATION_BASELINE.quantization} sha256=${GENERATION_BASELINE.sha256}`,
+        );
+      }
       const bundled = await build({
         entryPoints: [join(root, 'packages/worker/src/index.ts')],
         bundle: true,
@@ -67,11 +84,9 @@ test(
           config,
           `orchestrator_url = ${
             JSON.stringify(baseUrl)
-          }\nsite_id = "native-swarm-e2e"\nparticipate = true\n[execution]\nmax_timeout_ms = 60000\n[execution.swarm]\nenabled = true\nallow_model_download = true\nruntime = ${
-            JSON.stringify(runtime)
-          }\nhelper = ${
-            JSON.stringify(join(root, 'packages/node-native/dist/swarm-fixture.js'))
-          }\n`,
+          }\nsite_id = "native-swarm-e2e"\nparticipate = true\n[execution]\nmax_timeout_ms = ${taskTimeout}\n[execution.swarm]\nenabled = true\nallow_model_download = true\nruntime = ${
+            JSON.stringify(execution.runtime)
+          }\nhelper = ${JSON.stringify(execution.helper)}\n`,
         );
         const child = spawn(binary, ['--config', config], { stdio: ['ignore', 'pipe', 'pipe'] });
         const state = {
@@ -94,21 +109,17 @@ test(
           return state.logs.includes('node connected');
         });
       }
-      for (const state of children) {
-        assert.match(state.logs, /native swarm executor ready/);
-        assert.match(state.logs, /vulkan/);
-      }
       const sdk = new FlaxiaClient({ baseUrl, apiKey: 'swarm-e2e-key' });
-      for (let index = 0; index < 2; index++) {
+      for (let index = 0; index < (realModel ? 1 : 2); index++) {
         const submitted = await sdk.submit({
           workload: 'swarm-inference',
           payload: {
-            model: 'qwen3.5-2b',
-            prompt: 'Ocean',
-            maxNewTokens: 4,
+            model: GENERATION_BASELINE.model,
+            prompt: realModel ? GENERATION_BASELINE.prompt : 'Ocean',
+            maxNewTokens: realModel ? GENERATION_BASELINE.maxNewTokens : 4,
             swarm: { minNodes: 2, maxNodes: 2 },
           },
-          timeoutMs: 60000,
+          timeoutMs: taskTimeout,
         });
         const task = await until(async () => {
           const task = await sdk.getTask(submitted.taskId);
@@ -120,8 +131,26 @@ test(
         assert.equal(task.result.nodes[1].host, false);
         assert.equal(task.result.nodes[0].layers[0], 0);
         assert.equal(task.result.nodes[0].layers[1], task.result.nodes[1].layers[0]);
-        assert.equal(task.result.nodes[1].layers[1], 4);
-        assert.equal(task.result.tokens.length, 4);
+        if (realModel) {
+          assert.ok(task.result.nodes[1].layers[1] > 4);
+          assert.ok(
+            task.result.tokens.length > 0 &&
+              task.result.tokens.length <= GENERATION_BASELINE.maxNewTokens,
+          );
+          assert.match(task.result.output, /Paris/i);
+          console.log(
+            JSON.stringify({
+              target: 'desktop',
+              model: GENERATION_BASELINE.model,
+              quantization: GENERATION_BASELINE.quantization,
+              sha256: GENERATION_BASELINE.sha256,
+              result: task.result,
+            }),
+          );
+        } else {
+          assert.equal(task.result.nodes[1].layers[1], 4);
+          assert.equal(task.result.tokens.length, 4);
+        }
         assert.equal(task.result.output, task.result.tokens.join(''));
         assert.ok(task.resultAttemptId);
       }

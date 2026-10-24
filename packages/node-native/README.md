@@ -57,9 +57,9 @@ SDKの `ImageProcessPayload` / `ImageProcessResult` を使います。対応操�
 
 ## Swarmによる分割AI推論
 
-Rustの親プロセスが登録・認証・heartbeatとタスクの寿命を管理し、Deno 2.9.6のRust/wgpuのVulkanバックエンドでレイヤースライスを実行します。Denoは既存WGSLエンジンをホストする実行層として残ります。Chromiumやブラウザ画面は起動しません。既存のPooledエンジン、SwarmController、SDKのf16フレーム形式・ホップHMACを共有します。llama.cppの単独生成APIへ置き換えず、既存Swarmとのレイヤー分担を維持します。
+Rustの親プロセスが登録・認証・heartbeatとタスクの寿命を管理し、Deno 2.9.6のネイティブWebGPU（Rust/wgpu）でレイヤースライスを実行します。Chromiumやブラウザ画面は起動しません。既存のPooledエンジン、SwarmController、SDKのf16フレーム形式・ホップHMACを共有します。llama.cppの単独生成APIへ置き換えず、既存Swarmとのレイヤー分担を維持します。
 
-Linux、4 GiB以上のRAM、動作するVulkanドライバー、Deno 2.9.6が必要です。ソフトウェアVulkanでも検証できますが、実モデルには十分なRAM/VRAMと実用的な演算性能が必要です。モデルはブラウザ版と同じ固定レジストリ（SDKの `SUPPORTED_SWARM_MODEL_IDS`）を使用し、ノードは割り当てられたレイヤーとhost用のembedding/headの重みをRange取得します。任意のモデルURL・コードはタスクから指定できません。
+Linux、4 GiB以上のRAM、動作するWebGPUバックエンド・GPUドライバー、Deno 2.9.6が必要です。ソフトウェアVulkanでも検証できますが、実モデルには十分なRAM/VRAMと実用的な演算性能が必要です。モデルはブラウザ版と同じ固定レジストリ（SDKの `SUPPORTED_SWARM_MODEL_IDS`）を使用し、ノードは割り当てられたレイヤーとhost用のembedding/headの重みをRange取得します。任意のモデルURL・コードはタスクから指定できません。
 
 モノレポのルートでヘルパーをビルドします。npmはビルド時だけ必要です。
 
@@ -80,9 +80,7 @@ helper = "/opt/flaxia-crowd/packages/node-native/dist/swarm-helper.js"
 heap_limit_mb = 512
 ```
 
-`enabled` と `allow_model_download` はどちらも既定falseです。ダウンロードの明示同意がない場合や、ヘルパーの起動・Vulkanの実computeプローブに失敗した場合は、ノード登録前に起動を拒否します。実測したWebGPU能力だけを登録し、WASMのメモリ測定値は捏造しません。接続維持のみのモードにはDenoは不要です。
-
-Rustが子の `DENO_WEBGPU_BACKEND=vulkan` を固定します。ヘルパーも同じ指定を確認し、Vulkanで実computeプローブに成功した場合だけ登録します。OpenGL・他のGPU APIへの自動フォールバックは行いません。Denoの環境変数読み取り権限はこの1項目だけに限定します。実行ログの `gpu_backend="vulkan"` が起動成功の確認になります。ソフトウェアVulkan（lavapipe等）はCPU上で動作するため、実GPUを使う運用では対象GPUのVulkanドライバーを導入してください。
+`enabled` と `allow_model_download` はどちらも既定falseです。ダウンロードの明示同意がない場合や、ヘルパーの起動・WebGPUの実computeプローブに失敗した場合は、ノード登録前に起動を拒否します。実測したWebGPU能力だけを登録し、WASMのメモリ測定値は捏造しません。接続維持のみのモードにはDenoは不要です。
 
 SDKから既存の `swarm-inference` を投入します。最低2台の参加ノードと、現在のschedulerが要求する予備候補が必要です。nativeだけのチェーンにも、ブラウザとの混在チェーンにも同じ通信契約を使います。
 
@@ -139,7 +137,7 @@ node --test packages/node-native/tests/worker-e2e.mjs
 
 GitHub Actionsでは同じ試験をLinux上で実行します。既存npmビルドにRustは必須になりません。
 
-Swarmの検証（DenoとVulkanドライバーが必要）:
+Swarmの検証（DenoとWebGPUバックエンドが必要）:
 
 ```bash
 npx tsc -p packages/node-native/tsconfig.json
@@ -149,4 +147,19 @@ deno test --no-config --no-npm --cached-only packages/node-native/dist/bridge.te
 node --test packages/node-native/tests/swarm-e2e.mjs
 ```
 
-Swarm E2Eでは実workerd、Rustノード3台中の2台、Vulkanに固定したネイティブwgpuを使用し、合成Qwen35 GGUFの4レイヤーを2分割して生成を繰り返します。学習済みの大型モデルの品質・性能や実ブラウザとの混在実行を検証したものではありません。Rustの試験でabort/timeout/切断/shutdown後の子プロセス回収、bridge試験でHMAC・attempt・トークンpause/resumeを確認します。
+Swarm E2Eでは実workerd、Rustノード3台中の2台、ネイティブwgpuを使用し、合成Qwen35 GGUFの4レイヤーを2分割して生成を繰り返します。学習済みの大型モデルの品質・性能や実ブラウザとの混在実行を検証したものではありません。Rustの試験でabort/timeout/切断/shutdown後の子プロセス回収、bridge試験でHMAC・attempt・トークンpause/resumeを確認します。
+
+## 実モデルの生成確認
+
+Web・デスクトップ共通の生成基準は **Qwen3.5-2B Q4_0** です。
+`benchmarks/inference/README.md` と `scripts/swarm-spike/generation-baseline.mjs` に
+モデル・SHA-256・共通プロンプトをまとめています。
+
+```bash
+MODEL=/absolute/path/Qwen3.5-2B-Q4_0.gguf npm run test:generation -- desktop
+# Chromeがある場合はweb、または両方を実行するallも選べます。
+```
+
+このモードは実モデルを照合してから、実workerdとRustノード2台で分割生成します。
+テスト専用ヘルパーにそのファイル1個の読み取り権限を渡し、productionと同じRangeローダーへ配信します。
+通常CIの合成モデル試験は通信・回帰確認であり、この実モデル生成試験の代替にはしません。

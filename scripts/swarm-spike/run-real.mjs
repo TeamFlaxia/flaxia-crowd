@@ -12,6 +12,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { resolveRealSpikeOptions } from "./real-options.mjs";
+import { GENERATION_BASELINE, verifyGenerationModel } from "./generation-baseline.mjs";
 import { Qwen35Engine } from "../../vendor/pooled/engine/qwen35.js";
 import {
   parseGGUFHeader,
@@ -29,7 +30,7 @@ const arg = (k, d) => {
   return i >= 0 ? argv[i + 1] : d;
 };
 const URL_ = arg("url", undefined);
-const TOKENS = +arg("tokens", 12);
+const TOKENS = +arg("tokens", GENERATION_BASELINE.maxNewTokens);
 const CACHE = arg("cache", undefined);
 
 let modelUrl;
@@ -78,6 +79,8 @@ function serveFile(file) {
 
 async function main() {
   await ensureModel();
+  await verifyGenerationModel(cachePath);
+  console.log(`Generation baseline: ${GENERATION_BASELINE.name} ${GENERATION_BASELINE.quantization} sha256=${GENERATION_BASELINE.sha256}`);
   const { server, urlBase } = await serveFile(cachePath);
 
   const rangeFetch = async (lo, hi) => {
@@ -129,7 +132,7 @@ async function main() {
     V["<think>"], ...tok.encode("\n\n"), V["</think>"], ...tok.encode("\n\n"),
   ];
   const eos = new Set([V["<|im_end|>"], V["<|endoftext|>"]]);
-  const prompt = chat("What is the capital of France? Answer in one sentence.");
+  const prompt = chat(GENERATION_BASELINE.prompt);
 
   const t1 = performance.now();
   const solo = await mk(0, L, true);
@@ -140,6 +143,7 @@ async function main() {
   while (soloTokens.length < TOKENS && !eos.has(next)) { next = argmax(await solo.forwardToken(next)); soloTokens.push(next); }
   console.log(`solo (${((performance.now() - t1) / 1000).toFixed(1)}s): ${JSON.stringify(tok.decode(soloTokens).slice(0, 160))}`);
 
+  solo.dispose?.();
   const cut = Math.max(1, Math.floor(L / 2));
   const host = await mk(0, cut, true);
   const hop = await mk(cut, L, false);
@@ -165,6 +169,7 @@ async function main() {
   if (gpuErrors.length) console.error("GPU errors:", gpuErrors.slice(0, 3));
   if (new Set(soloTokens).size <= 1) fail("degenerate output");
   if (!same) fail("split diverged from solo");
+  host.dispose?.(); hop.dispose?.(); device.destroy();
   console.log("REAL SPIKE PASS");
 }
 

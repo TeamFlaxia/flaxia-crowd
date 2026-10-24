@@ -1,7 +1,7 @@
 import path from "node:path";
+import { GENERATION_BASELINE } from "./generation-baseline.mjs";
 
-export const PINNED_MODEL_URL =
-  "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf";
+export const PINNED_MODEL_URL = GENERATION_BASELINE.modelUrl;
 export const CACHE_ROOT = "/tmp/flaxia-crowd";
 export const DEFAULT_CACHE = path.join(CACHE_ROOT, "swarm-real.gguf");
 
