@@ -2,3 +2,9 @@
 orchestrator_url = "http://127.0.0.1:8787"
 site_id = "native-dev"
 participate = false
+
+# Linux: explicitly enable execution after opting in above.
+[execution]
+image_process = false
+memory_limit_mb = 512
+max_timeout_ms = 120000

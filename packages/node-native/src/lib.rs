@@ -1,13 +1,20 @@
 pub mod config;
+pub mod executor;
+pub mod image_process;
+mod task_session;
 
 use config::{Config, Endpoints};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use serde::Deserialize;
 use serde_json::json;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     net::TcpStream,
-    time::{Instant, sleep, sleep_until, timeout},
+    time::{Instant, sleep, timeout},
 };
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
@@ -48,10 +55,16 @@ async fn register(
     client: &reqwest::Client,
     endpoints: &Endpoints,
     site_id: &str,
+    runner: Option<&executor::Runner>,
 ) -> Result<Registration, &'static str> {
+    let mut body = json!({ "siteId": site_id, "capabilities": [], "fileSources": false });
+    if let Some(runner) = runner {
+        body["capabilities"] = json!(["image-process"]);
+        body["deviceMemory"] = json!(runner.device_memory_gib);
+    }
     let mut response = client
         .post(endpoints.register.clone())
-        .json(&json!({ "siteId": site_id, "capabilities": [], "fileSources": false }))
+        .json(&body)
         .send()
         .await
         .map_err(|_| "registration transport failed")?;
@@ -92,8 +105,9 @@ async fn connect(
     client: &reqwest::Client,
     endpoints: &Endpoints,
     site_id: &str,
+    runner: Option<&executor::Runner>,
 ) -> Result<(Socket, Instant), &'static str> {
-    let registration = register(client, endpoints, site_id).await?;
+    let registration = register(client, endpoints, site_id, runner).await?;
     let expires =
         Instant::now() + Duration::from_millis(registration.expires_at.saturating_sub(unix_ms()));
     let mut request = endpoints
@@ -111,8 +125,16 @@ async fn connect(
         .map_err(|_| "invalid signal credentials")?,
     );
     let socket_config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_SIGNAL_BYTES))
-        .max_frame_size(Some(MAX_SIGNAL_BYTES));
+        .max_message_size(Some(if runner.is_some() {
+            image_process::MAX_TASK_BYTES
+        } else {
+            MAX_SIGNAL_BYTES
+        }))
+        .max_frame_size(Some(if runner.is_some() {
+            image_process::MAX_TASK_BYTES
+        } else {
+            MAX_SIGNAL_BYTES
+        }));
     let (socket, response) = timeout(
         IO_TIMEOUT,
         connect_async_with_config(request, Some(socket_config), false),
@@ -129,7 +151,7 @@ async fn connect(
         return Err("server did not negotiate node protocol");
     }
     // Don't log server-supplied fields or errors: these can contain credentials.
-    tracing::info!("node connected (capabilities empty; task execution disabled)");
+    tracing::info!(image_process = runner.is_some(), "node connected");
     Ok((socket, expires))
 }
 
@@ -149,58 +171,51 @@ fn pong() -> Message {
     )
 }
 
-async fn session(
-    mut socket: Socket,
-    expires: Instant,
-    stop: &CancellationToken,
-) -> Result<(), &'static str> {
-    // Enclose all session I/O so cancellation can also interrupt a blocked send.
-    let result = tokio::select! {
-        biased;
-        _ = stop.cancelled() => Ok(()),
-        result = async {
-            send(&mut socket, pong()).await?;
-            let mut deadline = Instant::now() + HEARTBEAT_TIMEOUT;
-            loop {
-                tokio::select! {
-                    _ = sleep_until(expires) => return Err("node token expired; rotating registration"),
-                    _ = sleep_until(deadline) => return Err("server heartbeat timed out"),
-                    message = socket.next() => {
-                        match message {
-                            Some(Ok(Message::Text(text))) => {
-                                let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| "invalid signal JSON")?;
-                                match value.get("type").and_then(|t| t.as_str()) {
-                                    Some("ping") => {
-                                        deadline = Instant::now() + HEARTBEAT_TIMEOUT;
-                                        send(&mut socket, pong()).await?;
-                                    }
-                                    // No task can be executed by this phase. Close and let
-                                    // the coordinator release any erroneous assignment.
-                                    Some("task" | "swarm-init" | "swarm-slice" | "swarm-start") => return Err("unexpected task on signaling-only node"),
-                                    _ => {},
-                                }
-                            }
-                            Some(Ok(Message::Ping(payload))) => send(&mut socket, Message::Pong(payload)).await?,
-                            Some(Ok(Message::Close(_))) | None => return Err("signal closed"),
-                            Some(Ok(Message::Binary(_))) => return Err("unexpected binary signal"),
-                            Some(Err(_)) => return Err("signal read failed"),
-                            _ => {},
-                        }
-                    }
-                }
-            }
-        } => result,
+/// Register and maintain a node until cancellation. Execution is opt-in.
+pub async fn run(config: Config, stop: CancellationToken) -> Result<(), &'static str> {
+    config.endpoints()?;
+    let executable = if config.execution.image_process {
+        Some(
+            std::env::current_exe()
+                // Minimal Linux containers may not mount /proc/self/exe. Only an
+                // absolute invocation path can be used as a fallback in that case.
+                .or_else(|_| {
+                    std::env::args_os()
+                        .next()
+                        .filter(|arg| PathBuf::from(arg).is_absolute())
+                        .ok_or_else(|| std::io::Error::other("absolute executable path required"))
+                        .and_then(std::fs::canonicalize)
+                })
+                .map_err(|_| "cannot locate native executor binary")?,
+        )
+    } else {
+        None
     };
-    // Bound close even if the peer has stopped reading. Token lives only in
-    // the registration/handshake and is discarded when this connection ends.
-    let _ = timeout(Duration::from_secs(2), socket.close(None)).await;
-    result
+    run_with_executable(config, stop, executable).await
 }
 
-/// Register and maintain a signaling-only node until cancellation.
-/// Every reconnect obtains a fresh server-issued identity and token.
-pub async fn run(config: Config, stop: CancellationToken) -> Result<(), &'static str> {
+/// Library embedders must supply the trusted flaxia-node-native executable
+/// when enabling image processing; it is launched with the internal child CLI.
+pub async fn run_with_executable(
+    config: Config,
+    stop: CancellationToken,
+    executable: Option<PathBuf>,
+) -> Result<(), &'static str> {
     let endpoints = config.endpoints()?;
+    if stop.is_cancelled() {
+        return Ok(());
+    }
+    let runner = if config.execution.image_process {
+        let path = executable.ok_or("native executor path required")?;
+        let prepared = tokio::select! {
+            biased;
+            _ = stop.cancelled() => return Ok(()),
+            prepared = executor::Runner::prepare(path, config.execution.clone()) => prepared?,
+        };
+        Some(Arc::new(prepared))
+    } else {
+        None
+    };
     let client = reqwest::Client::builder()
         .timeout(IO_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -212,10 +227,12 @@ pub async fn run(config: Config, stop: CancellationToken) -> Result<(), &'static
         let connection = tokio::select! {
             biased;
             _ = stop.cancelled() => break,
-            connection = connect(&client, &endpoints, &config.site_id) => connection,
+            connection = connect(&client, &endpoints, &config.site_id, runner.as_deref()) => connection,
         };
         let result = match connection {
-            Ok((socket, expires)) => session(socket, expires, &stop).await,
+            Ok((socket, expires)) => {
+                task_session::session(socket, expires, &stop, runner.clone()).await
+            }
             Err(error) => Err(error),
         };
         if stop.is_cancelled() {
@@ -245,6 +262,7 @@ pub async fn run(config: Config, stop: CancellationToken) -> Result<(), &'static
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
 
     #[test]
     fn reconnect_delay_is_bounded_even_after_many_failures() {
@@ -264,6 +282,7 @@ mod tests {
                 orchestrator_url: "http://127.0.0.1:1".into(),
                 site_id: "dev".into(),
                 participate: true,
+                execution: Default::default(),
             },
             stop,
         )
@@ -285,7 +304,13 @@ mod tests {
         let mut peer = accepting.await.unwrap();
         let stop = CancellationToken::new();
         let task = tokio::spawn(async move {
-            session(socket, Instant::now() + Duration::from_secs(3600), &stop).await
+            task_session::session(
+                socket,
+                Instant::now() + Duration::from_secs(3600),
+                &stop,
+                None,
+            )
+            .await
         });
         assert_eq!(peer.next().await.unwrap().unwrap(), pong());
         tokio::time::pause();
