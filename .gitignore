@@ -19,6 +19,8 @@ scripts/output/
 # build
 dist/
 build/
+target/
+packages/node-native/node.toml
 .wrangler/
 .vite/
 .next/

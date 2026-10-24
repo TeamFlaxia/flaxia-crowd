@@ -1,0 +1,4 @@
+# Copy to node.toml and explicitly opt in before starting.
+orchestrator_url = "http://127.0.0.1:8787"
+site_id = "native-dev"
+participate = false
