@@ -1,6 +1,6 @@
 # Flaxia Crowd native node
 
-Rust製の常駐ノード。既存オーケストレーターへの登録・WebSocket接続・heartbeat・再接続に加え、Linuxでは `image-process` を実行できます。
+Rust製の常駐ノード。既存オーケストレーターへの登録・WebSocket接続・heartbeat・再接続に加え、Linuxでは `image-process` と、既存ブラウザノードと共通の `swarm-inference` を実行できます。
 
 ## 起動
 
@@ -28,12 +28,12 @@ max_timeout_ms = 120000
 | `site_id` | 診断用識別子。1〜128 UTF-16 code units。サイトの所有権の証明には使わない |
 | `participate` | 既定false。trueになるまでネットワーク接続しない |
 | `execution.image_process` | 既定false。有効化した場合だけ画像処理用子プロセスを検査し、`image-process` を登録する |
-| `execution.memory_limit_mb` | 子プロセスの仮想アドレス空間上限。既定512 MiB、256〜2048 MiB |
+| `execution.memory_limit_mb` | 画像処理の仮想アドレス空間上限。既定512 MiB、256〜2048 MiB |
 | `execution.max_timeout_ms` | 子プロセスの壁時計時間上限。既定120000 ms、1〜600000 ms。タスク指定値との小さい方を使用 |
 
 workerには `NODE_TOKEN_SECRET` が必要です。依頼者用APIキーはこのノードに設定しません。URLの認証情報・query・fragmentは拒否します。ベースURLにパスがある場合、その下に `/crowd/*` を追加します。
 
-画像処理を有効化するにはLinuxと4 GiB以上の物理RAMが必要です。これは既存workerの低メモリ判定に合わせた条件です。実測した物理RAMを `deviceMemory` の診断値として送信し、`wasmMemoryBytes` は送信しません。プローブや上限制御が使えない場合、有効化したノードは登録前に起動を拒否します。画像処理が無効なら、これまでどおり空の `capabilities` で接続維持のみを行います。
+画像処理を有効化するにはLinuxと4 GiB以上の物理RAMが必要です。これは既存workerの低メモリ判定に合わせた条件です。実測した物理RAMを `deviceMemory` の診断値として送信し、`wasmMemoryBytes` は送信しません。プローブや上限制御が使えない場合、有効化したノードは登録前に起動を拒否します。画像処理・Swarmが両方無効なら、空の `capabilities` で接続維持のみを行います。
 
 Ctrl-CまたはSIGTERMで終了します。自動起動サービスは登録しません。ログにはトークン・タスク本文・サーバー応答本文を出しません。
 
@@ -48,12 +48,60 @@ SDKの `ImageProcessPayload` / `ImageProcessResult` を使います。対応操�
 ## タスク制御と実行プロセス
 
 - 1ノード1タスク。すべての結果・エラーに受信した `taskId` と `attemptId` を付けます。実行中および直近256件の同一attemptの重複配信を無視します。
-- 処理は同じバイナリの内部子プロセスへパイプで渡し、親のWebSocket処理は継続します。子は環境変数を継承せず、ペイロードを引数や一時ファイルへ保存しません。
-- 子プロセスはLinuxの `RLIMIT_AS` と `RLIMIT_CPU` を設定し、core dumpを無効にします。CPU時間上限は壁時計予算から算出します。CPU使用率のパーセンテージ制御は行いません。
+- 画像処理は同じバイナリの内部子プロセスへパイプで渡し、親のWebSocket処理は継続します。子は環境変数を継承せず、ペイロードを引数や一時ファイルへ保存しません。
+- 画像処理の子プロセスはLinuxの `RLIMIT_AS` と `RLIMIT_CPU` を設定し、core dumpを無効にします。CPU時間上限は壁時計予算から算出します。CPU使用率のパーセンテージ制御は行いません。
 - `abort`、ローカルtimeout、切断、ノード停止では子を終了・回収します。abortへのエラー返送は行いません。切断前の処理結果を再接続後に返送することもありません。
 - 別attemptのタスクが実行中に重なった場合は接続を終了し、現タスクを停止してworker側の回復処理に委ねます。
 
-プロセス分離とリソース上限は、任意プログラム向けのOSサンドボックスではありません。このバージョンでは同梱の画像処理コードだけを実行します。AI/GPU/Swarmは未対応です。
+プロセス分離とリソース上限は、任意プログラム向けのOSサンドボックスではありません。画像処理は同梱のコードだけを実行します。Swarmの実行方式と上限は次節を参照してください。
+
+## Swarmによる分割AI推論
+
+Rustの親プロセスが登録・認証・heartbeatとタスクの寿命を管理し、Deno 2.9.6のネイティブWebGPU（Rust/wgpu）でレイヤースライスを実行します。Chromiumやブラウザ画面は起動しません。既存のPooledエンジン、SwarmController、SDKのf16フレーム形式・ホップHMACを共有します。llama.cppの単独生成APIへ置き換えず、既存Swarmとのレイヤー分担を維持します。
+
+Linux、4 GiB以上のRAM、動作するWebGPUバックエンド・GPUドライバー、Deno 2.9.6が必要です。ソフトウェアVulkanでも検証できますが、実モデルには十分なRAM/VRAMと実用的な演算性能が必要です。モデルはブラウザ版と同じ固定レジストリ（SDKの `SUPPORTED_SWARM_MODEL_IDS`）を使用し、ノードは割り当てられたレイヤーとhost用のembedding/headの重みをRange取得します。任意のモデルURL・コードはタスクから指定できません。
+
+モノレポのルートでヘルパーをビルドします。npmはビルド時だけ必要です。
+
+```bash
+npm ci
+node packages/node-native/swarm/build.mjs
+cargo build --locked --release --manifest-path packages/node-native/Cargo.toml
+```
+
+設定ファイルの既存 `[execution]` の後に追加してください。両パスは実際の絶対パスに置き換えます。
+
+```toml
+[execution.swarm]
+enabled = true
+allow_model_download = true
+runtime = "/opt/deno/bin/deno"
+helper = "/opt/flaxia-crowd/packages/node-native/dist/swarm-helper.js"
+heap_limit_mb = 512
+```
+
+`enabled` と `allow_model_download` はどちらも既定falseです。ダウンロードの明示同意がない場合や、ヘルパーの起動・WebGPUの実computeプローブに失敗した場合は、ノード登録前に起動を拒否します。実測したWebGPU能力だけを登録し、WASMのメモリ測定値は捏造しません。接続維持のみのモードにはDenoは不要です。
+
+SDKから既存の `swarm-inference` を投入します。最低2台の参加ノードと、現在のschedulerが要求する予備候補が必要です。nativeだけのチェーンにも、ブラウザとの混在チェーンにも同じ通信契約を使います。
+
+```ts
+await client.submit({
+  workload: 'swarm-inference',
+  payload: {
+    model: 'qwen3.5-2b', prompt: 'Explain distributed inference.',
+    maxNewTokens: 32, swarm: { minNodes: 2, maxNodes: 3 },
+  },
+  timeoutMs: 120000,
+});
+```
+
+現段階のnative transportはCoordinatorリレーを使い、`peerReady: false` を通知します。これにより混在チェーンも既存のリレーモードへ切り替わります。WebRTCの直接接続・その帯域上の利点はありません。既存のリレーbyte budgetが適用され、上限超過時はタスクが失敗します。
+
+生成トークン・結果にはtask/session/attemptを付けます。古いattemptの制御、別sessionのフレーム、不正MACは受け付けません。`swarm-flow` による一時停止・再開をトークン境界で適用し、パイプとキューに上限を設けます。abort・切断・timeout・shutdownで子を終了・回収し、次のタスクは新しいプロセスで実行します。プロセスごとに重みを再ロードし、ブラウザのCacheStorageや実行中モデルのwarm cache・prewarmは提供しません。
+
+`execution.max_timeout_ms` はSwarmにも適用します。Swarmには画像処理用の `memory_limit_mb` / `RLIMIT_AS` は適用しません。V8の仮想メモリ予約・GPUドライバーとは両立しないためです。`heap_limit_mb` はV8ヒープだけの上限（既定512、256〜4096 MiB）で、GPU/ドライバー/nativeメモリは含みません。全プロセスの厳密なRAM/VRAM制限が必要な運用では外部のcgroup等を設定してください。子は環境変数を継承せず、Denoのネットワーク権限をモデル配信先に制限し、ファイル・任意コマンド実行の権限を渡しません。
+
+この実装のAI対応範囲は `swarm-inference` です。一般のTransformers.jsパイプライン（分類・音声等）、単独 `ai-inference` / `vector-embed` は広告しません。
 
 ## 通信・再接続
 
@@ -63,7 +111,7 @@ SDKの `ImageProcessPayload` / `ImageProcessResult` を使います。対応操�
 
 再試行上限は1秒→2秒→4秒→…→30秒で、上限の50〜100%のジッターを適用します。60秒以上維持できた接続の後はバックオフをリセットします。登録HTTP・WebSocket handshake/writeは15秒、終了時closeは最大2秒です。HTTPリダイレクトは追跡しません。
 
-画像処理有効時のフレーム・メッセージ上限は24 MiB、接続維持のみの場合は64 KiBです。登録応答は16 KiBまでに制限します。
+画像処理またはSwarm有効時のフレーム・メッセージ上限は24 MiB、接続維持のみの場合は64 KiBです。登録応答は16 KiBまでに制限します。
 
 ## 開発・検証
 
@@ -88,3 +136,15 @@ node --test packages/node-native/tests/worker-e2e.mjs
 ```
 
 GitHub Actionsでは同じ試験をLinux上で実行します。既存npmビルドにRustは必須になりません。
+
+Swarmの検証（DenoとWebGPUバックエンドが必要）:
+
+```bash
+npx tsc -p packages/node-native/tsconfig.json
+node packages/node-native/swarm/build.mjs --test
+node packages/node-native/tests/build-swarm-fixture.mjs
+deno test --no-config --no-npm --cached-only packages/node-native/dist/bridge.test.js
+node --test packages/node-native/tests/swarm-e2e.mjs
+```
+
+Swarm E2Eでは実workerd、Rustノード3台中の2台、ネイティブwgpuを使用し、合成Qwen35 GGUFの4レイヤーを2分割して生成を繰り返します。学習済みの大型モデルの品質・性能や実ブラウザとの混在実行を検証したものではありません。Rustの試験でabort/timeout/切断/shutdown後の子プロセス回収、bridge試験でHMAC・attempt・トークンpause/resumeを確認します。

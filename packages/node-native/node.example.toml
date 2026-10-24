@@ -8,3 +8,14 @@ participate = false
 image_process = false
 memory_limit_mb = 512
 max_timeout_ms = 120000
+
+# Optional native WebGPU Swarm. Requires Linux, Deno 2.9.6 and a GPU backend.
+# Build the helper with: node packages/node-native/swarm/build.mjs
+[execution.swarm]
+enabled = false
+allow_model_download = false
+# Replace these with trusted absolute local paths before enabling.
+runtime = "/opt/deno/bin/deno"
+helper = "/opt/flaxia-crowd/packages/node-native/dist/swarm-helper.js"
+# V8 heap only; GPU/driver/native memory is not included.
+heap_limit_mb = 512

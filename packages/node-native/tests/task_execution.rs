@@ -12,6 +12,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use flaxia_node_native::{
     config::{Config, ExecutionConfig},
     run_with_executable,
+    swarm::SwarmConfig,
 };
 use serde_json::{Value, json};
 use std::{
@@ -36,7 +37,14 @@ struct Server {
     commands: Commands,
 }
 async fn register(State(state): State<Server>, Json(value): Json<Value>) -> Json<Value> {
-    assert_eq!(value["capabilities"], json!(["image-process"]));
+    assert_eq!(
+        value["capabilities"],
+        if value.get("swarm").is_some() {
+            json!(["swarm-inference"])
+        } else {
+            json!(["image-process"])
+        }
+    );
     assert!(value["deviceMemory"].as_f64().unwrap() >= 4.0);
     assert!(value.get("wasmMemoryBytes").is_none());
     state.frames.send(json!({"type":"_registered"})).unwrap();
@@ -82,6 +90,9 @@ impl Drop for Harness {
 }
 impl Harness {
     async fn start(executable: PathBuf, max_timeout_ms: u64) -> Self {
+        Self::start_config(executable, max_timeout_ms, SwarmConfig::default()).await
+    }
+    async fn start_config(executable: PathBuf, max_timeout_ms: u64, swarm: SwarmConfig) -> Self {
         let (commands, rx) = mpsc::unbounded_channel();
         let (tx, frames) = mpsc::unbounded_channel();
         let state = Server {
@@ -94,7 +105,8 @@ impl Harness {
             site_id: "native-test".into(),
             participate: true,
             execution: ExecutionConfig {
-                image_process: true,
+                image_process: !swarm.enabled,
+                swarm,
                 memory_limit_mb: 512,
                 max_timeout_ms,
             },
@@ -312,4 +324,75 @@ async fn overlapping_assignment_closes_connection_and_reaps_first_child() {
     assert_eq!(harness.next().await["type"], "_closed");
     harness.finish().await;
     executor.assert_reaped(pid);
+}
+
+fn swarm_task(attempt: &str) -> Value {
+    json!({"type":"swarm-init","taskId":"task-1","attemptId":attempt,"sessionId":attempt,"model":"qwen3.5-2b","timeoutMs":5000,"members":[{"nodeId":"host","capacity":1},{"nodeId":"peer","capacity":1}],"prompt":"hi","maxNewTokens":4})
+}
+
+impl SlowExecutor {
+    fn swarm_config(&self) -> SwarmConfig {
+        let marker = self.directory.join("started");
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in *--probe*) printf '%s' '{{\"kind\":\"probe\",\"capabilities\":{{\"webgpu\":true,\"maxStorageBufferBindingSize\":134217728}}}}'; exit 0;; esac\nIFS= read -r initial\nif [ -e '{}' ]; then printf '%s\\n' '{{\"kind\":\"control\",\"message\":{{\"type\":\"result\",\"taskId\":\"task-1\",\"attemptId\":\"new\",\"sessionId\":\"new\",\"payload\":{{\"confirmed\":true}}}}}}' '{{\"kind\":\"done\"}}'; exit 0; fi\n: > '{}'\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 30\n",
+            marker.display(),
+            marker.display(),
+            self.pid.display()
+        );
+        std::fs::write(&self.executable, script).unwrap();
+        SwarmConfig {
+            enabled: true,
+            allow_model_download: true,
+            runtime: self.executable.clone(),
+            helper: self.directory.join("trusted-helper.js"),
+            heap_limit_mb: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn swarm_abort_fences_attempt_reaps_child_and_accepts_next_assignment() {
+    let executor = SlowExecutor::new();
+    let settings = executor.swarm_config();
+    let mut harness = Harness::start_config(executor.executable.clone(), 5000, settings).await;
+    harness.send(swarm_task("old"));
+    let pid = executor.started().await;
+    harness.send(json!({"type":"abort","taskId":"task-1","attemptId":"stale"}));
+    harness.send(json!({"type":"ping"}));
+    assert_eq!(harness.next().await["type"], "pong");
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    harness.send(json!({"type":"abort","taskId":"task-1","attemptId":"old"}));
+    harness.send(json!({"type":"ping"}));
+    assert_eq!(harness.next().await["type"], "pong");
+    executor.assert_reaped(pid);
+    harness.send(swarm_task("new"));
+    let result = harness.next().await;
+    assert_eq!(result["type"], "result");
+    assert_eq!(result["sessionId"], "new");
+    assert_eq!(result["payload"], json!({"confirmed":true}));
+    harness.finish().await;
+}
+
+#[tokio::test]
+async fn swarm_timeout_disconnect_and_shutdown_reap_executor() {
+    for mode in ["timeout", "disconnect", "shutdown"] {
+        let executor = SlowExecutor::new();
+        let settings = executor.swarm_config();
+        let mut harness = Harness::start_config(
+            executor.executable.clone(),
+            if mode == "timeout" { 300 } else { 5000 },
+            settings,
+        )
+        .await;
+        harness.send(swarm_task("old"));
+        let pid = executor.started().await;
+        if mode == "disconnect" {
+            harness.commands.send(None).unwrap();
+        }
+        if mode != "shutdown" {
+            assert_eq!(harness.next().await["type"], "_closed");
+        }
+        harness.finish().await;
+        executor.assert_reaped(pid);
+    }
 }

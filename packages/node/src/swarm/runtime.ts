@@ -264,14 +264,16 @@ export function buildSemantics(mod: PooledEngineModule, tok: PooledTokenizer): S
   };
 }
 
-export function createSwarmRuntime(): SwarmRuntime {
+export function createSwarmRuntime(
+  moduleLoader?: () => Promise<PooledEngineModule>,
+): SwarmRuntime {
   let modulePromise: Promise<PooledEngineModule> | null = null;
   let cached: { url: string; gguf: PooledGguf } | null = null;
 
   const getModule = (): Promise<PooledEngineModule> => {
     if (!modulePromise) {
       const url = new URL('./swarm-engine.js', import.meta.url).href;
-      modulePromise = loadPooledEngineModule(url).then((mod) => mod as PooledEngineModule);
+      modulePromise = moduleLoader ? moduleLoader() : loadPooledEngineModule(url).then((mod) => mod as PooledEngineModule);
     }
     return modulePromise;
   };

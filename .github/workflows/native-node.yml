@@ -9,7 +9,7 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: packages/node-native
@@ -38,3 +38,20 @@ jobs:
       - name: SDK to real worker to native node
         working-directory: .
         run: node --test packages/node-native/tests/worker-e2e.mjs
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.6
+      - name: Typecheck and bundle native Swarm helper
+        working-directory: .
+        run: |
+          npx tsc -p packages/node-native/tsconfig.json
+          node packages/node-native/swarm/build.mjs --test
+          node packages/node-native/tests/build-swarm-fixture.mjs
+      - name: Native hop authentication and token flow
+        working-directory: .
+        run: deno test --no-config --no-npm --cached-only packages/node-native/dist/bridge.test.js
+      - name: Install software Vulkan driver for real native GPU tests
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - name: SDK to real worker to two native GPU slices
+        working-directory: .
+        run: node --test packages/node-native/tests/swarm-e2e.mjs

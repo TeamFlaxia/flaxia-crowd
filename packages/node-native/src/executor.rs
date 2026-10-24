@@ -25,7 +25,7 @@ pub struct Runner {
 // Physical RAM is the existing deviceMemory hint, not a claim about WASM
 // allocation. Never substitute this value for wasmMemoryBytes.
 #[cfg(target_os = "linux")]
-fn physical_memory_gib() -> Option<f64> {
+pub(crate) fn physical_memory_gib() -> Option<f64> {
     // SAFETY: sysconf takes no pointers; nonpositive results are rejected.
     let (pages, size) = unsafe {
         (
@@ -39,7 +39,7 @@ fn physical_memory_gib() -> Option<f64> {
     Some((pages as f64 * size as f64) / (1024.0 * 1024.0 * 1024.0))
 }
 #[cfg(not(target_os = "linux"))]
-fn physical_memory_gib() -> Option<f64> {
+pub(crate) fn physical_memory_gib() -> Option<f64> {
     None
 }
 
