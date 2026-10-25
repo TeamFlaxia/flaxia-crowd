@@ -3,12 +3,13 @@ name: Native node
 on:
   push:
     branches: [main, develop]
+  # Also validate stacked pull requests against feature branches.
   pull_request:
-    branches: [main, develop]
 
 jobs:
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: packages/node-native
@@ -24,3 +25,36 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Install SDK and worker test dependencies
+        working-directory: .
+        run: npm ci
+      - name: Build SDK
+        working-directory: .
+        run: npm run build --workspace=@flaxia/sdk
+      - name: SDK to real worker to native node
+        working-directory: .
+        run: node --test packages/node-native/tests/worker-e2e.mjs
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.6
+      - name: Typecheck and bundle native Swarm helper
+        working-directory: .
+        run: |
+          npx tsc -p packages/node-native/tsconfig.json
+          node packages/node-native/swarm/build.mjs --test
+          node packages/node-native/tests/build-swarm-fixture.mjs
+      - name: Native hop authentication and token flow
+        working-directory: .
+        run: deno test --no-config --no-npm --cached-only packages/node-native/dist/bridge.test.js
+      - name: Install software Vulkan driver for real native GPU tests
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - name: LM-head binding limits preserve GPU logits
+        working-directory: .
+        run: deno test --unstable-webgpu --no-config --no-npm --cached-only packages/node-native/dist/head-bindings.test.js
+      - name: Synthetic Swarm transport smoke test (real GPU kernels, not Qwen3.5-2B acceptance)
+        working-directory: .
+        run: node --test packages/node-native/tests/swarm-e2e.mjs

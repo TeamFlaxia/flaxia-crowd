@@ -264,14 +264,16 @@ export function buildSemantics(mod: PooledEngineModule, tok: PooledTokenizer): S
   };
 }
 
-export function createSwarmRuntime(): SwarmRuntime {
+export function createSwarmRuntime(
+  moduleLoader?: () => Promise<PooledEngineModule>,
+): SwarmRuntime {
   let modulePromise: Promise<PooledEngineModule> | null = null;
   let cached: { url: string; gguf: PooledGguf } | null = null;
 
   const getModule = (): Promise<PooledEngineModule> => {
     if (!modulePromise) {
       const url = new URL('./swarm-engine.js', import.meta.url).href;
-      modulePromise = loadPooledEngineModule(url).then((mod) => mod as PooledEngineModule);
+      modulePromise = moduleLoader ? moduleLoader() : loadPooledEngineModule(url).then((mod) => mod as PooledEngineModule);
     }
     return modulePromise;
   };
@@ -313,6 +315,11 @@ export function createSwarmRuntime(): SwarmRuntime {
       try {
         const { mod, url, gguf } = await resolve(model);
         device = await requestDevice();
+        let gpuFailure: string | null = null;
+        const observedDevice = device as { addEventListener?: (name: string, handler: () => void) => void; lost?: Promise<unknown> };
+        observedDevice.addEventListener?.('uncapturederror', () => { gpuFailure = 'swarm GPU validation failed'; });
+        void observedDevice.lost?.then(() => { gpuFailure = 'swarm GPU device lost'; });
+        const checkDevice = () => { if (gpuFailure) throw new SwarmEngineUnavailableError(gpuFailure); };
         const tokenizer = mod.makeTokenizer(mod.tokenizerFromGGUF(gguf.meta));
         const semantics = buildSemantics(mod, tokenizer);
         const bytesOf = (info: PooledTensorInfo) =>
@@ -355,10 +362,11 @@ export function createSwarmRuntime(): SwarmRuntime {
           batchCols: 4,
           weights,
         });
+        checkDevice();
         const adapter = wrapPooledEngine(engine, device, () => {
           setSwarmModelStatus(statusKey, createSwarmModelCacheEntryStatus(model, slice, 'evicting', 0));
           queueMicrotask(() => activeSwarmModels.delete(statusKey));
-        });
+        }, checkDevice);
         engineOwnsDevice = true;
         setSwarmModelStatus(statusKey, createSwarmModelCacheEntryStatus(model, slice, 'ready', 1));
         const warm = rangeCacheHits > 0 && rangeCacheMisses === 0;

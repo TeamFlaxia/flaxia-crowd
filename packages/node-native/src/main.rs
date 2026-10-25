@@ -4,19 +4,39 @@ use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Flaxia Crowd native node (signaling only; no task execution)"
-)]
+#[command(version, about = "Flaxia Crowd native node")]
 struct Cli {
     #[arg(long, default_value = "node.toml")]
     config: PathBuf,
+    #[arg(long, hide = true)]
+    execute_image: bool,
+    #[arg(long, hide = true)]
+    executor_probe: bool,
+    #[arg(long, hide = true, default_value_t = 512)]
+    memory_limit_mb: u64,
+    #[arg(long, hide = true, default_value_t = 120)]
+    cpu_limit_seconds: u64,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), &'static str> {
-    tracing_subscriber::fmt().with_target(false).init();
+fn main() -> Result<(), &'static str> {
     let cli = Cli::parse();
+    if cli.execute_image {
+        return flaxia_node_native::executor::child_main(
+            cli.memory_limit_mb,
+            cli.cpu_limit_seconds,
+            cli.executor_probe,
+        );
+    }
+    tracing_subscriber::fmt().with_target(false).init();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|_| "Cannot start node runtime")?
+        .block_on(start(cli))
+}
+
+async fn start(cli: Cli) -> Result<(), &'static str> {
     let text = std::fs::read_to_string(cli.config).map_err(|_| "Cannot read node config")?;
     let config: Config =
         toml::from_str(&text).map_err(|_| "Invalid node config; see node.example.toml")?;

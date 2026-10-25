@@ -890,8 +890,9 @@ describe('SignalingClient', () => {
     // Outbound: what the engine hands over is signed with the outbound hop key.
     const outboundFrame = encodeSwarmFrame({ requestId: 1, pos: 1, tokens: 1 }, new Uint8Array(8));
     workerFrames('sess-mac', outboundFrame);
-    await flush();
-    await flush();
+    // WebCrypto completes outside the timer/microtask queue. Wait for the
+    // signed frame itself instead of assuming two event-loop turns suffice.
+    await vi.waitFor(() => expect(sentRaw().some((m) => typeof m !== 'string')).toBe(true));
 
     const binary = sentRaw().find((m) => typeof m !== 'string') as ArrayBuffer | undefined;
     expect(binary).toBeDefined();

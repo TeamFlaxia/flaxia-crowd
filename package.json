@@ -16,11 +16,13 @@
     "spike:swarm": "deno run --unstable-webgpu --allow-read scripts/swarm-spike/run-synth.mjs",
     "spike:swarm-real": "deno run --unstable-webgpu --allow-read=vendor/pooled,/tmp/flaxia-crowd --allow-write=/tmp/flaxia-crowd --allow-net=huggingface.co,cdn-lfs.huggingface.co,cas-bridge.xethub.hf.co,transfer.xethub.hf.co,127.0.0.1,localhost scripts/swarm-spike/run-real.mjs",
     "spike:real-worker": "node scripts/swarm-spike/check-real-worker.mjs",
-    "spike:webgpu-worker": "node scripts/swarm-spike/check-webgpu-worker.mjs"
+    "spike:webgpu-worker": "node scripts/swarm-spike/check-webgpu-worker.mjs",
+    "test:generation": "node scripts/swarm-spike/test-generation.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.0",
     "jsdom": "^29.1.1",
+    "miniflare": "3.20250718.3",
     "typescript": "^6.0.3",
     "vite": "^8.0.13"
   }

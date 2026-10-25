@@ -15,13 +15,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_CACHE } from './real-options.mjs';
+import { GENERATION_BASELINE, verifyGenerationModel } from './generation-baseline.mjs';
 
 const CHROME = process.env.CHROME || '/usr/bin/google-chrome';
 // Use a trusted local browser binary; this harness only navigates to its
 // loopback fixture and keeps the CDP endpoint bound to loopback.
 const MODEL = process.env.MODEL || DEFAULT_CACHE;
 const GPU = process.env.CHROME_GPU || 'real';
-const TOKENS = process.env.TOKENS || '6';
+const TOKENS = process.env.TOKENS || String(GENERATION_BASELINE.maxNewTokens);
 const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 900000);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ENGINE_DIR = path.resolve(HERE, '../../vendor/pooled/engine');
@@ -30,6 +31,9 @@ if (!existsSync(MODEL)) {
   console.error(`model not found: ${MODEL} (run: npm run spike:swarm-real first, or set MODEL=)`);
   process.exit(1);
 }
+
+await verifyGenerationModel(MODEL);
+console.log(`Generation baseline: ${GENERATION_BASELINE.name} ${GENERATION_BASELINE.quantization} sha256=${GENERATION_BASELINE.sha256}`);
 
 const WORKER_JS = `
 import { Qwen35Engine } from '/engine/qwen35.js';
@@ -92,7 +96,7 @@ try {
     ? `chat(${JSON.stringify(process.env.CHAT_PROMPT)})`
     : process.env.PROMPT
       ? `tok.encode(${JSON.stringify(process.env.PROMPT)})`
-      : `chat('What is the capital of France? Answer in one sentence.')`};
+      : `chat(${JSON.stringify(GENERATION_BASELINE.prompt)})`};
 
   report({ stage: 'solo-load' });
   const solo = await mk(0, L, true);
@@ -103,6 +107,7 @@ try {
   while (soloTokens.length < TOKENS && !eos.has(next)) { next = argmax(await solo.forwardToken(next)); soloTokens.push(next); }
   const soloText = tok.decode(soloTokens);
 
+  solo.dispose?.();
   report({ stage: 'split-load', soloText });
   const cut = Math.max(1, Math.floor(L / 2));
   const host = await mk(0, cut, true);
@@ -187,7 +192,7 @@ class Cdp {
 }
 
 const GPU_FLAGS = {
-  real: ['--enable-unsafe-webgpu', '--use-angle=vulkan', '--enable-features=Vulkan', '--ignore-gpu-blocklist'],
+  real: ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist'],
   swiftshader: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'],
 };
 
@@ -288,6 +293,8 @@ async function main() {
       console.error('FAIL: split diverged from solo');
       process.exitCode = 1;
     } else {
+      console.log(JSON.stringify({ target: 'web', model: GENERATION_BASELINE.model, quantization: GENERATION_BASELINE.quantization, sha256: GENERATION_BASELINE.sha256, result }));
+      if (!/Paris/i.test(result.soloText) && !process.env.PROMPT && (!process.env.CHAT_PROMPT || process.env.CHAT_PROMPT === GENERATION_BASELINE.prompt)) throw new Error('baseline response did not answer Paris');
       console.log(`PASS: real model ran in a worker; solo == split == ${JSON.stringify(result.soloText)}`);
     }
     ws.close();
