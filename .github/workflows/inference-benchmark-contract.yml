@@ -1,0 +1,8 @@
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíÛÎS¢Ö¥¢ëiºÙbë5name: Inference benchmark contract
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/benchmarks/**'
+      - 'scripts/swarm-spike/run-synth.mjs'
+      -×Îm¢G§²ÚîÆ­yĞ€€€€´ÕÍ•Ìè…Ñ¥½¹Ì½¡•­½ÕÑØĞ(€€€€€€´ÕÍ•Ìè…Ñ¥½¹Ì½Í•ÑÕÀµ¹½‘•ØĞ(€€€€€€€İ¥Ñ è(€€€€€€€€€¹½‘”µÙ•ÉÍ¥½¸è€ÈÈ¹à(€€€€€€´ÉÕ¸è¹Á´ÉÕ¸Ñ•ÍĞé‰•¹¡µ…É­Ì(

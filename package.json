@@ -1,29 +1,8 @@
-{
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíçS¢Ö¥¢ëiºÙbë5{
   "name": "flaxia-crowd",
   "private": true,
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace=@flaxia/sdk && npm run build --workspace=@flaxia/node && npm run build --workspace=@flaxia/text-analyzer && npm run build --workspace=@flaxia/worker",
-    "test": "npm run build --workspace=@flaxia/sdk && npm test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "deploy:worker": "npm run deploy --workspace=packages/worker",
-    "dev:worker": "npm run dev --workspace=packages/worker",
-    "dev:node": "npm run dev --workspace=packages/node",
-    "dev:text-analyzer": "npm run dev --workspace=packages/text-analyzer",
-    "dev:translation": "npm run dev --workspace=packages/translation",
-    "spike:swarm": "deno run --unstable-webgpu --allow-read scripts/swarm-spike/run-synth.mjs",
-    "spike:swarm-real": "deno run --unstable-webgpu --allow-read=vendor/pooled,/tmp/flaxia-crowd --allow-write=/tmp/flaxia-crowd --allow-net=huggingface.co,cdn-lfs.huggingface.co,cas-bridge.xethub.hf.co,transfer.xethub.hf.co,127.0.0.1,localhost scripts/swarm-spike/run-real.mjs",
-    "spike:real-worker": "node scripts/swarm-spike/check-real-worker.mjs",
-    "spike:webgpu-worker": "node scripts/swarm-spike/check-webgpu-worker.mjs",
-    "test:generation": "node scripts/swarm-spike/test-generation.mjs"
-  },
-  "devDependencies": {
-    "esbuild": "^0.28.0",
-    "jsdom": "^29.1.1",
-    "miniflare": "3.20250718.3",
-    "typescript": "^6.0.3",
-    "vite": "^8.0.13"
-  }
-}
+    "build": "npm run build --workspace=@flaxia/ãm¢G§²ÚîÆ­yÕ¹¥•Ìˆèì(€€€€‰•Í‰Õ¥±ˆè€‰xÀ¸Èà¸Àˆ°(€€€€‰©Í‘½´ˆè€‰xÈä¸Ä¸Äˆ°(€€€€‰µ¥¹¥™±…É”ˆè€ˆÌ¸ÈÀÈÔÀÜÄà¸Ìˆ°(€€€€‰ÑåÁ•ÍÉ¥ÁĞˆè€‰xØ¸À¸Ìˆ°(€€€€‰Ù¥Ñ”ˆè€‰xà¸À¸ÄÌˆ(€ô)ô

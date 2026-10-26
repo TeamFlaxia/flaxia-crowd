@@ -1,96 +1,1 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/TeamFlaxia/flaxia-crowd/benchmarks/inference-result.schema.json",
-  "title": "Flaxia inference benchmark sample",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schemaVersion", "runId", "timestamp", "status", "mode", "scenario",
-    "model", "environment", "conditions", "metrics", "metricSources", "unavailableReasons"
-  ],
-  "properties": {
-    "schemaVersion": { "const": 1 },
-    "runId": { "type": "string", "minLength": 1 },
-    "timestamp": { "type": "string", "format": "date-time" },
-    "status": { "enum": ["completed", "failed", "unavailable"] },
-    "mode": { "enum": ["single", "split"] },
-    "scenario": {
-      "type": "object",
-      "required": ["id", "latencyMs", "bandwidthMbps", "dropAfterTokens", "memoryBudgetMiB", "estimatedMinimumBytes"],
-      "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "latencyMs": { "type": "number", "minimum": 0 },
-        "bandwidthMbps": { "type": ["number", "null"], "exclusiveMinimum": 0 },
-        "dropAfterTokens": { "type": ["integer", "null"], "minimum": 1 },
-        "memoryBudgetMiB": { "type": ["number", "null"], "minimum": 0 },
-        "estimatedMinimumBytes": { "type": "number", "minimum": 0 }
-      },
-      "additionalProperties": false
-    },
-    "model": {
-      "type": "object",
-      "required": ["id", "revision", "quantization"],
-      "properties": {
-        "id": { "type": "string" },
-        "revision": { "type": "string" },
-        "quantization": { "type": "string" }
-      },
-      "additionalProperties": false
-    },
-    "environment": {
-      "type": "object",
-      "required": ["runtime", "runtimeVersion", "os", "architecture", "browser", "gpu"],
-      "properties": {
-        "runtime": { "type": "string" },
-        "runtimeVersion": { "type": "string" },
-        "os": { "type": "string" },
-        "architecture": { "type": "string" },
-        "browser": { "type": ["string", "null"] },
-        "gpu": {
-          "type": "object",
-          "required": ["vendor", "architecture"],
-          "properties": { "vendor": { "type": ["string", "null"] }, "architecture": { "type": ["string", "null"] } },
-          "additionalProperties": false
-        }
-      },
-      "additionalProperties": false
-    },
-    "conditions": {
-      "type": "object",
-      "required": ["warmups", "repeats", "inputTokens", "requestedOutputTokens", "topology"],
-      "properties": {
-        "warmups": { "type": "integer", "minimum": 0 },
-        "repeats": { "type": "integer", "minimum": 1 },
-        "inputTokens": { "type": "integer", "minimum": 0 },
-        "requestedOutputTokens": { "type": "integer", "minimum": 1 },
-        "topology": { "enum": ["one-node", "two-node-layer-split"] }
-      },
-      "additionalProperties": false
-    },
-    "metrics": {
-      "type": "object",
-      "required": ["coldLoadMs", "warmPrepareMs", "ttftMs", "prefillMs", "decodeMs", "tokensPerSecond", "totalMs", "networkBytes", "peakMemoryBytes"],
-      "properties": {
-        "coldLoadMs": { "type": ["number", "null"], "minimum": 0 },
-        "warmPrepareMs": { "type": ["number", "null"], "minimum": 0 },
-        "ttftMs": { "type": ["number", "null"], "minimum": 0 },
-        "prefillMs": { "type": ["number", "null"], "minimum": 0 },
-        "decodeMs": { "type": ["number", "null"], "minimum": 0 },
-        "tokensPerSecond": { "type": ["number", "null"], "minimum": 0 },
-        "totalMs": { "type": ["number", "null"], "minimum": 0 },
-        "networkBytes": { "type": ["number", "null"], "minimum": 0 },
-        "peakMemoryBytes": { "type": ["number", "null"], "minimum": 0 }
-      },
-      "additionalProperties": false
-    },
-    "metricSources": {
-      "type": "object",
-      "additionalProperties": { "enum": ["measured", "estimated", "unknown"] }
-    },
-    "unavailableReasons": {
-      "type": "object",
-      "additionalProperties": { "type": "string" }
-    },
-    "error": { "type": "string" }
-  }
-}
+Y™Áäx-ÆÈ‹j◊ù¢Îi∫⁄+äßj[hëÈ‹¢ÈÌ◊›<NãZñã≠¶Îeäw¨’Ï(ÄÄàëÕç°ïµÑàËÄâ°——¡ÃËºΩ©ÕΩ∏µÕç°ïµÑπΩ…úΩë…Öô–º»¿»¿¥ƒ»ΩÕç°ïµÑà∞(ÄÄàë•êàËÄâ°——¡ÃËºΩù•—°’àπçΩ¥ΩQïÖµ±Ö·•ÑΩô±Ö·•Ñµç…Ω›êΩâ±ΩàΩµÖ•∏ΩÕç…•¡—ÃΩâïπç°µÖ…≠ÃΩ•πôïÀ_4Ú⁄$z{-ÆÈ‹j◊ùù[ò]òZ[XõTôX\€€ú»éà¬àù\HéàõÿöôX›ãàòY][€ò[õ‹\ùY\»éà»ù\Héàú›ö[ô»àBàKàô\úõ‹àéà»ù\Héàú›ö[ô»àBàBüB
