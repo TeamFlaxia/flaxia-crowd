@@ -1,1 +1,132 @@
-YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×Ý<N‹Z–‹­¦ëeŠw¬Õì(€€ˆ‘Í¡•µ„ˆè€‰¡ÑÑÁÌè¼½©Í½¸µÍ¡•µ„¹½Éœ½‘É…™Ð¼ÈÀÈÀ´ÄÈ½Í¡•µ„ˆ°(€€ˆ‘¥ˆè€‰¡ÑÑÁÌè¼½¥Ñ¡Õˆ¹½´½Q•…µ±…á¥„½™±…á¥„µÉ½Ý½‰±½ˆ½µ…¥¸½ÍÉ¥ÁÑÌ½‰•¹¡µ…É­Ì½¥¹™•Ë_4òÚ$z{-®éÜj×[˜]˜Z[X›T™X\ÛÛœÈŽˆÂˆ\HŽˆ›Øš™XÝ‹ˆ˜Y][Û˜[›Ü\Y\ÈŽˆÈ\HŽˆœÝš[™ÈˆBˆKˆ™\œ›ÜˆŽˆÈ\HŽˆœÝš[™ÈˆBˆBŸB
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TeamFlaxia/flaxia-crowd/blob/main/scripts/benchmarks/inference-result.schema.json",
+  "title": "Flaxia inference benchmark sample",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "runId", "sampleId", "timestamp", "status", "expectedOutcome", "mode", "scenario",
+    "model", "cluster", "environment", "conditions", "metrics", "metricSources", "unavailableReasons"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "runId": { "type": "string", "minLength": 1 },
+    "sampleId": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "status": { "enum": ["completed", "failed", "unavailable"] },
+    "expectedOutcome": { "enum": ["completed", "failed", "unavailable"] },
+    "mode": { "enum": ["single", "split"] },
+    "scenario": {
+      "type": "object",
+      "required": ["id", "latencyMs", "bandwidthMbps", "dropAfterTokens", "memoryBudgetMiB", "estimatedMinimumBytes"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "latencyMs": { "type": "number", "minimum": 0 },
+        "bandwidthMbps": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "dropAfterTokens": { "type": ["integer", "null"], "minimum": 1 },
+        "memoryBudgetMiB": { "type": ["number", "null"], "minimum": 0 },
+        "estimatedMinimumBytes": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "model": {
+      "type": "object",
+      "required": ["id", "revision", "quantization"],
+      "properties": {
+        "id": { "type": "string" },
+        "revision": { "type": "string" },
+        "quantization": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "cluster": {
+      "type": "object",
+      "required": ["transport", "nodeCount", "nodes"],
+      "properties": {
+        "transport": { "enum": ["in-process-simulation", "webworker", "webrtc", "unknown"] },
+        "nodeCount": { "type": "integer", "minimum": 1 },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["role", "layerStart", "layerEnd"],
+            "properties": {
+              "role": { "enum": ["host", "worker"] },
+              "layerStart": { "type": "integer", "minimum": 0 },
+              "layerEnd": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "environment": {
+      "type": "object",
+      "required": ["runtime", "runtimeVersion", "os", "architecture", "browser", "browserVersion", "codeRevision", "gpu"],
+      "properties": {
+        "runtime": { "type": "string" },
+        "runtimeVersion": { "type": "string" },
+        "os": { "type": "string" },
+        "architecture": { "type": "string" },
+        "browser": { "type": ["string", "null"] },
+        "browserVersion": { "type": ["string", "null"] },
+        "codeRevision": { "type": ["string", "null"] },
+        "gpu": {
+          "type": "object",
+          "required": ["vendor", "architecture", "device"],
+          "properties": {
+            "vendor": { "type": ["string", "null"] },
+            "architecture": { "type": ["string", "null"] },
+            "device": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "conditions": {
+      "type": "object",
+      "required": ["warmups", "repeats", "repeatIndex", "inputTokens", "requestedOutputTokens", "actualOutputTokens", "promptId", "sampling", "topology"],
+      "properties": {
+        "warmups": { "type": "integer", "minimum": 0 },
+        "repeats": { "type": "integer", "minimum": 1 },
+        "repeatIndex": { "type": "integer", "minimum": 0 },
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "requestedOutputTokens": { "type": "integer", "minimum": 1 },
+        "actualOutputTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "promptId": { "type": "string", "minLength": 1 },
+        "sampling": { "enum": ["greedy", "other"] },
+        "topology": { "enum": ["one-node", "two-node-layer-split"] }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["coldLoadMs", "warmPrepareMs", "ttftMs", "prefillMs", "decodeMs", "tokensPerSecond", "totalMs", "networkBytes", "peakMemoryBytes"],
+      "properties": {
+        "coldLoadMs": { "type": ["number", "null"], "minimum": 0 },
+        "warmPrepareMs": { "type": ["number", "null"], "minimum": 0 },
+        "ttftMs": { "type": ["number", "null"], "minimum": 0 },
+        "prefillMs": { "type": ["number", "null"], "minimum": 0 },
+        "decodeMs": { "type": ["number", "null"], "minimum": 0 },
+        "tokensPerSecond": { "type": ["number", "null"], "minimum": 0 },
+        "totalMs": { "type": ["number", "null"], "minimum": 0 },
+        "networkBytes": { "type": ["number", "null"], "minimum": 0 },
+        "peakMemoryBytes": { "type": ["number", "null"], "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "metricSources": {
+      "type": "object",
+      "required": ["coldLoadMs", "warmPrepareMs", "ttftMs", "prefillMs", "decodeMs", "tokensPerSecond", "totalMs", "networkBytes", "peakMemoryBytes"],
+      "additionalProperties": { "enum": ["measured", "estimated", "unknown"] }
+    },
+    "unavailableReasons": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "error": { "type": "string" }
+  }
+}
