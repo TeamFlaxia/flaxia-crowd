@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { originMatchesPattern } from '../origin'
 import type { Env } from '../index'
 import type { SwarmNodeCapabilities, TaskRecord, WarmModelRange, WorkloadType } from '@flaxia/sdk'
 import { isTaskPriority, TASK_PRIORITY_DEFAULT } from '../worker/queue-scheduler'
@@ -38,14 +39,7 @@ const MAX_SITE_ID_CHARS = 128
 function originAllowed(origin: string, env: Env): boolean {
   const allowed = (env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
   if (allowed.length === 0) return true
-  return allowed.some(pattern => {
-    if (pattern === origin) return true
-    if (pattern.startsWith('*.')) {
-      const suffix = pattern.slice(2)
-      return origin === suffix || origin.endsWith(`.${suffix}`)
-    }
-    return false
-  })
+  return allowed.some(pattern => originMatchesPattern(origin, pattern))
 }
 
 /**
