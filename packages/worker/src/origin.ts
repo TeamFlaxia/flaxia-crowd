@@ -21,7 +21,7 @@ export function originMatchesPattern(origin: string, pattern: string): boolean {
     return parsed.hostname !== suffix && parsed.hostname.endsWith(`.${suffix}`)
   }
 
-  const match = /^([a-z][a-z\\d+.-]*):\\/\\/\\*\\.([^/:?#]+)$/i.exec(pattern)
+  const match = /^([a-z][a-z\d+.-]*):\/\/\*\.([^/:?#]+)$/i.exec(pattern)
   if (!match) return false
   const [, scheme, rawSuffix] = match
   const suffix = rawSuffix.toLowerCase()
