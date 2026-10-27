@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { originMatchesPattern } from './origin'
 import { cors } from 'hono/cors'
 import { crowdApp } from './crowd'
 export { Coordinator } from './worker/Coordinator'
@@ -38,11 +39,7 @@ const corsMiddleware = cors({
     if (allowed.includes('*')) return origin || '*'
     if (!origin) return allowed[0]
     for (const pattern of allowed) {
-      if (pattern === origin) return origin
-      if (pattern.startsWith('*.')) {
-        const suffix = pattern.slice(2)
-        if (origin === suffix || origin.endsWith(`.${suffix}`)) return origin
-      }
+      if (originMatchesPattern(origin, pattern)) return origin
     }
     return allowed[0]
   },
