@@ -13,15 +13,21 @@ function validSha(value) {
 
 function resolveCommitSha() {
   const buildSha = validSha(process.env.WORKERS_CI_COMMIT_SHA) || validSha(process.env.GITHUB_SHA)
-  if (buildSha) return buildSha
-
   try {
-    return validSha(execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
-      cwd: workerRoot,
-      encoding: 'utf8',
-    })) || 'unknown'
+    const head = validSha(execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
+      cwd: workerRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }))
+    const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], {
+      cwd: workerRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    // A modified checkout or a CI SHA for a different checkout cannot identify the deployed code.
+    if (dirty || (buildSha && head && buildSha.toLowerCase() !== head.toLowerCase())) {
+      return 'unknown'
+    }
+    return buildSha || head || 'unknown'
   } catch {
-    return 'unknown'
+    // Builds may not include Git metadata; their supplied commit is the only available source.
+    return buildSha || 'unknown'
   }
 }
 

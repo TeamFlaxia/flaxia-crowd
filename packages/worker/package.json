@@ -8,7 +8,7 @@
     "deploy": "node scripts/deploy.mjs",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "node --test scripts/deploy.test.mjs && vitest run --passWithNoTests",
     "test:unit": "vitest run --config vitest.unit.config.ts"
   },
   "dependencies": {
