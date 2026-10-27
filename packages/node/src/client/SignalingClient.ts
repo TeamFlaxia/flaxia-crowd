@@ -368,7 +368,11 @@ class SignalingClient {
       }
     };
 
-    ws.onclose = () => {
+    ws.onerror = () => {
+      if (this.ws === ws) logError('signal websocket error');
+    };
+
+    ws.onclose = (event) => {
       ws.onclose = null;
       if (this.ws !== ws) return;
       this.ws = null;
@@ -377,7 +381,7 @@ class SignalingClient {
       // registers afresh instead of looping on a dead bearer.
       if (!opened) this.cachedToken = null;
       if (this.destroyed) return;
-      log(`signal disconnected; scheduling reconnect attempt=${this.reconnectAttempts + 1}`);
+      log(`signal disconnected code=${event.code} reason=${JSON.stringify(event.reason)} clean=${event.wasClean}; scheduling reconnect attempt=${this.reconnectAttempts + 1}`);
       this.scheduleReconnect();
     };
   }
