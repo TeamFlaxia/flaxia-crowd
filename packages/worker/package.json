@@ -5,10 +5,10 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "wrangler dev src/index.ts",
-    "deploy": "wrangler deploy",
+    "deploy": "node scripts/deploy.mjs",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "node --test scripts/deploy.test.mjs && vitest run --passWithNoTests --exclude scripts/deploy.test.mjs",
     "test:unit": "vitest run --config vitest.unit.config.ts"
   },
   "dependencies": {
