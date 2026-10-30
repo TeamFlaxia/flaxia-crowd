@@ -8,7 +8,7 @@
 //   deno run --unstable-webgpu --allow-read scripts/swarm-spike/run-synth.mjs \
 //     [--tokens 24] [--layers 8] [--dim 256] [--split 4] [--warmups 1] [--repeats 5]
 //     [--latency-ms 0] [--bandwidth-mbps 0] [--drop-after-tokens 0] [--memory-budget-mib 512]
-//     [--jsonl /tmp/flaxia-bench.jsonl]
+//     [--code-revision <git-sha>] [--jsonl /tmp/flaxia-bench.jsonl]
 //
 // Why Deno: it exposes navigator.gpu headlessly, so CI boxes without a browser
 // can still exercise the WGSL kernels. The production runtime is a browser Web
@@ -22,6 +22,7 @@ import {
   GGML_EMBED,
 } from "../../vendor/pooled/engine/gguf.js";
 import { makeTokenizer, argmax } from "../../vendor/pooled/engine/engine.js";
+import { BENCHMARK_SCHEMA_VERSION, generationMetrics } from "../benchmarks/metrics.mjs";
 
 const argv = process.argv.slice(2);
 const arg = (k, d) => {
@@ -38,6 +39,7 @@ const BANDWIDTH_MBPS = +arg("bandwidth-mbps", 0) || null;
 const DROP_AFTER_TOKENS = +arg("drop-after-tokens", 0) || null;
 const MEMORY_BUDGET_MIB = arg("memory-budget-mib", "") === "" ? null : +arg("memory-budget-mib", "");
 const JSONL_PATH = arg("jsonl", "");
+const CODE_REVISION = arg("code-revision", "") || null;
 
 function fail(msg) {
   console.error("SPIKE FAIL:", msg);
@@ -65,12 +67,12 @@ async function main() {
   const prompt = chat("Write three sentences about the ocean.");
   const eos = new Set([V["<|im_end|>"], V["<|endoftext|>"]]);
   const optionValues = [TOKENS, LAYERS, DIM, WARMUPS, REPEATS, LATENCY_MS];
-  if (optionValues.some((n) => !Number.isFinite(n)) || TOKENS < 1 || LAYERS < 1 || DIM < 1 ||
+  if (optionValues.some((n) => !Number.isFinite(n)) || TOKENS < 1 || LAYERS < 2 || DIM < 1 ||
       !Number.isInteger(WARMUPS) || WARMUPS < 0 || !Number.isInteger(REPEATS) || REPEATS < 1 || LATENCY_MS < 0 ||
       (BANDWIDTH_MBPS !== null && (!Number.isFinite(BANDWIDTH_MBPS) || BANDWIDTH_MBPS <= 0)) ||
       (DROP_AFTER_TOKENS !== null && (!Number.isInteger(DROP_AFTER_TOKENS) || DROP_AFTER_TOKENS < 1)) ||
       (MEMORY_BUDGET_MIB !== null && (!Number.isFinite(MEMORY_BUDGET_MIB) || MEMORY_BUDGET_MIB < 0))) {
-    fail("invalid benchmark option; check tokens/layers/dim/warmups/repeats and scenario values");
+    fail("invalid benchmark option; check tokens/layers (>=2)/dim/warmups/repeats and scenario values");
   }
 
   const estimatedMinimumBytes = Math.ceil(buf.byteLength + DIM * DIM * 8 + DIM * 256 * 4);
@@ -87,6 +89,8 @@ async function main() {
     memoryBudgetMiB: MEMORY_BUDGET_MIB,
     estimatedMinimumBytes,
   };
+  const requestedCut = +arg("split", Math.ceil(L / 2));
+  const cut = requestedCut > 0 && requestedCut < L ? requestedCut : Math.ceil(L / 2);
   const model = {
     id: "synthetic-qwen35",
     revision: `synth-l${LAYERS}-d${DIM}`,
@@ -97,7 +101,17 @@ async function main() {
     repeats: REPEATS,
     inputTokens: prompt.length,
     requestedOutputTokens: TOKENS,
+    promptId: "synthetic-ocean-three-sentences-v1",
+    sampling: "greedy",
   };
+  const runId = crypto.randomUUID();
+
+  const clusterFor = (mode) => mode === "single"
+    ? { transport: "in-process-simulation", nodeCount: 1, nodes: [{ role: "host", layerStart: 0, layerEnd: L }] }
+    : { transport: "in-process-simulation", nodeCount: 2, nodes: [
+      { role: "host", layerStart: 0, layerEnd: cut },
+      { role: "worker", layerStart: cut, layerEnd: L },
+    ] };
 
   const writeSample = async (sample) => {
     const line = JSON.stringify(sample);
@@ -105,17 +119,26 @@ async function main() {
     if (JSONL_PATH) await Deno.writeTextFile(JSONL_PATH, `${line}\n`, { append: true, create: true });
   };
 
-  const makeSample = (mode, status, metrics, metricSources, unavailableReasons, environment, error) => ({
-    schemaVersion: 1,
-    runId: crypto.randomUUID(),
+  const makeSample = (mode, status, metrics, metricSources, unavailableReasons, environment, error, repeatIndex, actualOutputTokens = null) => ({
+    schemaVersion: BENCHMARK_SCHEMA_VERSION,
+    runId,
+    sampleId: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
     status,
+    expectedOutcome: status === "failed" && String(error).includes("simulated peer loss after")
+      ? "failed"
+      : status === "unavailable" && MEMORY_BUDGET_MIB !== null && MEMORY_BUDGET_MIB * 1024 ** 2 < estimatedMinimumBytes
+        ? "unavailable"
+        : "completed",
     mode,
     scenario,
     model,
+    cluster: clusterFor(mode),
     environment,
     conditions: {
       ...baseConditions,
+      repeatIndex,
+      actualOutputTokens,
       topology: mode === "single" ? "one-node" : "two-node-layer-split",
     },
     metrics,
@@ -126,10 +149,10 @@ async function main() {
 
   if (MEMORY_BUDGET_MIB !== null && MEMORY_BUDGET_MIB * 1024 ** 2 < estimatedMinimumBytes) {
     const reason = `admission refused by synthetic budget estimate: needs ${estimatedMinimumBytes} bytes`;
-    const gpu = { vendor: null, architecture: null };
+    const gpu = { vendor: null, architecture: null, device: null };
     const environment = {
       runtime: "Deno", runtimeVersion: Deno.version.deno, os: Deno.build.os,
-      architecture: Deno.build.arch, browser: null, gpu,
+      architecture: Deno.build.arch, browser: null, browserVersion: null, codeRevision: CODE_REVISION, gpu,
     };
     const metricNames = ["coldLoadMs", "warmPrepareMs", "ttftMs", "prefillMs", "decodeMs", "tokensPerSecond", "totalMs", "networkBytes", "peakMemoryBytes"];
     for (const mode of ["single", "split"]) {
@@ -140,7 +163,7 @@ async function main() {
           coldLoadMs: reason, warmPrepareMs: reason, ttftMs: reason, prefillMs: reason,
           decodeMs: reason, tokensPerSecond: reason, totalMs: reason, networkBytes: reason,
           peakMemoryBytes: "WebGPU memory is not exposed by the synthetic runner",
-        }, environment, reason));
+        }, environment, reason, i));
       }
     }
     return;
@@ -176,11 +199,10 @@ async function main() {
       weights: await qwen35Weights(G, bytesOf, { lo, hi, hasEmbed: head, hasHead: head, mtp: head }),
     });
 
-  const cutArg = +arg("split", Math.ceil(L / 2));
-  const cut = cutArg > 0 && cutArg < L ? cutArg : Math.ceil(L / 2);
   const gpu = {
     vendor: adapter.info?.vendor || null,
     architecture: adapter.info?.architecture || null,
+    device: adapter.info?.device || null,
   };
   const environment = {
     runtime: "Deno",
@@ -188,19 +210,23 @@ async function main() {
     os: Deno.build.os,
     architecture: Deno.build.arch,
     browser: null,
+    browserVersion: null,
+    codeRevision: CODE_REVISION,
     gpu,
   };
   const metricNames = ["coldLoadMs", "warmPrepareMs", "ttftMs", "prefillMs", "decodeMs", "tokensPerSecond", "totalMs", "networkBytes", "peakMemoryBytes"];
   const writeRunSample = async (mode, index, loadMs, result, error = null) => {
+    const partial = error && typeof error === "object" ? error.benchmarkMetrics : null;
+    const observed = result ?? partial ?? {};
     const metrics = {
       coldLoadMs: index === 0 ? loadMs : null,
-      warmPrepareMs: result?.warmPrepareMs ?? null,
-      ttftMs: result?.ttftMs ?? null,
-      prefillMs: result?.prefillMs ?? null,
-      decodeMs: result?.decodeMs ?? null,
-      tokensPerSecond: result?.tokensPerSecond ?? null,
-      totalMs: result?.totalMs ?? null,
-      networkBytes: result?.networkBytes ?? null,
+      warmPrepareMs: observed.warmPrepareMs ?? null,
+      ttftMs: observed.ttftMs ?? null,
+      prefillMs: observed.prefillMs ?? null,
+      decodeMs: observed.decodeMs ?? null,
+      tokensPerSecond: observed.tokensPerSecond ?? null,
+      totalMs: observed.totalMs ?? null,
+      networkBytes: observed.networkBytes ?? null,
       peakMemoryBytes: null,
     };
     const metricSources = Object.fromEntries(metricNames.map((name) => {
@@ -218,8 +244,9 @@ async function main() {
         ? `run failed: ${String(error).slice(0, 300)}`
         : "metric was not available for this sample";
     }
-    await writeSample(makeSample(mode, error ? "failed" : "completed", metrics, metricSources,
-      unavailableReasons, environment, error));
+    const status = error ? "failed" : "completed";
+    await writeSample(makeSample(mode, status, metrics, metricSources,
+      unavailableReasons, environment, error, index, observed.actualOutputTokens ?? result?.tokens?.length ?? null));
     return result?.tokens ?? null;
   };
 
@@ -229,7 +256,9 @@ async function main() {
     const warmPrepareMs = performance.now() - prepStart;
     const startedAt = performance.now();
     await engine.prefillTokens(prompt.slice(0, -1));
-    let next = argmax(await engine.forwardToken(prompt[prompt.length - 1]));
+    const logits = await engine.forwardToken(prompt[prompt.length - 1]);
+    const prefillDoneAt = performance.now();
+    let next = argmax(logits);
     const tokens = [next];
     const firstTokenAt = performance.now();
     while (tokens.length < TOKENS) {
@@ -237,15 +266,10 @@ async function main() {
       tokens.push(next);
     }
     const finishedAt = performance.now();
-    const decodeMs = finishedAt - firstTokenAt;
     return {
       tokens,
       warmPrepareMs,
-      ttftMs: firstTokenAt - startedAt,
-      prefillMs: firstTokenAt - startedAt,
-      decodeMs,
-      tokensPerSecond: decodeMs > 0 && tokens.length > 1 ? (tokens.length - 1) * 1000 / decodeMs : null,
-      totalMs: finishedAt - startedAt,
+      ...generationMetrics({ startedAt, prefillDoneAt, firstTokenAt, finishedAt, actualOutputTokens: tokens.length }),
       networkBytes: 0,
     };
   };
@@ -276,27 +300,31 @@ async function main() {
       const hidden = await chainOne(prompt[i], pos);
       if (i === prompt.length - 1) logits = await host.headFromHidden(hidden);
     }
+    const prefillDoneAt = performance.now();
     let next = argmax(logits);
     const tokens = [next];
     const firstTokenAt = performance.now();
     while (tokens.length < TOKENS) {
       if (injectNodeLoss && DROP_AFTER_TOKENS !== null && tokens.length >= DROP_AFTER_TOKENS) {
-        throw new Error(`simulated peer loss after ${tokens.length} generated tokens`);
+        const failedAt = performance.now();
+        const error = new Error(`simulated peer loss after ${tokens.length} generated tokens`);
+        error.benchmarkMetrics = {
+          actualOutputTokens: tokens.length,
+          warmPrepareMs,
+          ...generationMetrics({ startedAt, prefillDoneAt, firstTokenAt, finishedAt: failedAt, actualOutputTokens: tokens.length }),
+          networkBytes,
+        };
+        throw error;
       }
       const hidden = await chainOne(next, pos++);
       next = argmax(await host.headFromHidden(hidden));
       tokens.push(next);
     }
     const finishedAt = performance.now();
-    const decodeMs = finishedAt - firstTokenAt;
     return {
       tokens,
       warmPrepareMs,
-      ttftMs: firstTokenAt - startedAt,
-      prefillMs: firstTokenAt - startedAt,
-      decodeMs,
-      tokensPerSecond: decodeMs > 0 && tokens.length > 1 ? (tokens.length - 1) * 1000 / decodeMs : null,
-      totalMs: finishedAt - startedAt,
+      ...generationMetrics({ startedAt, prefillDoneAt, firstTokenAt, finishedAt, actualOutputTokens: tokens.length }),
       networkBytes,
     };
   };

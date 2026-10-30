@@ -47,49 +47,56 @@ This harness gives single-engine and two-slice runs the same synthetic GGUF, pro
 
 | Field | Definition |
 | --- | --- |
-| `coldLoadMs` | Time to create the engine(s) and load model weights for the first run in one process. Later repetitions leave it null because the engine remains resident. |
-| `warmPrepareMs` | Time to reset a resident engine before one request. It is a warm reuse measure, not another model download. |
-| `ttftMs` / `prefillMs` | Request start after warm preparation through the first generated token. Model load is reported separately. |
+| `coldLoadMs` | Time to create the engine(s) and upload weights to WebGPU. The synthetic GGUF is already built and parsed, so this excludes model download, GGUF generation, and parsing. It is present only for `repeatIndex: 0`; later samples report null because the engines stay resident. |
+| `warmPrepareMs` | Time to reset the resident engine(s) before a request. This is the measured warm-reuse preparation path; it is not a disk-cache load. |
+| `prefillMs` | Request start through processing the final prompt token and producing logits, before sampling the first output token. |
+| `ttftMs` | Request start through sampling the first output token. It includes prefill and first-token sampling, but excludes engine load and warm preparation. |
 | `decodeMs` | Time from first generated token through the remaining output tokens. |
 | `tokensPerSecond` | `(output token count - 1) / decodeMs`; first-token latency is excluded. |
-| `totalMs` | Request start through all requested output tokens, excluding engine load and reset. |
-| `networkBytes` | Hidden-state payload bytes handed across the synthetic layer boundary. Marked estimated because it excludes packet, WebRTC, and encryption overhead. Single-engine runs report zero. |
+| `totalMs` | Request start through the last output token, including prefill, decode, and simulated layer-boundary delays; excludes engine load and reset. |
+| `networkBytes` | Sum of hidden-state payload bytes in both directions at the synthetic layer boundary. Marked estimated because it excludes packet, WebRTC, and encryption overhead. Single-engine runs report zero. |
 | `peakMemoryBytes` | Null/unknown: WebGPU does not expose peak or free memory. Model file bytes and estimated memory budgets are not mislabeled as peak usage. |
 
-Every JSONL row records model revision/quantization, input and output token counts, topology, OS/architecture, Deno version, adapter identity when exposed, warmups, repetitions, and scenario settings. The summarizer reports linear-interpolated p50/p95, failures, unavailable metrics, and failure rate by topology and scenario.
+New runs write schema version 2, one JSONL row per measured attempt. The summarizer continues to accept version 1 rows. In version 2, `runId` is shared by all rows from one invocation; `sampleId` is unique per row and `repeatIndex` pairs single/split attempts. Rows include prompt ID, sampling mode, requested and actual output-token counts, model revision/quantization, code revision when supplied, node count/layer ranges, transport, OS/architecture, Deno version, WebGPU adapter identity when exposed, warmups, and scenario settings. `expectedOutcome` separates an injected node-loss result from an unexpected failure; low-memory admission refusal is `unavailable`. The summarizer reports linear-interpolated p50/p95, expected and unexpected failures, outcome mismatches, and unavailable metrics. `failureRate` counts failed rows over all planned rows, `unexpectedFailureRate` counts unexpected failures over completed-or-failed attempts, and `unavailableRate` counts unavailable rows over all planned rows.
 
 ## Run
 
 ```sh
 deno run --unstable-webgpu \
-  --allow-read=scripts/swarm-spike/run-synth.mjs,vendor/pooled \
+  --allow-read=scripts/swarm-spike/run-synth.mjs,scripts/benchmarks/metrics.mjs,vendor/pooled \
   --allow-write=/tmp/flaxia-inference.jsonl \
   scripts/swarm-spike/run-synth.mjs \
   --warmups 1 --repeats 5 --tokens 24 --layers 8 --dim 256 \
+  --code-revision "$(git rev-parse HEAD)" \
   --jsonl /tmp/flaxia-inference.jsonl
 
 node scripts/benchmarks/summarize.mjs /tmp/flaxia-inference.jsonl
 node --test scripts/benchmarks/metrics.test.mjs
 ```
 
-The first measured repetition contains the cold engine-load time. Run the command in a fresh process several times to build a cold-load distribution; all rows can be appended to the same JSONL file. Warmups are excluded from reported samples.
+The first measured repetition contains the cold engine-load time. Run the command in a fresh process several times to build a cold-load distribution; each invocation gets a new `runId`, while all rows from that invocation share it. Warmups are excluded from reported samples.
 
 ## Fault scenarios
 
 ```sh
 # Add in-process latency and a bandwidth limit at each layer boundary.
-deno run --unstable-webgpu --allow-read=scripts/swarm-spike/run-synth.mjs,vendor/pooled --allow-write=/tmp/latency.jsonl \
-  scripts/swarm-spike/run-synth.mjs --latency-ms 80 --bandwidth-mbps 10 --repeats 5 --jsonl /tmp/latency.jsonl
+deno run --unstable-webgpu --allow-read=scripts/swarm-spike/run-synth.mjs,scripts/benchmarks/metrics.mjs,vendor/pooled --allow-write=/tmp/latency.jsonl \
+  scripts/swarm-spike/run-synth.mjs --latency-ms 80 --bandwidth-mbps 10 --repeats 5 \
+  --code-revision "$(git rev-parse HEAD)" --jsonl /tmp/latency.jsonl
 
 # Simulate a peer disappearing before the next decode hop; failed attempts are kept in the results.
-deno run --unstable-webgpu --allow-read=scripts/swarm-spike/run-synth.mjs,vendor/pooled --allow-write=/tmp/dropout.jsonl \
-  scripts/swarm-spike/run-synth.mjs --drop-after-tokens 4 --repeats 5 --jsonl /tmp/dropout.jsonl
+deno run --unstable-webgpu --allow-read=scripts/swarm-spike/run-synth.mjs,scripts/benchmarks/metrics.mjs,vendor/pooled --allow-write=/tmp/dropout.jsonl \
+  scripts/swarm-spike/run-synth.mjs --drop-after-tokens 4 --repeats 5 \
+  --code-revision "$(git rev-parse HEAD)" --jsonl /tmp/dropout.jsonl
 
 # Refuse before GPU allocation when the requested synthetic memory budget is below the estimate.
-deno run --unstable-webgpu --allow-read=scripts/swarm-spike/run-synth.mjs,vendor/pooled --allow-write=/tmp/low-memory.jsonl \
-  scripts/swarm-spike/run-synth.mjs --memory-budget-mib 1 --repeats 3 --jsonl /tmp/low-memory.jsonl
+deno run --unstable-webgpu --allow-read=scripts/swarm-spike/run-synth.mjs,scripts/benchmarks/metrics.mjs,vendor/pooled --allow-write=/tmp/low-memory.jsonl \
+  scripts/swarm-spike/run-synth.mjs --memory-budget-mib 1 --repeats 3 \
+  --code-revision "$(git rev-parse HEAD)" --jsonl /tmp/low-memory.jsonl
 ```
 
 Latency and bandwidth are timer-based simulations at the in-process hidden-state boundary. Node loss is a deterministic injected exception. The low-memory case tests admission reporting against a conservative synthetic estimate; it does not force a real device OOM. These modes let CI and local runs exercise the result contract without root privileges or unstable hardware.
+
+Injected node loss is recorded as `status: "failed"` and `expectedOutcome: "failed"` for the split samples; the single-node control samples remain expected to complete. Low-memory admission refusal is recorded as `status: "unavailable"` and `expectedOutcome: "unavailable"` for both topologies.
 
 For real transport and real-device comparisons, run the multi-browser procedure added with the P2P runtime and preserve the same `model`, `conditions`, and `scenario` fields. Never compare a synthetic split result to a production transport run without labeling the transport difference.

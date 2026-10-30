@@ -1,18 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/TeamFlaxia/flaxia-crowd/benchmarks/inference-result.schema.json",
+  "$id": "https://github.com/TeamFlaxia/flaxia-crowd/blob/main/scripts/benchmarks/inference-result.schema.json",
   "title": "Flaxia inference benchmark sample",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schemaVersion", "runId", "timestamp", "status", "mode", "scenario",
-    "model", "environment", "conditions", "metrics", "metricSources", "unavailableReasons"
+    "schemaVersion", "runId", "sampleId", "timestamp", "status", "expectedOutcome", "mode", "scenario",
+    "model", "cluster", "environment", "conditions", "metrics", "metricSources", "unavailableReasons"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "runId": { "type": "string", "minLength": 1 },
+    "sampleId": { "type": "string", "minLength": 1 },
     "timestamp": { "type": "string", "format": "date-time" },
     "status": { "enum": ["completed", "failed", "unavailable"] },
+    "expectedOutcome": { "enum": ["completed", "failed", "unavailable"] },
     "mode": { "enum": ["single", "split"] },
     "scenario": {
       "type": "object",
@@ -37,19 +39,48 @@
       },
       "additionalProperties": false
     },
+    "cluster": {
+      "type": "object",
+      "required": ["transport", "nodeCount", "nodes"],
+      "properties": {
+        "transport": { "enum": ["in-process-simulation", "webworker", "webrtc", "unknown"] },
+        "nodeCount": { "type": "integer", "minimum": 1 },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["role", "layerStart", "layerEnd"],
+            "properties": {
+              "role": { "enum": ["host", "worker"] },
+              "layerStart": { "type": "integer", "minimum": 0 },
+              "layerEnd": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "environment": {
       "type": "object",
-      "required": ["runtime", "runtimeVersion", "os", "architecture", "browser", "gpu"],
+      "required": ["runtime", "runtimeVersion", "os", "architecture", "browser", "browserVersion", "codeRevision", "gpu"],
       "properties": {
         "runtime": { "type": "string" },
         "runtimeVersion": { "type": "string" },
         "os": { "type": "string" },
         "architecture": { "type": "string" },
         "browser": { "type": ["string", "null"] },
+        "browserVersion": { "type": ["string", "null"] },
+        "codeRevision": { "type": ["string", "null"] },
         "gpu": {
           "type": "object",
-          "required": ["vendor", "architecture"],
-          "properties": { "vendor": { "type": ["string", "null"] }, "architecture": { "type": ["string", "null"] } },
+          "required": ["vendor", "architecture", "device"],
+          "properties": {
+            "vendor": { "type": ["string", "null"] },
+            "architecture": { "type": ["string", "null"] },
+            "device": { "type": ["string", "null"] }
+          },
           "additionalProperties": false
         }
       },
@@ -57,12 +88,16 @@
     },
     "conditions": {
       "type": "object",
-      "required": ["warmups", "repeats", "inputTokens", "requestedOutputTokens", "topology"],
+      "required": ["warmups", "repeats", "repeatIndex", "inputTokens", "requestedOutputTokens", "actualOutputTokens", "promptId", "sampling", "topology"],
       "properties": {
         "warmups": { "type": "integer", "minimum": 0 },
         "repeats": { "type": "integer", "minimum": 1 },
+        "repeatIndex": { "type": "integer", "minimum": 0 },
         "inputTokens": { "type": "integer", "minimum": 0 },
         "requestedOutputTokens": { "type": "integer", "minimum": 1 },
+        "actualOutputTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "promptId": { "type": "string", "minLength": 1 },
+        "sampling": { "enum": ["greedy", "other"] },
         "topology": { "enum": ["one-node", "two-node-layer-split"] }
       },
       "additionalProperties": false
@@ -85,6 +120,7 @@
     },
     "metricSources": {
       "type": "object",
+      "required": ["coldLoadMs", "warmPrepareMs", "ttftMs", "prefillMs", "decodeMs", "tokensPerSecond", "totalMs", "networkBytes", "peakMemoryBytes"],
       "additionalProperties": { "enum": ["measured", "estimated", "unknown"] }
     },
     "unavailableReasons": {
