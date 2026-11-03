@@ -9,7 +9,7 @@ import {
   isHeavyWorkload,
   defaultTimeoutFor,
 } from '../workloads';
-import { isValidCcWarcPath } from '../cc-extract';
+import { ccWarcPathMatchesCrawl, isValidCcWarcPath } from '../cc-extract';
 import { isEmbedGemmaDimensions } from '../embed-gemma';
 import {
   parseCrowdWebhook,
@@ -86,6 +86,26 @@ describe('workloads', () => {
     expect(isValidCcWarcPath('CC-MAIN-2026-43.warc.gz')).toBe(false);
     expect(isValidCcWarcPath('crawl-data/../etc/passwd')).toBe(false);
     expect(isValidCcWarcPath('https://data.commoncrawl.org/x.warc.gz')).toBe(false);
+    // Dot segments must be rejected: a *host* may join this value into a
+    // signed proxy URL, where `..` would escape the intended directory.
+    expect(
+      isValidCcWarcPath('crawl-data/CC-MAIN-2026-43/segments/../warc/x.warc.gz'),
+    ).toBe(false);
+    expect(
+      isValidCcWarcPath('crawl-data/CC-MAIN-2026-43/segments/./warc/x.warc.gz'),
+    ).toBe(false);
+    expect(
+      isValidCcWarcPath('crawl-data/CC-MAIN-2026-43/segments/..%2f/warc/x.warc.gz'),
+    ).toBe(false);
+  });
+
+  it('matches a WARC path to its crawl id', () => {
+    const path =
+      'crawl-data/CC-MAIN-2026-43/segments/1700000000000.0/warc/CC-MAIN-20260101000000-20260101010000-00000.warc.gz';
+    expect(ccWarcPathMatchesCrawl(path, 'CC-MAIN-2026-43')).toBe(true);
+    expect(ccWarcPathMatchesCrawl(path, 'CC-MAIN-2026-39')).toBe(false);
+    expect(ccWarcPathMatchesCrawl(path, 'not-a-crawl')).toBe(false);
+    expect(ccWarcPathMatchesCrawl(42, 'CC-MAIN-2026-43')).toBe(false);
   });
 
   it('gives swarm inference room for a cold model download', () => {

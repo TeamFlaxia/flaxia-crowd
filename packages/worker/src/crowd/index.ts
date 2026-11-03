@@ -16,7 +16,7 @@ import {
   MAX_EMBED_GEMMA_TEXT_CHARS,
   isEmbedGemmaDimensions,
   CC_CRAWL_PATTERN,
-  isValidCcWarcPath,
+  ccWarcPathMatchesCrawl,
   NODE_SIGNAL_PROTOCOL,
   SUBSCRIBE_PROTOCOL,
   parseBearerSubprotocol,
@@ -205,8 +205,8 @@ export function validateCcExtractPayload(payload: unknown): string | null {
     } catch {
       return 'payload.records[].url must be a valid URL'
     }
-    if (!isValidCcWarcPath(record.warcFilename)) {
-      return 'payload.records[].warcFilename must be a Common Crawl WARC object path'
+    if (!ccWarcPathMatchesCrawl(record.warcFilename, body.crawl)) {
+      return 'payload.records[].warcFilename must be a Common Crawl WARC object path for payload.crawl'
     }
     if (record.fetchUrl !== undefined) {
       if (typeof record.fetchUrl !== 'string' || record.fetchUrl.length > MAX_CC_EXTRACT_FETCH_URL_CHARS) {
@@ -215,6 +215,7 @@ export function validateCcExtractPayload(payload: unknown): string | null {
       try {
         const parsed = new URL(record.fetchUrl)
         if (parsed.protocol !== 'https:') return 'payload.records[].fetchUrl must use https'
+        if (parsed.username || parsed.password) return 'payload.records[].fetchUrl must not carry credentials'
       } catch {
         return 'payload.records[].fetchUrl must be a valid URL'
       }

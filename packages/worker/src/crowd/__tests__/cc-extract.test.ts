@@ -68,6 +68,35 @@ describe('validateCcExtractPayload', () => {
     ).toMatch(/warcFilename/i);
   });
 
+  it('rejects dot segments and a WARC path from another crawl', () => {
+    const record = (warcFilename: string) =>
+      payload({
+        records: [{ url: 'https://example.com/', warcFilename, offset: 0, length: 10 }],
+      });
+    expect(
+      validateCcExtractPayload(
+        record('crawl-data/CC-MAIN-2026-43/segments/../warc/x.warc.gz'),
+      ),
+    ).toMatch(/warcFilename/i);
+    expect(
+      validateCcExtractPayload(
+        record('crawl-data/CC-MAIN-2026-39/segments/1700000000000.0/warc/x.warc.gz'),
+      ),
+    ).toMatch(/warcFilename/i);
+  });
+
+  it('rejects a range URL with embedded credentials', () => {
+    const withFetchUrl = (fetchUrl: string) =>
+      payload({
+        records: [
+          { url: 'https://example.com/', warcFilename: WARC_PATH, offset: 0, length: 10, fetchUrl },
+        ],
+      });
+    expect(validateCcExtractPayload(withFetchUrl('https://user:pass@flaxia.app/cc-range'))).toMatch(
+      /credentials/i,
+    );
+  });
+
   it('rejects invalid offsets and lengths', () => {
     const record = (offset: unknown, length: unknown) =>
       payload({ records: [{ url: 'https://example.com/', warcFilename: WARC_PATH, offset, length }] });

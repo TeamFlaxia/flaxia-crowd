@@ -69,6 +69,7 @@ describe('SignalingClient (incapable device)', () => {
       siteId: 'test-site',
       consent: { brandName: 'Test', position: 'bottom-right' },
       capabilities: ['ai-inference', 'cc-extract'],
+      ccRangeOrigins: ['https://flaxia.app'],
     });
     await flush();
     await flush();
@@ -76,5 +77,23 @@ describe('SignalingClient (incapable device)', () => {
     const [, opts] = (global.fetch as any).mock.calls[0];
     expect(JSON.parse(opts.body).capabilities).toEqual(['cc-extract']);
     expect(JSON.parse(opts.body).wasmMemoryBytes).toBe(0);
+  });
+
+  it('does not advertise cc-extract without an allowlisted range proxy', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    seedGrantedConsent();
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['cc-extract'],
+    });
+    await flush();
+    await flush();
+
+    const [, opts] = (global.fetch as any).mock.calls[0];
+    expect(JSON.parse(opts.body).capabilities).toEqual([]);
   });
 });

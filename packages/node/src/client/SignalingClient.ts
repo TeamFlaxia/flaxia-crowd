@@ -389,6 +389,12 @@ class SignalingClient {
       if (validatedHttpsOrigins(this.config.containerImageOrigins).length === 0) {
         capabilities = capabilities.filter((cap) => cap !== 'container');
       }
+      // Browser nodes cannot fetch Common Crawl ranges directly (CORS), so a
+      // node without an allowlisted range proxy can never complete an
+      // `cc-extract` task. Do not advertise the capability in that case.
+      if (validatedHttpsOrigins(this.config.ccRangeOrigins).length === 0) {
+        capabilities = capabilities.filter((cap) => cap !== 'cc-extract');
+      }
 
       // Swarm inference additionally needs WebGPU and an explicit opt-in to
       // download multi-GB layer weights. Probe only when the host asked for it,

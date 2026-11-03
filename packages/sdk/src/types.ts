@@ -430,8 +430,12 @@ export interface CcExtractPayload {
 export interface CcExtractDocument {
   /** Original URL requested from the CDX index. */
   url: string;
-  /** Final URL from the WARC target URI, when it differs. */
-  finalUrl?: string;
+  /**
+   * Normalised `WARC-Target-URI` of the record. It must match `url` (apart from
+   * URL normalisation and any fragment), so it is informational rather than a
+   * redirect target.
+   */
+  targetUri?: string;
   /** Canonical URL advertised by the page, when present. */
   canonicalUrl?: string;
   title: string;
@@ -470,7 +474,7 @@ export interface EmbedGemmaPayload {
 }
 
 export interface EmbedGemmaResult {
-  /** One 512/768-dim normalised vector per input text. */
+  /** One normalised vector per input text (128, 256, 512 or 768 dimensions). */
   vectors: number[][];
   model: string;
   dimensions: number;

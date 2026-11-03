@@ -61,6 +61,7 @@ describe('embed-gemma workload', () => {
     const options = state.loadOptions[0]!;
     expect(options.device).toBe('wasm');
     expect(options.dtype).toBe('fp16');
+    expect(options.revision).toBe('main');
     expect((options.config as any).vision_config).toBeNull();
     expect((options.config as any).audio_config).toBeNull();
   });
@@ -68,6 +69,14 @@ describe('embed-gemma workload', () => {
   it('splits large inputs into bounded model calls', async () => {
     await handleEmbedGemma({ texts: ['a', 'b', 'c', 'd', 'e'], dimensions: 256 });
     expect(state.modelCalls).toEqual([4, 1]);
+  });
+
+  it('yields to the CPU throttle between model calls', async () => {
+    let yields = 0;
+    await handleEmbedGemma({ texts: ['a', 'b', 'c', 'd', 'e'], dimensions: 256 }, () => {
+      yields += 1;
+    });
+    expect(yields).toBe(2);
   });
 
   it('rejects empty, oversized or invalid payloads', async () => {

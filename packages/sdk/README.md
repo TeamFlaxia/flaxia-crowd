@@ -51,6 +51,8 @@ console.log(result)
 | `image-process` | OffscreenCanvas を用いた画像処理（resize, grayscale, compress, thumbnail） |
 | `file-convert` | ファイル変換（Phase 2） |
 | `container` | container2wasm を用いたLinuxコンテナ実行 |
+| `cc-extract` | Common Crawl の WARC レコードから本文を抽出 |
+| `embed-gemma` | EmbeddingGemma 2 によるテキスト埋め込み（MRL） |
 
 ### Error クラス
 

@@ -9,6 +9,7 @@ import {
   type EmbedGemmaPayload,
   type EmbedGemmaResult,
 } from '@flaxia/sdk';
+import { resolveAiModel } from './ai-model-registry';
 
 /** Texts passed to one model call. Four ~500-token texts stay under the 2,700-token WebGPU dispatch limit. */
 export const EMBED_GEMMA_BATCH_SIZE = 4;
@@ -25,6 +26,31 @@ let loaded: LoadedModel | null = null;
 export const releaseCache = (): void => {
   loaded = null;
 };
+
+let downloadGuardInstalled = false;
+
+/**
+ * Keep the download on Hugging Face and bound a single file by the registry's
+ * `maxBytes`. The ai-inference fetch guard is installed only when that workload
+ * is used, so embed-gemma needs its own check when it is the first model task.
+ */
+function installDownloadGuard(env: any, maxBytes: number): void {
+  if (downloadGuardInstalled) return;
+  downloadGuardInstalled = true;
+  const inner = typeof env.fetch === 'function' ? env.fetch.bind(env) : globalThis.fetch.bind(globalThis);
+  env.fetch = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+    const url = new URL(String(input));
+    if (!/(^|\.)huggingface\.co$/.test(url.hostname) && !/(^|\.)hf\.co$/.test(url.hostname)) {
+      throw new Error(`embed-gemma: model download blocked from ${url.hostname}`);
+    }
+    const response = await inner(url, init);
+    const declared = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new Error(`embed-gemma: model file too large (${declared} bytes > ${maxBytes})`);
+    }
+    return response;
+  };
+}
 
 function fail(message: string): never {
   throw new Error(`embed-gemma: ${message}`);
@@ -57,21 +83,32 @@ function hasWebGpu(): boolean {
 async function loadModel(device: 'webgpu' | 'wasm'): Promise<LoadedModel> {
   const loadStartedAt = performance.now();
   const dtype: 'q8' | 'fp16' = device === 'webgpu' ? 'q8' : 'fp16';
-  console.log(`[flaxia-node] embed-gemma: loading model=${EMBED_GEMMA_MODEL} device=${device} dtype=${dtype}`);
+  // Fail closed before any download: the host can remove this model from the
+  // node's registry, and the revision/maxBytes values then apply here too.
+  const definition = resolveAiModel(EMBED_GEMMA_MODEL);
+  console.log(
+    `[flaxia-node] embed-gemma: loading model=${definition.repo} revision=${definition.revision} device=${device} dtype=${dtype}`,
+  );
   const { AutoConfig, AutoModel, AutoProcessor, env } = await import('@huggingface/transformers');
   if (env?.backends?.onnx?.wasm) {
     env.backends.onnx.wasm.numThreads = 1;
     env.backends.onnx.wasm.proxy = false;
   }
+  installDownloadGuard(env, definition.maxBytes);
 
-  const config = await AutoConfig.from_pretrained(EMBED_GEMMA_MODEL);
+  const config = await AutoConfig.from_pretrained(definition.repo, { revision: definition.revision });
   // Text-only: skip the 170M vision and 300M audio encoders entirely.
   (config as any).vision_config = null;
   (config as any).audio_config = null;
 
   const [processor, model] = await Promise.all([
-    AutoProcessor.from_pretrained(EMBED_GEMMA_MODEL),
-    AutoModel.from_pretrained(EMBED_GEMMA_MODEL, { config, device, dtype } as any),
+    AutoProcessor.from_pretrained(definition.repo, { revision: definition.revision }),
+    AutoModel.from_pretrained(definition.repo, {
+      config,
+      device,
+      dtype,
+      revision: definition.revision,
+    } as any),
   ]);
   console.log(
     `[flaxia-node] embed-gemma: model ready device=${device} dtype=${dtype} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
@@ -126,7 +163,11 @@ async function embedBatch(model: LoadedModel, texts: string[], dimensions: numbe
   return vectors;
 }
 
-export async function handleEmbedGemma(payload: EmbedGemmaPayload): Promise<EmbedGemmaResult> {
+export async function handleEmbedGemma(
+  payload: EmbedGemmaPayload,
+  /** Called between model calls so the worker can hold its CPU duty cycle. */
+  onBatch?: () => void | Promise<void>,
+): Promise<EmbedGemmaResult> {
   const startedAt = performance.now();
   const { texts, dimensions } = validatePayload(payload);
   const model = await getModel();
@@ -135,6 +176,7 @@ export async function handleEmbedGemma(payload: EmbedGemmaPayload): Promise<Embe
   for (let start = 0; start < texts.length; start += EMBED_GEMMA_BATCH_SIZE) {
     const batch = texts.slice(start, start + EMBED_GEMMA_BATCH_SIZE);
     vectors.push(...(await embedBatch(model, batch, dimensions)));
+    await onBatch?.();
   }
 
   return {

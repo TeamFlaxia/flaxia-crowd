@@ -2,11 +2,14 @@ import { parse } from 'parse5';
 import {
   CC_DATA_HOST,
   DEFAULT_CC_EXTRACT_TIMEOUT_MS,
+  MAX_CC_EXTRACT_FETCH_URL_CHARS,
   MAX_CC_EXTRACT_RECORD_BYTES,
   MAX_CC_EXTRACT_RECORDS,
   MAX_CC_EXTRACT_TEXT_CHARS,
   MAX_CC_EXTRACT_TIMEOUT_MS,
   MAX_CC_EXTRACT_TOTAL_BYTES,
+  MAX_CC_EXTRACT_URL_CHARS,
+  ccWarcPathMatchesCrawl,
   isValidCcWarcPath,
   type CcExtractDocument,
   type CcExtractPayload,
@@ -179,22 +182,36 @@ async function fetchWarcRecord(
       Accept: 'application/octet-stream',
       'User-Agent': CC_USER_AGENT,
     },
-    redirect: 'follow',
+    // The customer chooses the path on an allowlisted host. Following a
+    // redirect would let that host move the request to a non-allowlisted
+    // origin, so redirects are rejected instead of re-validated.
+    redirect: 'manual',
     credentials: 'omit',
     referrerPolicy: 'no-referrer',
+    cache: 'no-store',
     signal: AbortSignal.timeout(timeoutMs),
   });
+  if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+    fail('range requests must not redirect');
+  }
   if (!response.ok) fail(`Common Crawl returned HTTP ${response.status}`);
   if (!response.body) fail('Common Crawl returned an empty body');
-
-  const contentRange = response.headers.get('content-range');
-  if (contentRange) {
-    const match = /^bytes\s+(\d+)-(\d+)\//i.exec(contentRange.trim());
-    if (!match || Number(match[1]) !== record.offset) {
-      fail(`Common Crawl range mismatch for ${url}`);
-    }
-  } else if (response.status !== 206) {
+  if (response.status !== 206) {
     fail(`Common Crawl ignored the byte range (HTTP ${response.status})`);
+  }
+
+  // A 206 response always has Content-Range, but a cross-origin proxy must
+  // expose it (`Access-Control-Expose-Headers: Content-Range`). Fail closed
+  // instead of skipping the offset check when the header is not visible.
+  const contentRange = response.headers.get('content-range');
+  const match = contentRange ? /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange.trim()) : null;
+  if (!match) {
+    fail('missing Content-Range header (a cross-origin range proxy must expose it)');
+  }
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (start !== record.offset || end !== record.offset + record.length - 1) {
+    fail(`Common Crawl range mismatch for ${url}`);
   }
 
   const compressed = await readCappedStream(response.body, maxRecordBytes);
@@ -219,8 +236,11 @@ async function parseWarcResponse(record: CcExtractRecord, warcBytes: Uint8Array)
   const warcHeaders = parseHeaderLines(warc.headerText);
 
   const warcType = warcHeaders.get('warc-type');
-  if (warcType !== 'response' && warcType !== 'resource') {
-    fail(`unsupported WARC type: ${warcType ?? 'missing'}`);
+  if (warcType !== 'response') {
+    // `resource` stores the raw resource without HTTP headers and `revisit`
+    // refers to another record; neither is an `application/http` block.
+    const hint = warcType === 'resource' ? ' (raw resource)' : warcType === 'revisit' ? ' (deduplicated record)' : '';
+    fail(`unsupported WARC type: ${warcType ?? 'missing'}${hint}`);
   }
 
   const targetUri = warcHeaders.get('warc-target-uri') ?? '';
@@ -263,7 +283,9 @@ async function parseWarcResponse(record: CcExtractRecord, warcBytes: Uint8Array)
   } else if (contentEncoding && contentEncoding !== 'identity') {
     fail(`unsupported content-encoding: ${contentEncoding}`);
   }
-  if (httpHeaders.get('warc-truncated')) truncated = true;
+  // WARC-Truncated is a WARC record header (e.g. `WARC-Truncated: length`),
+  // not an HTTP header.
+  if (warcHeaders.get('warc-truncated')) truncated = true;
 
   return { targetUri, status, contentType, charset, body, truncated };
 }
@@ -300,6 +322,15 @@ const SKIPPED_TEXT_TAGS = new Set([
   'object',
   'embed',
   'head',
+  // Site chrome and form controls are not page content; including them adds
+  // navigation labels and button text to the extracted document.
+  'nav',
+  'footer',
+  'aside',
+  'form',
+  'button',
+  'select',
+  'textarea',
 ]);
 
 function collectText(node: HtmlNode | undefined, out: string[]): void {
@@ -324,12 +355,16 @@ function firstText(node: HtmlNode | undefined): string {
 }
 
 function metaContent(nodes: HtmlNode[], names: string[]): string {
-  const wanted = new Set(names.map((name) => name.toLowerCase()));
-  for (const node of nodes) {
-    const key = (attr(node, 'property') || attr(node, 'name') || '').toLowerCase();
-    if (wanted.has(key)) {
-      const content = attr(node, 'content');
-      if (content) return normalizeText(content);
+  // Respect the caller's priority order rather than document order, so an
+  // earlier `twitter:*` tag cannot shadow `og:*` / the canonical name.
+  for (const name of names) {
+    const wanted = name.toLowerCase();
+    for (const node of nodes) {
+      const key = (attr(node, 'property') || attr(node, 'name') || '').toLowerCase();
+      if (key === wanted) {
+        const content = attr(node, 'content');
+        if (content) return normalizeText(content);
+      }
     }
   }
   return '';
@@ -359,8 +394,10 @@ function extractDocument(html: string, url: string): ExtractedDocument {
       // Ignore an invalid canonical link.
     }
   }
+  // `og:updated_time` is a modification time, so it is deliberately not used
+  // as the publication time.
   const publishedAt =
-    metaContent(metas, ['article:published_time', 'datepublished', 'og:updated_time']) ||
+    metaContent(metas, ['article:published_time', 'datepublished']) ||
     attr(findFirst(document, 'time'), 'datetime') ||
     '';
 
@@ -400,6 +437,7 @@ function validatePayload(payload: CcExtractPayload): {
   timeoutMs: number;
 } {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) fail('payload must be an object');
+  if (typeof payload.crawl !== 'string' || !payload.crawl) fail('payload.crawl is required');
   const records = payload.records;
   if (!Array.isArray(records) || records.length === 0 || records.length > MAX_CC_EXTRACT_RECORDS) {
     fail(`records must contain 1..${MAX_CC_EXTRACT_RECORDS} entries`);
@@ -408,20 +446,40 @@ function validatePayload(payload: CcExtractPayload): {
   for (const record of records) {
     if (!record || typeof record !== 'object') fail('record must be an object');
     if (typeof record.url !== 'string' || !record.url) fail('record.url is required');
-    if (!isValidCcWarcPath(record.warcFilename)) fail('record.warcFilename is invalid');
+    if (record.url.length > MAX_CC_EXTRACT_URL_CHARS) {
+      fail(`record.url is longer than ${MAX_CC_EXTRACT_URL_CHARS} characters`);
+    }
+    if (!ccWarcPathMatchesCrawl(record.warcFilename, payload.crawl)) {
+      fail('record.warcFilename is invalid or does not belong to payload.crawl');
+    }
+    if (record.fetchUrl !== undefined) {
+      if (typeof record.fetchUrl !== 'string' || record.fetchUrl.length > MAX_CC_EXTRACT_FETCH_URL_CHARS) {
+        fail(`record.fetchUrl must be a string of at most ${MAX_CC_EXTRACT_FETCH_URL_CHARS} characters`);
+      }
+    }
     if (!Number.isSafeInteger(record.offset) || record.offset < 0) fail('record.offset is invalid');
     if (!Number.isSafeInteger(record.length) || record.length < 1) fail('record.length is invalid');
     totalBytes += record.length;
   }
-  const maxRecordBytes = Math.min(
-    Math.max(1, Math.floor(payload.maxRecordBytes ?? MAX_CC_EXTRACT_RECORD_BYTES)),
-    MAX_CC_EXTRACT_RECORD_BYTES,
-  );
+
+  // Validate the optional caps before clamping: `Math.floor(NaN)` would
+  // otherwise produce a NaN cap and silently disable `readCappedStream`.
+  if (payload.maxRecordBytes !== undefined) {
+    const value = payload.maxRecordBytes;
+    if (!Number.isSafeInteger(value) || value < 1 || value > MAX_CC_EXTRACT_RECORD_BYTES) {
+      fail(`maxRecordBytes must be within 1..${MAX_CC_EXTRACT_RECORD_BYTES}`);
+    }
+  }
+  if (payload.timeoutMs !== undefined) {
+    const value = payload.timeoutMs;
+    if (!Number.isSafeInteger(value) || value < 1000 || value > MAX_CC_EXTRACT_TIMEOUT_MS) {
+      fail(`timeoutMs must be within 1000..${MAX_CC_EXTRACT_TIMEOUT_MS}`);
+    }
+  }
+
+  const maxRecordBytes = payload.maxRecordBytes ?? MAX_CC_EXTRACT_RECORD_BYTES;
   if (totalBytes > MAX_CC_EXTRACT_TOTAL_BYTES) fail('records exceed the total byte cap');
-  const timeoutMs = Math.min(
-    Math.max(1000, Math.floor(payload.timeoutMs ?? DEFAULT_CC_EXTRACT_TIMEOUT_MS)),
-    MAX_CC_EXTRACT_TIMEOUT_MS,
-  );
+  const timeoutMs = payload.timeoutMs ?? DEFAULT_CC_EXTRACT_TIMEOUT_MS;
   return { records, maxRecordBytes, timeoutMs };
 }
 
@@ -480,7 +538,7 @@ export async function handleCcExtract(
       const extracted = extractDocument(html, record.url);
       documents.push({
         ...base,
-        finalUrl: warc.targetUri,
+        targetUri: warc.targetUri,
         canonicalUrl: extracted.canonicalUrl,
         title: extracted.title,
         text: extracted.text,

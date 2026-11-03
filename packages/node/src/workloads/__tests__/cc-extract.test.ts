@@ -15,9 +15,11 @@ function buildWarc(options: {
   status?: number;
   contentType?: string;
   body?: string;
+  warcType?: string;
   extraHeaders?: string;
 } = {}): Uint8Array {
   const target = options.target ?? WARC_URL;
+  const warcType = options.warcType ?? 'response';
   const status = options.status ?? 200;
   const contentType = options.contentType ?? 'text/html; charset=UTF-8';
   const body =
@@ -30,7 +32,7 @@ function buildWarc(options: {
   ]);
   const warc = Buffer.concat([
     Buffer.from(
-      `WARC/1.0\r\nWARC-Type: response\r\nWARC-Target-URI: ${target}\r\nContent-Type: application/http; msgtype=response\r\nContent-Length: ${http.length}\r\n${options.extraHeaders ?? ''}\r\n`,
+      `WARC/1.0\r\nWARC-Type: ${warcType}\r\nWARC-Target-URI: ${target}\r\nContent-Type: application/http; msgtype=response\r\nContent-Length: ${http.length}\r\n${options.extraHeaders ?? ''}\r\n`,
     ),
     http,
     Buffer.from('\r\n\r\n'),
@@ -87,7 +89,7 @@ describe('cc-extract workload', () => {
     expect(doc.lang).toBe('ja');
     expect(doc.publishedAt).toBe('2026-10-01T12:00:00Z');
     expect(doc.canonicalUrl).toBe('https://example.com/canonical');
-    expect(doc.finalUrl).toBe(WARC_URL);
+    expect(doc.targetUri).toBe(WARC_URL);
   });
 
   it('rejects an invalid WARC object path before fetching', async () => {
@@ -193,5 +195,67 @@ describe('cc-extract workload', () => {
     expect(result.documents).toHaveLength(2);
     expect(result.documents[0]!.title).toBe('Example title');
     expect(result.documents[1]!.error).toMatch(/target URI/i);
+  });
+
+  it('marks a record truncated when the WARC header says so', async () => {
+    const compressed = compress(buildWarc({ extraHeaders: 'WARC-Truncated: length\r\n' }));
+    mockFetchForWarc(compressed);
+
+    const result = await handleCcExtract(payload({ length: compressed.byteLength }));
+
+    expect(result.documents[0]!.error).toBeUndefined();
+    expect(result.documents[0]!.truncated).toBe(true);
+  });
+
+  it('rejects a range response without Content-Range', async () => {
+    const compressed = compress(buildWarc());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(toArrayBuffer(compressed), { status: 206 })),
+    );
+
+    const result = await handleCcExtract(payload({ length: compressed.byteLength }));
+
+    expect(result.documents[0]!.error).toMatch(/Content-Range/i);
+  });
+
+  it('rejects a redirect instead of following it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(null, { status: 302, headers: { location: 'https://evil.example/warc.gz' } }),
+      ),
+    );
+
+    const result = await handleCcExtract(payload({ length: 1000 }));
+
+    expect(result.documents[0]!.error).toMatch(/redirect/i);
+  });
+
+  it('rejects non-response WARC records', async () => {
+    for (const warcType of ['resource', 'revisit']) {
+      const compressed = compress(buildWarc({ warcType }));
+      mockFetchForWarc(compressed);
+      const result = await handleCcExtract(payload({ length: compressed.byteLength }));
+      expect(result.documents[0]!.error).toMatch(/unsupported WARC type/i);
+    }
+  });
+
+  it('rejects a WARC path from a different crawl', async () => {
+    await expect(
+      handleCcExtract({
+        crawl: 'CC-MAIN-2026-39',
+        records: [{ url: WARC_URL, warcFilename: WARC_PATH, offset: 0, length: 1000 }],
+      }),
+    ).rejects.toThrow(/belong to payload\.crawl/i);
+  });
+
+  it('rejects non-integer caps instead of disabling them', async () => {
+    await expect(
+      handleCcExtract({ ...payload(), maxRecordBytes: Number.NaN } as never),
+    ).rejects.toThrow(/maxRecordBytes/i);
+    await expect(
+      handleCcExtract({ ...payload(), timeoutMs: Number.NaN } as never),
+    ).rejects.toThrow(/timeoutMs/i);
   });
 });

@@ -32,12 +32,29 @@ export const MAX_CC_EXTRACT_FETCH_URL_CHARS = 4_096;
 export const CC_CRAWL_PATTERN = /^CC-MAIN-\d{4}-\d{2}$/;
 /**
  * WARC object paths are always under `crawl-data/CC-MAIN-.../segments/.../warc/`.
- * The character classes exclude `..`, absolute paths, query strings and hosts.
+ * The character classes exclude absolute paths, query strings and hosts, and
+ * the negative lookaheads reject `.` / `..` path segments so a path can never
+ * be normalised into another directory (important because hosts build signed
+ * range-proxy URLs from this value).
  */
 export const CC_WARC_PATH_PATTERN =
-  /^crawl-data\/CC-MAIN-\d{4}-\d{2}\/segments\/[A-Za-z0-9._-]+\/warc\/[A-Za-z0-9._-]+\.warc\.gz$/;
+  /^crawl-data\/CC-MAIN-\d{4}-\d{2}\/segments\/(?!\.{1,2}\/)[A-Za-z0-9._-]+\/warc\/(?!\.{1,2}\/)[A-Za-z0-9._-]+\.warc\.gz$/;
 
 /** True when a string is a safe Common Crawl WARC object path. */
 export function isValidCcWarcPath(value: unknown): value is string {
   return typeof value === 'string' && CC_WARC_PATH_PATTERN.test(value);
+}
+
+/**
+ * True when the (already validated) WARC object path belongs to `crawl`.
+ * The payload carries both fields, so a mismatched pair is a client bug that
+ * should be rejected instead of silently fetching a different crawl.
+ */
+export function ccWarcPathMatchesCrawl(warcFilename: unknown, crawl: unknown): boolean {
+  return (
+    typeof crawl === 'string' &&
+    CC_CRAWL_PATTERN.test(crawl) &&
+    isValidCcWarcPath(warcFilename) &&
+    warcFilename.startsWith(`crawl-data/${crawl}/`)
+  );
 }

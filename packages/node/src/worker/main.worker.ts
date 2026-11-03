@@ -82,10 +82,11 @@ function createTokenSink(id: string): (token: string) => Promise<void> {
 }
 
 // Measured at worker startup: the maximum WebAssembly linear memory this
-// runtime can actually commit. We reject heavy workloads (and, as defense in
-// depth, EVERY task) when the device cannot commit the memory a multi-GB model
-// needs — unlike navigator.deviceMemory, which mobile Chrome reports quantized
-// and cannot be trusted for gating.
+// runtime can actually commit. We reject heavy workloads when the device cannot
+// commit the memory a multi-GB model needs — unlike navigator.deviceMemory,
+// which mobile Chrome reports quantized and cannot be trusted for gating. Light
+// workloads (cc-extract, file-convert, vector-store, ...) remain available on
+// constrained devices.
 const WASM_MEMORY_BYTES = probeMaxWasmMemoryBytes();
 const CAPABLE = WASM_MEMORY_BYTES >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
 console.log(
@@ -122,6 +123,7 @@ async function runWorkload(
   payload: unknown,
   emitToken: (token: string) => void | Promise<void>,
   hostConfig?: { fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[] },
+  yieldToThrottle?: () => void | Promise<void>,
 ): Promise<unknown> {
   switch (workload) {
     case 'ai-inference':
@@ -160,7 +162,7 @@ async function runWorkload(
     case 'embed-gemma':
       const gemma = await import('../workloads/embed-gemma');
       cacheReleasers.set(workload, gemma.releaseCache);
-      return await gemma.handleEmbedGemma(payload as any);
+      return await gemma.handleEmbedGemma(payload as any, yieldToThrottle);
     default:
       throw new Error(`Unknown workload type: ${workload}`);
   }
@@ -283,7 +285,15 @@ self.onmessage = async (e: MessageEvent) => {
         : [];
       const result = workload === 'swarm-inference'
         ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage, emitToken)
-        : await runWorkload(workload as WorkloadType, payload, emitToken, { fileSourceOrigins, containerImageOrigins, ccRangeOrigins });
+        : await runWorkload(
+            workload as WorkloadType,
+            payload,
+            emitToken,
+            { fileSourceOrigins, containerImageOrigins, ccRangeOrigins },
+            async () => {
+              await throttle?.yieldIfOverloaded();
+            },
+          );
 
       self.postMessage({ id, type: 'done', result });
       console.log(
