@@ -45,6 +45,13 @@ const DEFAULT_AI_MODELS: Record<string, AiModelDefinition> = {
     revision: 'main',
     maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
   },
+  'onnx-community/embeddinggemma-2-ONNX': {
+    repo: 'onnx-community/embeddinggemma-2-ONNX',
+    revision: 'main',
+    // The fp16 text-only encoder is substantially larger than the 512 MiB
+    // default; the vision/audio encoders are disabled for this workload.
+    maxBytes: 1024 * 1024 * 1024,
+  },
 };
 
 const registry = new Map<string, AiModelDefinition>(

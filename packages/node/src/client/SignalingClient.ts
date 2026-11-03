@@ -17,6 +17,7 @@ import { assertPublicUrl } from '../executor/egress-guard';
 import { isCurrentSwarmPeerSignal, SwarmPeerTransport } from '../swarm/peer-transport';
 import { evaluateMobileLifecycle } from './mobile-lifecycle';
 import {
+  HEAVY_WORKLOADS,
   buildNodeSignalProtocols,
   buildWsUrl,
   decodeSwarmEnvelope,
@@ -497,15 +498,24 @@ class SignalingClient {
 
       // Gate heavy WASM workloads on a real measured allocation probe, not on
       // navigator.deviceMemory (which mobile Chrome reports quantized and is
-      // therefore unsafe). If the device cannot actually commit the memory a
-      // multi-GB model needs, advertise NO capabilities so the orchestrator
-      // routes every task elsewhere.
+      // therefore unsafe). Incapable devices still advertise light workloads
+      // (for example cc-extract), so the orchestrator can use them without
+      // risking a multi-GB allocation.
       const wasmMemoryBytes = probeMaxWasmMemoryBytes();
       const capable = wasmMemoryBytes >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
       const requested = this.config.capabilities ?? ['ai-inference', 'image-process'];
-      let capabilities = capable ? [...requested] : [];
+      let capabilities = [...requested];
+      if (!capable) {
+        capabilities = capabilities.filter((capability) => !HEAVY_WORKLOADS.has(capability));
+      }
       if (validatedHttpsOrigins(this.config.containerImageOrigins).length === 0) {
         capabilities = capabilities.filter((cap) => cap !== 'container');
+      }
+      // Browser nodes cannot fetch Common Crawl ranges directly (CORS), so a
+      // node without an allowlisted range proxy can never complete an
+      // `cc-extract` task. Do not advertise the capability in that case.
+      if (validatedHttpsOrigins(this.config.ccRangeOrigins).length === 0) {
+        capabilities = capabilities.filter((cap) => cap !== 'cc-extract');
       }
 
       // Swarm inference additionally needs a working WebGPU device and an
@@ -728,6 +738,7 @@ class SignalingClient {
           maxCpuLoad: this.effectiveMaxCpuLoad(),
           fileSourceOrigins: validatedHttpsOrigins(this.config.fileSourceOrigins),
           containerImageOrigins: validatedHttpsOrigins(this.config.containerImageOrigins),
+          ccRangeOrigins: validatedHttpsOrigins(this.config.ccRangeOrigins),
         },
       );
       this.send({ type: 'result', taskId: data.taskId, payload: result, attemptId });
