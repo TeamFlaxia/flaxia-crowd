@@ -58,4 +58,23 @@ describe('SignalingClient (incapable device)', () => {
     expect(JSON.parse(opts.body).capabilities).toEqual([]);
     expect(JSON.parse(opts.body).wasmMemoryBytes).toBe(0);
   });
+
+  it('advertises light workloads even when the memory probe fails', async () => {
+    globalThis.WebSocket = vi.fn() as any;
+    mockFetchToken();
+    seedGrantedConsent();
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      capabilities: ['ai-inference', 'cc-extract'],
+    });
+    await flush();
+    await flush();
+
+    const [, opts] = (global.fetch as any).mock.calls[0];
+    expect(JSON.parse(opts.body).capabilities).toEqual(['cc-extract']);
+    expect(JSON.parse(opts.body).wasmMemoryBytes).toBe(0);
+  });
 });

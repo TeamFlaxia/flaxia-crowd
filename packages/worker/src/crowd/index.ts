@@ -5,6 +5,18 @@ import {
   isRoutableWorkload,
   defaultTimeoutFor,
   MAX_SWARM_NODES,
+  MAX_CC_EXTRACT_RECORDS,
+  MAX_CC_EXTRACT_RECORD_BYTES,
+  MAX_CC_EXTRACT_TOTAL_BYTES,
+  MAX_CC_EXTRACT_TIMEOUT_MS,
+  MAX_CC_EXTRACT_URL_CHARS,
+  MAX_CC_EXTRACT_FETCH_URL_CHARS,
+  MAX_EMBED_GEMMA_TEXTS,
+  MAX_EMBED_GEMMA_TOTAL_CHARS,
+  MAX_EMBED_GEMMA_TEXT_CHARS,
+  isEmbedGemmaDimensions,
+  CC_CRAWL_PATTERN,
+  isValidCcWarcPath,
   NODE_SIGNAL_PROTOCOL,
   SUBSCRIBE_PROTOCOL,
   parseBearerSubprotocol,
@@ -150,6 +162,129 @@ export function validateSwarmPayload(payload: unknown): string | null {
   }
   if (swarm.preferWarm !== undefined && swarm.preferWarm !== null && typeof swarm.preferWarm !== 'boolean') {
     return 'payload.swarm.preferWarm must be a boolean'
+  }
+  return null
+}
+
+/**
+ * Validate a `cc-extract` payload at the API boundary.
+ *
+ * The node re-validates the same limits (defense in depth), but rejecting a bad
+ * record set here keeps malformed or oversized WARC references out of the
+ * queue, where they would otherwise occupy a volunteer slot before failing.
+ */
+export function validateCcExtractPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return 'payload must be an object'
+  }
+  const body = payload as Record<string, unknown>
+
+  if (typeof body.crawl !== 'string' || !CC_CRAWL_PATTERN.test(body.crawl)) {
+    return 'payload.crawl must be a CC-MAIN-YYYY-WW crawl id'
+  }
+
+  const records = body.records
+  if (!Array.isArray(records) || records.length === 0 || records.length > MAX_CC_EXTRACT_RECORDS) {
+    return `payload.records must contain 1..${MAX_CC_EXTRACT_RECORDS} records`
+  }
+
+  let totalBytes = 0
+  for (const entry of records) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return 'payload.records entries must be objects'
+    }
+    const record = entry as Record<string, unknown>
+    if (typeof record.url !== 'string' || !record.url || record.url.length > MAX_CC_EXTRACT_URL_CHARS) {
+      return `payload.records[].url must be a non-empty string of at most ${MAX_CC_EXTRACT_URL_CHARS} characters`
+    }
+    try {
+      const parsed = new URL(record.url)
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        return 'payload.records[].url must be an http(s) URL'
+      }
+    } catch {
+      return 'payload.records[].url must be a valid URL'
+    }
+    if (!isValidCcWarcPath(record.warcFilename)) {
+      return 'payload.records[].warcFilename must be a Common Crawl WARC object path'
+    }
+    if (record.fetchUrl !== undefined) {
+      if (typeof record.fetchUrl !== 'string' || record.fetchUrl.length > MAX_CC_EXTRACT_FETCH_URL_CHARS) {
+        return `payload.records[].fetchUrl must be a string of at most ${MAX_CC_EXTRACT_FETCH_URL_CHARS} characters`
+      }
+      try {
+        const parsed = new URL(record.fetchUrl)
+        if (parsed.protocol !== 'https:') return 'payload.records[].fetchUrl must use https'
+      } catch {
+        return 'payload.records[].fetchUrl must be a valid URL'
+      }
+    }
+    if (!Number.isSafeInteger(record.offset) || (record.offset as number) < 0) {
+      return 'payload.records[].offset must be a non-negative integer'
+    }
+    if (
+      !Number.isSafeInteger(record.length) ||
+      (record.length as number) < 1 ||
+      (record.length as number) > MAX_CC_EXTRACT_RECORD_BYTES
+    ) {
+      return `payload.records[].length must be within 1..${MAX_CC_EXTRACT_RECORD_BYTES}`
+    }
+    totalBytes += record.length as number
+    if (record.languages !== undefined && typeof record.languages !== 'string') {
+      return 'payload.records[].languages must be a string'
+    }
+    if (record.contentDigest !== undefined && typeof record.contentDigest !== 'string') {
+      return 'payload.records[].contentDigest must be a string'
+    }
+  }
+  if (totalBytes > MAX_CC_EXTRACT_TOTAL_BYTES) {
+    return `payload.records total bytes must be <= ${MAX_CC_EXTRACT_TOTAL_BYTES}`
+  }
+
+  if (body.maxRecordBytes !== undefined) {
+    const value = body.maxRecordBytes
+    if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > MAX_CC_EXTRACT_RECORD_BYTES) {
+      return `payload.maxRecordBytes must be within 1..${MAX_CC_EXTRACT_RECORD_BYTES}`
+    }
+  }
+  if (body.timeoutMs !== undefined) {
+    const value = body.timeoutMs
+    if (!Number.isSafeInteger(value) || (value as number) < 1000 || (value as number) > MAX_CC_EXTRACT_TIMEOUT_MS) {
+      return `payload.timeoutMs must be within 1000..${MAX_CC_EXTRACT_TIMEOUT_MS}`
+    }
+  }
+
+  return null
+}
+
+/**
+ * Validate an `embed-gemma` payload at the API boundary. The node applies the
+ * same caps before loading the 270M text model.
+ */
+export function validateEmbedGemmaPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return 'payload must be an object'
+  }
+  const body = payload as Record<string, unknown>
+  const texts = body.texts
+  if (!Array.isArray(texts) || texts.length === 0 || texts.length > MAX_EMBED_GEMMA_TEXTS) {
+    return `payload.texts must contain 1..${MAX_EMBED_GEMMA_TEXTS} strings`
+  }
+  let totalChars = 0
+  for (const text of texts) {
+    if (typeof text !== 'string' || text.length === 0) {
+      return 'payload.texts entries must be non-empty strings'
+    }
+    if (text.length > MAX_EMBED_GEMMA_TEXT_CHARS) {
+      return `payload.texts entries must be at most ${MAX_EMBED_GEMMA_TEXT_CHARS} characters`
+    }
+    totalChars += text.length
+  }
+  if (totalChars > MAX_EMBED_GEMMA_TOTAL_CHARS) {
+    return `payload.texts must total at most ${MAX_EMBED_GEMMA_TOTAL_CHARS} characters`
+  }
+  if (body.dimensions !== undefined && !isEmbedGemmaDimensions(body.dimensions)) {
+    return 'payload.dimensions must be one of 768, 512, 256, 128'
   }
   return null
 }
@@ -393,6 +528,14 @@ app.post('/tasks', async (c) => {
   if (body.workload === 'swarm-inference') {
     const swarmError = validateSwarmPayload(body.payload)
     if (swarmError) return c.json({ error: swarmError }, 400)
+  }
+  if (body.workload === 'cc-extract') {
+    const extractError = validateCcExtractPayload(body.payload)
+    if (extractError) return c.json({ error: extractError }, 400)
+  }
+  if (body.workload === 'embed-gemma') {
+    const embedError = validateEmbedGemmaPayload(body.payload)
+    if (embedError) return c.json({ error: embedError }, 400)
   }
 
   const { sites: allowedSites, error: sitesError } = parseAllowedSites(body.payload)

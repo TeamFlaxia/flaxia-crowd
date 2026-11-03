@@ -11,8 +11,10 @@
  *   disclosed what actually runs on the device.
  * - v2: the informed-consent copy below (third-party workloads, orchestrator
  *   registration, persistent connection, resource usage).
+ * - v3: adds public-web-archive fetching and text extraction (`cc-extract`),
+ *   including that the destination site sees the device's IP address.
  */
-export const CONSENT_NOTICE_VERSION = 2;
+export const CONSENT_NOTICE_VERSION = 3;
 
 /**
  * The disclosure shown in the built-in banner. Deliberately static: hosts may

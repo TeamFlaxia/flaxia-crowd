@@ -2,6 +2,8 @@ export * from './types';
 export * from './errors';
 export * from './client';
 export * from './workloads';
+export * from './cc-extract';
+export * from './embed-gemma';
 export * from './webhook';
 export * from './nsfw';
 export * from './swarm';
