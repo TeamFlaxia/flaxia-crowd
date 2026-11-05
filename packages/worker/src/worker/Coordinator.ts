@@ -1938,14 +1938,14 @@ export class Coordinator extends DurableObject<Env> {
 
     // Sweep the pending queue: a task nobody can serve must fail instead of
     // living forever (and pinning storage) when no eligible node ever appears.
-    const pendingIds = await this.getPending();
+    this.pendingCache = null;
+    const pendingIds = await this.ctx.storage.get<string[]>("queue:pending") || [];
+    this.pendingCache = pendingIds;
     for (const taskId of pendingIds) {
       const task = await this.getTask(taskId);
       if (!task || task.status !== "pending") {
-        if (!task) {
-          this.pendingCache = (await this.getPending()).filter(id => id !== taskId);
-          await this.ctx.storage.put("queue:pending", this.pendingCache);
-        }
+        this.pendingCache = this.pendingCache.filter(id => id !== taskId);
+        await this.ctx.storage.put("queue:pending", this.pendingCache);
         continue;
       }
       const ttl = Math.min(task.timeoutMs || DEFAULT_TIMEOUT_MS, MAX_PENDING_TTL_MS);

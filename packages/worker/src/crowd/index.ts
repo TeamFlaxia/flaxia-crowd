@@ -262,7 +262,7 @@ app.post('/nodes/register', async (c) => {
     exp,
   })
 
-  return c.json({ token, nodeId, expiresAt: exp, lowMemory: deviceMemory === null || deviceMemory < 4 })
+  return c.json({ token, nodeId, expiresAt: exp, lowMemory: wasmMemoryBytes == null || wasmMemoryBytes < 2 * 1024 ** 3 })
 })
 
 app.get('/signal', async (c) => {
@@ -297,7 +297,7 @@ app.get('/signal', async (c) => {
   url.searchParams.set('site', payload.siteId)
   url.searchParams.set('capabilities', payload.capabilities.join(','))
   if (payload.fileSources) url.searchParams.set('fileSources', 'true')
-  url.searchParams.set('lowMemory', String(payload.deviceMemory === null || payload.deviceMemory === undefined || payload.deviceMemory < 4))
+  url.searchParams.set('lowMemory', String(payload.wasmMemoryBytes == null || payload.wasmMemoryBytes < 2 * 1024 ** 3))
   if (typeof payload.wasmMemoryBytes === 'number') {
     url.searchParams.set('wasm', String(payload.wasmMemoryBytes))
   }
