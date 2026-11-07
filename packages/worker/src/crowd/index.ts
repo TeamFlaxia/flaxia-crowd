@@ -31,6 +31,28 @@ export { isHeavyWorkload } from '@flaxia/sdk'
 
 const MIN_TIMEOUT_MS = 1000
 const MAX_TIMEOUT_MS = 3600000
+/** Measured WASM memory below this is not enough for a heavy workload. */
+const LOW_MEMORY_WASM_BYTES = 2 * 1024 ** 3
+/** Physical RAM (GiB) below this is not enough for a heavy workload. */
+const LOW_MEMORY_DEVICE_GIB = 4
+
+/**
+ * Decide whether a node is too memory-constrained for heavy workloads.
+ *
+ * Browser nodes report a measured `wasmMemoryBytes` probe; that wins when
+ * present. Native (non-WASM) nodes only report physical RAM as
+ * `deviceMemory` in GiB and never send `wasmMemoryBytes` — treating a
+ * missing probe as low-memory would exclude every native node from every
+ * heavy workload, so fall back to the deviceMemory signal. A node reporting
+ * neither (e.g. a mobile WebView) stays low-memory, as before.
+ */
+function isLowMemoryNode(
+  wasmMemoryBytes: number | undefined,
+  deviceMemory: number | null | undefined,
+): boolean {
+  if (typeof wasmMemoryBytes === 'number') return wasmMemoryBytes < LOW_MEMORY_WASM_BYTES
+  return deviceMemory == null || deviceMemory < LOW_MEMORY_DEVICE_GIB
+}
 /** Upper bound on `payload.allowedSites` entries. */
 const MAX_ALLOWED_SITES = 16
 /** Upper bound on a single site id. */
@@ -152,6 +174,28 @@ export function validateSwarmPayload(payload: unknown): string | null {
 }
 
 /**
+ * Validate `ai-inference` ondeviceOnly at the API boundary. Only a boolean
+ * (or absent) is accepted; anything else would silently reinterpret the
+ * Light Inference gate and is rejected with 400.
+ */
+export function validateAiInferencePayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return 'payload must be an object'
+  }
+  const body = payload as Record<string, unknown>
+  const options = body.options
+  if (options === undefined || options === null) return null
+  if (typeof options !== 'object' || Array.isArray(options)) {
+    return 'payload.options must be an object'
+  }
+  const rec = options as Record<string, unknown>
+  if (rec.ondeviceOnly !== undefined && rec.ondeviceOnly !== null && typeof rec.ondeviceOnly !== 'boolean') {
+    return 'payload.options.ondeviceOnly must be a boolean'
+  }
+  return null
+}
+
+/**
  * Read the optional `payload.allowedSites` allow-list. Returns an error message
  * when the value is malformed, or `undefined` sites when the task is open.
  */
@@ -262,7 +306,7 @@ app.post('/nodes/register', async (c) => {
     exp,
   })
 
-  return c.json({ token, nodeId, expiresAt: exp, lowMemory: wasmMemoryBytes == null || wasmMemoryBytes < 2 * 1024 ** 3 })
+  return c.json({ token, nodeId, expiresAt: exp, lowMemory: isLowMemoryNode(wasmMemoryBytes, deviceMemory) })
 })
 
 app.get('/signal', async (c) => {
@@ -297,7 +341,7 @@ app.get('/signal', async (c) => {
   url.searchParams.set('site', payload.siteId)
   url.searchParams.set('capabilities', payload.capabilities.join(','))
   if (payload.fileSources) url.searchParams.set('fileSources', 'true')
-  url.searchParams.set('lowMemory', String(payload.wasmMemoryBytes == null || payload.wasmMemoryBytes < 2 * 1024 ** 3))
+  url.searchParams.set('lowMemory', String(isLowMemoryNode(payload.wasmMemoryBytes, payload.deviceMemory)))
   if (typeof payload.wasmMemoryBytes === 'number') {
     url.searchParams.set('wasm', String(payload.wasmMemoryBytes))
   }
@@ -393,6 +437,11 @@ app.post('/tasks', async (c) => {
   if (body.workload === 'swarm-inference') {
     const swarmError = validateSwarmPayload(body.payload)
     if (swarmError) return c.json({ error: swarmError }, 400)
+  }
+
+  if (body.workload === 'ai-inference') {
+    const aiError = validateAiInferencePayload(body.payload)
+    if (aiError) return c.json({ error: aiError }, 400)
   }
 
   const { sites: allowedSites, error: sitesError } = parseAllowedSites(body.payload)
