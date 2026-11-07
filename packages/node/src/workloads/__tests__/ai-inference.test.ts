@@ -417,3 +417,59 @@ describe('AI Inference model allowlist (#11)', () => {
     expect(mockPipeline).not.toHaveBeenCalled();
   });
 });
+
+describe('AI Inference Light Inference (ondeviceOnly)', () => {
+  it('rejects a non-boolean ondeviceOnly before any download', async () => {
+    await expect(
+      handleAiInference({ task: 'text-generation', model: TEST_MODEL, input: 'hi', options: { ondeviceOnly: 'yes' } } as any),
+    ).rejects.toThrow(/ondeviceOnly must be a boolean/);
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('fails with 500 ONDEVICE_UNAVAILABLE when ondeviceOnly and model is not preloaded', async () => {
+    // Fresh model id never used in this process: no ready pipeline exists yet.
+    registerAiModels({
+      'test/ondevice-never-loaded': { repo: 'test/ondevice-never-loaded', revision: 'r', maxBytes: 1024 * 1024 },
+    });
+    let caught: unknown;
+    try {
+      await handleAiInference({
+        task: 'translation',
+        model: 'test/ondevice-never-loaded',
+        input: 'hello',
+        options: { ondeviceOnly: true },
+      } as any);
+    } catch (e) {
+      caught = e;
+    }
+    const err = caught as { code?: string; status?: number; message?: string };
+    expect(err?.code).toBe('ONDEVICE_UNAVAILABLE');
+    expect(err?.status).toBe(500);
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('serves ondeviceOnly once the model is preloaded without downloading', async () => {
+    registerAiModels({
+      'test/ondevice-warm': { repo: 'test/ondevice-warm', revision: 'r', maxBytes: 1024 * 1024 },
+    });
+    // Warm via a normal (delegating) call, then serve ondeviceOnly.
+    await handleAiInference({ task: 'translation', model: 'test/ondevice-warm', input: 'warm', options: {} });
+    expect(mockPipeline).toHaveBeenCalledTimes(1);
+    mockPipeline.mockClear();
+    const result = await handleAiInference({
+      task: 'translation',
+      model: 'test/ondevice-warm',
+      input: 'hello',
+      options: { ondeviceOnly: true },
+    } as any);
+    expect(result.output).toBeDefined();
+    // Serving from the warm cache must not trigger a new download.
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('isAiModelPreloaded reflects the warm state', async () => {
+    const { isAiModelPreloaded } = await import('../ai-inference');
+    expect(isAiModelPreloaded(TEST_MODEL)).toBe(true); // TEST_MODEL served above
+    expect(isAiModelPreloaded('test/ondevice-never-loaded')).toBe(false);
+  });
+});

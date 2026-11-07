@@ -14,4 +14,14 @@ export { initConsentIntegrity as initFlaxiaNodeConsent } from './consent/storage
 // was rendered and accepted by the visitor.
 export { setHostManagedConsentAllowed as setFlaxiaNodeHostManagedConsent } from './consent/storage';
 export { initFlaxiaNode };
+export {
+  LIGHT_INFERENCE_TRANSLATE_MODEL,
+} from './client/light-preloader';
+export {
+  isAiModelPreloaded,
+  preloadAiModel,
+  LIGHT_INFERENCE_TRANSLATE_MODEL as LIGHT_INFERENCE_TRANSLATE_MODEL_ID,
+  LIGHT_INFERENCE_TRANSLATE_TASK,
+  LIGHT_INFERENCE_TRANSLATE_DTYPE,
+} from './workloads/ai-inference';
 export type { ConsentControls, ConsentState, FlaxiaNodeController } from '@flaxia/sdk';

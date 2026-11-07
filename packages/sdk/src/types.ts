@@ -45,6 +45,14 @@ export interface AiInferenceOptions {
   src_lang?: string;
   /** Target language code (for translation tasks, e.g. 'ja_XX') */
   tgt_lang?: string;
+  /**
+   * When `true`, the inference must run on the device that already holds the
+   * model. If the model is not preloaded, the task fails immediately with
+   * `ONDEVICE_UNAVAILABLE` (HTTP 500) instead of downloading. When `false`
+   * or omitted, the model may be downloaded on demand and (for coordinator
+   * routed tasks) delegated to another node.
+   */
+  ondeviceOnly?: boolean;
 }
 
 export interface AiInferencePayload {
@@ -577,6 +585,27 @@ export interface FlaxiaNodeController {
   deny(): void;
   /** Forget the consent decision entirely (granted, denied and expiry). */
   clearConsent(): void;
+  /**
+   * Run `ai-inference` locally without involving the orchestrator. Only
+   * present on nodes built with Light Inference support; older bundles leave
+   * it undefined and callers must fall back to a coordinator routed task.
+   *
+   * When `options.ondeviceOnly === true` and the model is not already held,
+   * throws `OndeviceUnavailableError` (code `ONDEVICE_UNAVAILABLE`, status 500).
+   */
+  runLocalAiInference?: (
+    payload: AiInferencePayload,
+    onToken?: (token: string) => void | Promise<void>,
+  ) => Promise<AiInferenceResult>;
+  /** Whether the given model is ready to serve without a download. */
+  isAiModelPreloaded?: (model: string) => boolean;
+  /** Download + warm the given model during idle time. */
+  preloadAiModel?: (request: {
+    task: string;
+    model: string;
+    dtype?: string;
+    device?: string;
+  }) => Promise<void>;
 }
 
 export interface NodeConfig {

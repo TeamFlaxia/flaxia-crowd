@@ -152,6 +152,28 @@ export function validateSwarmPayload(payload: unknown): string | null {
 }
 
 /**
+ * Validate `ai-inference` ondeviceOnly at the API boundary. Only a boolean
+ * (or absent) is accepted; anything else would silently reinterpret the
+ * Light Inference gate and is rejected with 400.
+ */
+export function validateAiInferencePayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return 'payload must be an object'
+  }
+  const body = payload as Record<string, unknown>
+  const options = body.options
+  if (options === undefined || options === null) return null
+  if (typeof options !== 'object' || Array.isArray(options)) {
+    return 'payload.options must be an object'
+  }
+  const rec = options as Record<string, unknown>
+  if (rec.ondeviceOnly !== undefined && rec.ondeviceOnly !== null && typeof rec.ondeviceOnly !== 'boolean') {
+    return 'payload.options.ondeviceOnly must be a boolean'
+  }
+  return null
+}
+
+/**
  * Read the optional `payload.allowedSites` allow-list. Returns an error message
  * when the value is malformed, or `undefined` sites when the task is open.
  */
@@ -393,6 +415,11 @@ app.post('/tasks', async (c) => {
   if (body.workload === 'swarm-inference') {
     const swarmError = validateSwarmPayload(body.payload)
     if (swarmError) return c.json({ error: swarmError }, 400)
+  }
+
+  if (body.workload === 'ai-inference') {
+    const aiError = validateAiInferencePayload(body.payload)
+    if (aiError) return c.json({ error: aiError }, 400)
   }
 
   const { sites: allowedSites, error: sitesError } = parseAllowedSites(body.payload)

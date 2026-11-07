@@ -45,6 +45,14 @@ const DEFAULT_AI_MODELS: Record<string, AiModelDefinition> = {
     revision: 'main',
     maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
   },
+  // Light Inference translate model (M2M100, ONNX). Registered under its
+  // canonical repo id so `resolveAiModel()` stays fail-closed; hosts may
+  // alias it (e.g. 'm2m100-translate') via `registerAiModels` at startup.
+  'Xenova/m2m100_418M': {
+    repo: 'Xenova/m2m100_418M',
+    revision: 'main',
+    maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
+  },
 };
 
 const registry = new Map<string, AiModelDefinition>(
@@ -148,6 +156,19 @@ export function resolveAiDtype(dtype: unknown): AllowedAiDtype | undefined {
     );
   }
   return dtype as AllowedAiDtype;
+}
+
+/**
+ * Validate `options.ondeviceOnly`. Absent = false (download on demand and
+ * allow coordinator delegation). Anything but a boolean is rejected so the
+ * flag cannot silently widen the download/delegation surface.
+ */
+export function resolveOndeviceOnly(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== 'boolean') {
+    throw new Error(`ai-inference: option ondeviceOnly must be a boolean, got ${JSON.stringify(value)}`);
+  }
+  return value;
 }
 
 /**
