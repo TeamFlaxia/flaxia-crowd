@@ -31,6 +31,28 @@ export { isHeavyWorkload } from '@flaxia/sdk'
 
 const MIN_TIMEOUT_MS = 1000
 const MAX_TIMEOUT_MS = 3600000
+/** Measured WASM memory below this is not enough for a heavy workload. */
+const LOW_MEMORY_WASM_BYTES = 2 * 1024 ** 3
+/** Physical RAM (GiB) below this is not enough for a heavy workload. */
+const LOW_MEMORY_DEVICE_GIB = 4
+
+/**
+ * Decide whether a node is too memory-constrained for heavy workloads.
+ *
+ * Browser nodes report a measured `wasmMemoryBytes` probe; that wins when
+ * present. Native (non-WASM) nodes only report physical RAM as
+ * `deviceMemory` in GiB and never send `wasmMemoryBytes` — treating a
+ * missing probe as low-memory would exclude every native node from every
+ * heavy workload, so fall back to the deviceMemory signal. A node reporting
+ * neither (e.g. a mobile WebView) stays low-memory, as before.
+ */
+function isLowMemoryNode(
+  wasmMemoryBytes: number | undefined,
+  deviceMemory: number | null | undefined,
+): boolean {
+  if (typeof wasmMemoryBytes === 'number') return wasmMemoryBytes < LOW_MEMORY_WASM_BYTES
+  return deviceMemory == null || deviceMemory < LOW_MEMORY_DEVICE_GIB
+}
 /** Upper bound on `payload.allowedSites` entries. */
 const MAX_ALLOWED_SITES = 16
 /** Upper bound on a single site id. */
@@ -284,7 +306,7 @@ app.post('/nodes/register', async (c) => {
     exp,
   })
 
-  return c.json({ token, nodeId, expiresAt: exp, lowMemory: wasmMemoryBytes == null || wasmMemoryBytes < 2 * 1024 ** 3 })
+  return c.json({ token, nodeId, expiresAt: exp, lowMemory: isLowMemoryNode(wasmMemoryBytes, deviceMemory) })
 })
 
 app.get('/signal', async (c) => {
@@ -319,7 +341,7 @@ app.get('/signal', async (c) => {
   url.searchParams.set('site', payload.siteId)
   url.searchParams.set('capabilities', payload.capabilities.join(','))
   if (payload.fileSources) url.searchParams.set('fileSources', 'true')
-  url.searchParams.set('lowMemory', String(payload.wasmMemoryBytes == null || payload.wasmMemoryBytes < 2 * 1024 ** 3))
+  url.searchParams.set('lowMemory', String(isLowMemoryNode(payload.wasmMemoryBytes, payload.deviceMemory)))
   if (typeof payload.wasmMemoryBytes === 'number') {
     url.searchParams.set('wasm', String(payload.wasmMemoryBytes))
   }
