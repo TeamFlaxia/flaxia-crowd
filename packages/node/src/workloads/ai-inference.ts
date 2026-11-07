@@ -62,6 +62,16 @@ export const LIGHT_INFERENCE_TRANSLATE_TASK = 'translation';
 export const LIGHT_INFERENCE_TRANSLATE_DTYPE = 'q4f16';
 
 /**
+ * Flaxia's default translate model. PLaMO 3 Translate 0.8B is a decoder-only
+ * text-generation model, so its Light Inference task is `text-generation`,
+ * not `translation`. Kept warm alongside M2M100 so the default en↔ja pairs
+ * serve instantly on device instead of answering ONDEVICE_UNAVAILABLE.
+ */
+export const LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL = 'TeamFlaxia/plamo-3-translate-0.8b-onnx';
+export const LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK = 'text-generation';
+export const LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE = 'q4f16';
+
+/**
  * Drops all cached model pipelines so the (potentially hundreds of MB of)
  * transformers/onnxruntime memory can be garbage-collected. Called by the
  * worker after an idle period so a node does not pin every model it ever saw.

@@ -53,6 +53,16 @@ const DEFAULT_AI_MODELS: Record<string, AiModelDefinition> = {
     revision: 'main',
     maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
   },
+  // Flaxia's default translate model (PLaMO 3 Translate 0.8B, ONNX). The
+  // q4f16 weights weigh ~673 MiB, above the 512 MiB default cap, and the
+  // repo's fp16 weights reach ~1.7 GiB — so the entry raises the per-file
+  // cap to 2 GiB (the 4 GiB hard ceiling still applies at the fetch guard).
+  // Pinned to an immutable revision, matching Flaxia's PLAMO_MODEL_REVISION.
+  'TeamFlaxia/plamo-3-translate-0.8b-onnx': {
+    repo: 'TeamFlaxia/plamo-3-translate-0.8b-onnx',
+    revision: '1c8417ee1a72442440ad515b02f99186c81fd08a',
+    maxBytes: 2 * 1024 ** 3,
+  },
 };
 
 const registry = new Map<string, AiModelDefinition>(

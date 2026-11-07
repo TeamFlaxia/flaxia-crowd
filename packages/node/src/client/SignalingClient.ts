@@ -18,6 +18,14 @@ import { isCurrentSwarmPeerSignal, SwarmPeerTransport } from '../swarm/peer-tran
 import { evaluateMobileLifecycle } from './mobile-lifecycle';
 import { LightPreloader } from './light-preloader';
 import {
+  LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE,
+  LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL,
+  LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK,
+  LIGHT_INFERENCE_TRANSLATE_DTYPE,
+  LIGHT_INFERENCE_TRANSLATE_MODEL,
+  LIGHT_INFERENCE_TRANSLATE_TASK,
+} from './light-preloader';
+import {
   buildNodeSignalProtocols,
   buildWsUrl,
   decodeSwarmEnvelope,
@@ -804,7 +812,21 @@ class SignalingClient {
     if (this.lightPreloader) this.lightPreloader.stop();
     this.lightPreloader = new LightPreloader(
       () => getConsentState(),
-      { onPreloaded: () => { /* status chip refresh hook for host diagnostics */ } },
+      {
+        targets: [
+          {
+            model: LIGHT_INFERENCE_TRANSLATE_MODEL,
+            task: LIGHT_INFERENCE_TRANSLATE_TASK,
+            dtype: LIGHT_INFERENCE_TRANSLATE_DTYPE,
+          },
+          {
+            model: LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL,
+            task: LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK,
+            dtype: LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE,
+          },
+        ],
+        onPreloaded: () => { /* status chip refresh hook for host diagnostics */ },
+      },
       (model) => this.isAiModelPreloaded(model),
       (request) => this.preloadAiModel(request),
     );
