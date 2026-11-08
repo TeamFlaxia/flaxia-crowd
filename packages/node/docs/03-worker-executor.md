@@ -89,3 +89,13 @@ export default defineConfig({
 
 WorkerのURLは `new Worker(new URL('./worker/main.worker.ts', import.meta.url))` で参照する。
 Viteがworkerを自動的に別バンドルに分離してくれる。
+# ストリーミング時のバッファ上限
+
+- 通常の`TextStreamer`経路は非同期token sinkの待ち行列を64件・256K文字に制限する。
+  生成APIが同期コールバックしか提供しないため、上限を超えるほどsinkが遅れた場合は
+  生成を中断してメモリ増加を防ぐ。
+- Swarmのactivationは各トークンにつき1往復を完了してから次を生成する。完全な
+  activation envelopeは最大8 MiB。DataChannelは16 KiBずつ送信し、送信待ち量が
+  256 KiBを超えたら低水位まで待つ。再構成中のactivationは最大2件。
+- 購読者ACKによる停止・再開はSwarmではトークン境界に伝播する。通常の生成では
+  token sinkを停止し、上限に達した場合は前述の中断契約を適用する。

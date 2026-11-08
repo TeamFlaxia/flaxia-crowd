@@ -1,5 +1,6 @@
 import './index.css';
 import { submitCrowdTask, getCrowdTask } from './crowd-client';
+import { resolveOrchestratorUrl } from './orchestrator-config';
 import { initFlaxiaNode } from '@flaxia/node';
 
 const LABELS = ['1 star', '2 stars', '3 stars', '4 stars', '5 stars'] as readonly string[];
@@ -16,16 +17,15 @@ interface HistoryEntry {
   score: number;
 }
 
-const defaultOrchestrator = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  ? 'http://localhost:8787'
-  : 'https://flaxia-worker.remydre8.workers.dev';
-
-const savedOrchestrator = localStorage.getItem('flaxia_orchestrator_url');
-const displayOrchestratorUrl = savedOrchestrator || defaultOrchestrator;
-// Node signaling may connect directly to the orchestrator. Authenticated task
-// API calls are intentionally separate and always go through same-origin
-// /crowd/* so the browser never receives the API key.
-const orchestratorUrl = displayOrchestratorUrl;
+// The node socket may connect directly to the configured coordinator. Never
+// let localStorage redirect an opted-in node to an unreviewed signaling server.
+// Production builds must set this value explicitly; local development defaults
+// to the local Wrangler worker. Task API requests stay on the same-origin proxy.
+const orchestratorUrl = resolveOrchestratorUrl(
+  import.meta.env.VITE_FLAXIA_ORCHESTRATOR_URL ||
+    (import.meta.env.DEV ? 'http://localhost:8787' : undefined),
+  import.meta.env.DEV,
+);
 
 // UI Elements
 const analysisInput = document.getElementById('analysis-input') as HTMLTextAreaElement;
@@ -38,6 +38,12 @@ const historyList = document.getElementById('history-list') as HTMLDivElement;
 const clearHistoryBtn = document.getElementById('clear-history-btn') as HTMLButtonElement;
 const newAnalysisBtn = document.getElementById('new-analysis-btn') as HTMLButtonElement;
 const consentTrigger = document.getElementById('consent-trigger') as HTMLButtonElement;
+
+if (!orchestratorUrl) {
+  consentTrigger.disabled = true;
+  consentTrigger.title = 'Node participation is not configured for this deployment';
+  consentTrigger.setAttribute('aria-label', consentTrigger.title);
+}
 
 // Task Visualizer
 function resetVisualizer() { }
@@ -170,6 +176,7 @@ newAnalysisBtn.addEventListener('click', () => {
 restoreHistory();
 
 consentTrigger.addEventListener('click', () => {
+  if (!orchestratorUrl) return;
   initFlaxiaNode({
     orchestratorUrl,
     siteId: 'textanalyzer-example',
@@ -181,7 +188,7 @@ consentTrigger.addEventListener('click', () => {
   });
 });
 
-if (localStorage.getItem('flaxia_consent_granted') === 'true') {
+if (orchestratorUrl && localStorage.getItem('flaxia_consent_granted') === 'true') {
   initFlaxiaNode({
     orchestratorUrl,
     siteId: 'textanalyzer-example',

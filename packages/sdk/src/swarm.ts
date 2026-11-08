@@ -2,6 +2,7 @@
 // (https://github.com/Nehanth/pooled), MIT, Copyright (c) 2026 Nehanth Narendrula.
 // See vendor/pooled/VENDORED.md and vendor/pooled/LICENSE.
 import type { SwarmChainNode, SwarmRole, SwarmSessionPlan, SwarmSlice } from './types';
+import { isSwarmPeerQualityReport, type SwarmPeerQualityReport } from './peer-quality';
 
 /**
  * Swarm session runtime contracts. The coordinator plans the chain and relays
@@ -150,6 +151,8 @@ export const SWARM_FRAME_KIND = {
  * staying small next to a hidden-state payload.
  */
 export const SWARM_ENVELOPE_MAC_BYTES = 16;
+/** Maximum complete session envelope carried over either DataChannel or relay. */
+export const MAX_SWARM_ENVELOPE_BYTES = 8 * 1024 * 1024;
 
 /**
  * WebSocket envelope: bind an engine frame to one session attempt, optionally
@@ -161,8 +164,15 @@ export const SWARM_ENVELOPE_MAC_BYTES = 16;
  */
 export function encodeSwarmEnvelope(sessionId: string, frame: ArrayBuffer, mac?: Uint8Array | null): ArrayBuffer {
   const id = new TextEncoder().encode(sessionId);
+  if (!id.length || id.length > 256) throw new Error('swarm session id length is invalid');
   const macBytes = mac ?? new Uint8Array(0);
+  if (macBytes.byteLength !== 0 && macBytes.byteLength !== SWARM_ENVELOPE_MAC_BYTES) {
+    throw new Error('swarm envelope MAC length is invalid');
+  }
   const frameOffset = 4 + id.length + 1 + macBytes.byteLength;
+  if (frameOffset + frame.byteLength > MAX_SWARM_ENVELOPE_BYTES) {
+    throw new Error(`swarm envelope exceeds ${MAX_SWARM_ENVELOPE_BYTES} bytes`);
+  }
   const buffer = new ArrayBuffer(frameOffset + frame.byteLength);
   const view = new DataView(buffer);
   view.setUint32(0, id.length, true);
@@ -176,7 +186,7 @@ export function encodeSwarmEnvelope(sessionId: string, frame: ArrayBuffer, mac?:
 export function decodeSwarmEnvelope(
   buffer: ArrayBuffer,
 ): { sessionId: string; frame: ArrayBuffer; mac: Uint8Array | null } | null {
-  if (buffer.byteLength < 4 + 1) return null;
+  if (buffer.byteLength < 4 + 1 || buffer.byteLength > MAX_SWARM_ENVELOPE_BYTES) return null;
   const view = new DataView(buffer);
   const length = view.getUint32(0, true);
   if (!length || length > 256) return null;
@@ -336,6 +346,8 @@ export interface SwarmInitMessage {
 export interface SwarmPlanMessage {
   type: 'swarm-plan';
   sessionId: string;
+  /** Stamped by the signaling client before it reaches the coordinator. */
+  attemptId?: string;
   chain: SwarmChainNode[];
 }
 
@@ -343,6 +355,8 @@ export interface SwarmSliceMessage {
   type: 'swarm-slice';
   sessionId: string;
   taskId: string;
+  /** Coordinator-generated attempt that fences peer signaling for this session. */
+  attemptId?: string;
   /** Model id, so a worker can resolve and load its layer slice. */
   model: string;
   /** Task timeout in ms, so the worker knows its own deadline. */
@@ -350,6 +364,9 @@ export interface SwarmSliceMessage {
   /** This node's chain position (0 = host). */
   index: number;
   chainLength: number;
+  /** Adjacent ring peers used by the optional WebRTC data path. */
+  previousNodeId?: string;
+  nextNodeId?: string;
   role: SwarmRole;
   slice: SwarmSlice;
   /**
@@ -358,6 +375,107 @@ export interface SwarmSliceMessage {
    */
   inboundKey?: string;
   outboundKey?: string;
+}
+
+export type SwarmPeerSignal =
+  | { kind: 'description'; description: { type: 'offer' | 'answer'; sdp: string } }
+  | {
+      kind: 'candidate';
+      candidate: {
+        candidate: string;
+        sdpMid?: string | null;
+        sdpMLineIndex?: number | null;
+        usernameFragment?: string | null;
+      } | null;
+    };
+
+/** A bounded, coordinator-routed WebRTC signaling envelope. */
+export interface SwarmPeerSignalMessage {
+  type: 'swarm-peer-signal';
+  taskId: string;
+  sessionId: string;
+  attemptId: string;
+  toNodeId: string;
+  /** Present only on signals relayed by the coordinator. */
+  fromNodeId?: string;
+  signal: SwarmPeerSignal;
+}
+
+/** Node-to-coordinator quality snapshot for at most the two adjacent peers. */
+export interface SwarmPeerQualityMessage {
+  type: 'swarm-peer-quality';
+  taskId: string;
+  sessionId: string;
+  attemptId: string;
+  reports: SwarmPeerQualityReport[];
+}
+
+export function isSwarmPeerQualityMessage(value: unknown, now = Date.now()): value is SwarmPeerQualityMessage {
+  if (!isRecord(value) || value.type !== 'swarm-peer-quality') return false;
+  if (typeof value.taskId !== 'string' || !value.taskId || value.taskId.length > 128 ||
+      typeof value.sessionId !== 'string' || !value.sessionId || value.sessionId.length > 128 ||
+      typeof value.attemptId !== 'string' || !value.attemptId || value.attemptId.length > 128 ||
+      !Array.isArray(value.reports) || value.reports.length < 1 || value.reports.length > 2 ||
+      !value.reports.every((report) => isSwarmPeerQualityReport(report, now))) return false;
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength <= 4096;
+  } catch {
+    return false;
+  }
+}
+
+export const MAX_SWARM_SDP_CHARS = 24 * 1024;
+export const MAX_SWARM_ICE_CANDIDATE_CHARS = 4096;
+export const MAX_SWARM_SIGNAL_BYTES = 32 * 1024;
+
+export function isSwarmPeerSignal(value: unknown): value is SwarmPeerSignal {
+  if (!isRecord(value)) return false;
+  if (value.kind === 'description') {
+    const description = value.description;
+    return (
+      isRecord(description) &&
+      (description.type === 'offer' || description.type === 'answer') &&
+      typeof description.sdp === 'string' &&
+      description.sdp.length > 0 &&
+      description.sdp.length <= MAX_SWARM_SDP_CHARS
+    );
+  }
+  if (value.kind === 'candidate') {
+    const candidate = value.candidate;
+    if (candidate === null) return true;
+    return (
+      isRecord(candidate) &&
+      typeof candidate.candidate === 'string' &&
+      candidate.candidate.length > 0 &&
+      candidate.candidate.length <= MAX_SWARM_ICE_CANDIDATE_CHARS &&
+      (candidate.sdpMid === undefined || candidate.sdpMid === null ||
+        (typeof candidate.sdpMid === 'string' && candidate.sdpMid.length <= 128)) &&
+      (candidate.sdpMLineIndex === undefined || candidate.sdpMLineIndex === null ||
+        (typeof candidate.sdpMLineIndex === 'number' && Number.isInteger(candidate.sdpMLineIndex) &&
+          candidate.sdpMLineIndex >= 0 && candidate.sdpMLineIndex <= 255)) &&
+      (candidate.usernameFragment === undefined || candidate.usernameFragment === null ||
+        (typeof candidate.usernameFragment === 'string' && candidate.usernameFragment.length <= 256))
+    );
+  }
+  return false;
+}
+
+export function isSwarmPeerSignalMessage(value: unknown): value is SwarmPeerSignalMessage {
+  if (!isRecord(value) || value.type !== 'swarm-peer-signal') return false;
+  if (!isSwarmPeerSignal(value.signal)) return false;
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value.signal)).byteLength > MAX_SWARM_SIGNAL_BYTES) return false;
+  } catch {
+    return false;
+  }
+  return (
+    typeof value.taskId === 'string' && value.taskId.length > 0 && value.taskId.length <= 128 &&
+    typeof value.sessionId === 'string' && value.sessionId.length > 0 && value.sessionId.length <= 128 &&
+    typeof value.attemptId === 'string' && value.attemptId.length > 0 && value.attemptId.length <= 128 &&
+    typeof value.toNodeId === 'string' && value.toNodeId.length > 0 && value.toNodeId.length <= 128 &&
+    (value.fromNodeId === undefined ||
+      (typeof value.fromNodeId === 'string' && value.fromNodeId.length > 0 && value.fromNodeId.length <= 128))
+  );
 }
 
 /** Sent to the host once every member has loaded its slice. */
@@ -370,6 +488,25 @@ export interface SwarmStartMessage {
 export interface SwarmReadyMessage {
   type: 'swarm-ready';
   sessionId: string;
+  /** True only after all adjacent DataChannels opened before the readiness deadline. */
+  peerReady?: boolean;
+}
+
+/** Coordinator decision shared by every member before generation begins. */
+export interface SwarmTransportMessage {
+  type: 'swarm-transport';
+  sessionId: string;
+  taskId: string;
+  mode: 'peer' | 'relay';
+}
+
+/** Pause or resume host generation when a bounded result subscriber falls behind. */
+export interface SwarmFlowMessage {
+  type: 'swarm-flow';
+  sessionId: string;
+  taskId: string;
+  paused: boolean;
+  attemptId?: string;
 }
 
 export interface SwarmTokenMessage {
@@ -397,7 +534,9 @@ export type SwarmNodeMessage =
   | SwarmPlanMessage
   | SwarmTokenMessage
   | SwarmDoneMessage
-  | SwarmErrorMessage;
+  | SwarmErrorMessage
+  | SwarmPeerSignalMessage
+  | SwarmPeerQualityMessage;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -476,12 +615,34 @@ export function isSwarmSliceMessage(value: unknown): value is SwarmSliceMessage 
   if (value.slice.hasEmbed !== (value.index === 0)) return false;
   if (value.slice.hasHead !== (value.index === 0)) return false;
   if (!isFrameKey(value.inboundKey) || !isFrameKey(value.outboundKey)) return false;
+  if (value.attemptId !== undefined && (typeof value.attemptId !== 'string' || !value.attemptId || value.attemptId.length > 128)) return false;
+  if (value.previousNodeId !== undefined && (typeof value.previousNodeId !== 'string' || !value.previousNodeId || value.previousNodeId.length > 128)) return false;
+  if (value.nextNodeId !== undefined && (typeof value.nextNodeId !== 'string' || !value.nextNodeId || value.nextNodeId.length > 128)) return false;
   return true;
 }
 
 export function isSwarmStartMessage(value: unknown): value is SwarmStartMessage {
   if (!isRecord(value) || value.type !== 'swarm-start') return false;
   return typeof value.sessionId === 'string' && !!value.sessionId && typeof value.taskId === 'string' && !!value.taskId;
+}
+
+export function isSwarmTransportMessage(value: unknown): value is SwarmTransportMessage {
+  if (!isRecord(value) || value.type !== 'swarm-transport') return false;
+  return (
+    typeof value.sessionId === 'string' && !!value.sessionId &&
+    typeof value.taskId === 'string' && !!value.taskId &&
+    (value.mode === 'peer' || value.mode === 'relay')
+  );
+}
+
+export function isSwarmFlowMessage(value: unknown): value is SwarmFlowMessage {
+  if (!isRecord(value) || value.type !== 'swarm-flow') return false;
+  return (
+    typeof value.sessionId === 'string' && !!value.sessionId &&
+    typeof value.taskId === 'string' && !!value.taskId &&
+    typeof value.paused === 'boolean' &&
+    (value.attemptId === undefined || (typeof value.attemptId === 'string' && !!value.attemptId && value.attemptId.length <= 128))
+  );
 }
 
 export function isSwarmErrorMessage(value: unknown): value is SwarmErrorMessage {
@@ -529,6 +690,7 @@ export function isSwarmNodeMessage(value: unknown): value is SwarmNodeMessage {
   if (typeof value.sessionId !== 'string' || !value.sessionId) return false;
   switch (value.type) {
     case 'swarm-ready':
+      return value.peerReady === undefined || typeof value.peerReady === 'boolean';
     case 'swarm-done':
       return true;
     case 'swarm-plan':
@@ -537,6 +699,10 @@ export function isSwarmNodeMessage(value: unknown): value is SwarmNodeMessage {
       return typeof value.token === 'string';
     case 'swarm-error':
       return typeof value.taskId === 'string' && value.taskId.length > 0 && typeof value.error === 'string';
+    case 'swarm-peer-signal':
+      return isSwarmPeerSignalMessage(value);
+    case 'swarm-peer-quality':
+      return isSwarmPeerQualityMessage(value);
     default:
       return false;
   }

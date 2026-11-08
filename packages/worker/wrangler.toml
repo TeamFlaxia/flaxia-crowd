@@ -3,7 +3,7 @@ main = "src/index.ts"
 compatibility_date = "2024-04-03"
 
 [vars]
-CORS_ORIGINS = "http://localhost:5173,http://localhost:5174,http://localhost:8787,https://flaxia.app"
+CORS_ORIGINS = "http://localhost:5173,http://localhost:5174,http://localhost:8787,https://flaxia.app,https://*.flaxia.app"
 RATE_LIMIT_MAX = "100"
 MAX_PAYLOAD_SIZE = "1048576"
 

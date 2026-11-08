@@ -881,10 +881,29 @@ export class Qwen35Engine {
       this.bgArgmax = this._bg(this.pipes.argmax, 1, [this.logits, this.argBuf, this._buf(new Uint32Array([vocab, 0, 0, 0]), GPUBufferUsage.UNIFORM)]);
       this.bgFinalNorm = bgNorm(this.x, this.finalNorm, this.xn);
       const headMv = (n) => {
-        const op = mv(this.headEntry, this.xn, this.logits, n, dim);
-        if (!this.headRows) return op;
-        const bufs = this.headEntry.kind === "f32" ? [this.headEntry.buf, this.xn, this.logits, this._shape(n, dim)] : [this.headEntry.qs, this.headEntry.sc, this.xn, this.logits, this._shape(n, dim)];
-        return { pipe: op.pipe + "_h", acc: false, wgs: Math.ceil(n / this.headRows), bg: this._bg(this.pipes[op.pipe + "_h"], 1, bufs) };
+        // Qwen3.5-2B's Q6_K tied embedding becomes ~485 MiB of Q8 rows.
+        // Bind row-aligned views instead of exceeding WebGPU's storage binding
+        // limit (often 128 MiB). All chunks write their own slice of logits.
+        const kind = this.headEntry.kind;
+        const rowBytes = kind === "q4" ? [dim / 2, dim / 16] : kind === "q8" ? [dim, dim / 16] : [dim * 4];
+        const limit = device.limits.maxStorageBufferBindingSize;
+        const chunkRows = Math.floor(Math.min(...rowBytes.map(b => limit / b), limit / 4) / 64) * 64;
+        if (chunkRows < 64) throw new Error("device storage binding limit is too small for the LM head");
+        const ops = [];
+        for (let row = 0; row < n; row += chunkRows) {
+          const count = Math.min(chunkRows, n - row);
+          const view = (buffer, bytes) => Qwen35Engine._view(buffer, row * bytes, count * bytes);
+          const w = kind === "f32" ? { kind, buf: view(this.headEntry.buf, rowBytes[0]) }
+            : { kind, qs: view(this.headEntry.qs, rowBytes[0]), sc: view(this.headEntry.sc, rowBytes[1]) };
+          const y = view(this.logits, 4);
+          const op = mv(w, this.xn, y, count, dim);
+          if (!this.headRows) ops.push(op);
+          else {
+            const bufs = kind === "f32" ? [w.buf, this.xn, y, this._shape(count, dim)] : [w.qs, w.sc, this.xn, y, this._shape(count, dim)];
+            ops.push({ pipe: op.pipe + "_h", acc: false, wgs: Math.ceil(count / this.headRows), bg: this._bg(this.pipes[op.pipe + "_h"], 1, bufs) });
+          }
+        }
+        return ops.length === 1 ? ops[0] : { parts: ops };
       };
       this.headOp = headMv(vocab);
       // GPU sampling buffers (topk_a/topk_b): the stage-a partials (NC columns x nw workgroups x
@@ -1184,6 +1203,7 @@ export class Qwen35Engine {
     pass.dispatchWorkgroups(Math.ceil(threads / wg));
   }
   _dop(pass, op, nCols = 0) {
+    if (op.parts) { for (const part of op.parts) this._dop(pass, part, nCols); return; }
     if (this.skip && this.skip.has(op.pipe)) return;
     if (op.r16 && this.prefillMath === "f16") op = op.r16;   // GEMM activation transposes (prefillMath f16)
     // full-width prefill passes go through the row-stationary GEMM; anything

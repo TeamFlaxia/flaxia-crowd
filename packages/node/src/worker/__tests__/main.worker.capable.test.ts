@@ -15,6 +15,7 @@ vi.mock('../../executor/memoryProbe', () => probeMockFactory());
 vi.mock('../../workloads/ai-inference', () => ({
   handleAiInference: vi.fn().mockResolvedValue({ output: 'ok' }),
   releaseCache: vi.fn(),
+  getModelCacheSnapshot: () => ({ version: 1, sampledAt: Date.now(), expiresAt: Date.now() + 60_000, entries: [] }),
 }));
 
 describe('main.worker (capable device)', () => {

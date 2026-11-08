@@ -17,12 +17,15 @@ const { handleAiInference } = vi.hoisted(() => ({ handleAiInference: vi.fn() }))
 vi.mock('../../workloads/ai-inference', () => ({
   handleAiInference,
   releaseCache: vi.fn(),
+  getModelCacheSnapshot: () => ({ version: 1, sampledAt: Date.now(), expiresAt: Date.now() + 60_000, entries: [] }),
 }));
 
 describe('main.worker abort', () => {
+  const posts: any[] = [];
+  const selfObj: any = { postMessage: (message: any) => posts.push(message) };
+
   it('cancels a streaming task the coordinator aborted', async () => {
-    const posts: any[] = [];
-    const selfObj: any = { postMessage: (m: any) => posts.push(m) };
+    posts.length = 0;
     Object.defineProperty(globalThis, 'self', { value: selfObj, configurable: true });
 
     handleAiInference.mockImplementation(
@@ -55,5 +58,25 @@ describe('main.worker abort', () => {
     expect(posts.filter((post) => post.type === 'token').map((post) => post.token)).not.toContain(
       'after',
     );
+  });
+
+  it('holds the token sink while subscriber flow is paused and resumes on credit', async () => {
+    posts.length = 0;
+    Object.defineProperty(globalThis, 'self', { value: selfObj, configurable: true });
+    handleAiInference.mockImplementationOnce(async (_payload: unknown, emitToken: (token: string) => Promise<void>) => {
+      await emitToken('held');
+      return { output: 'done' };
+    });
+
+    await import('../main.worker');
+    const task = selfObj.onmessage({ data: { id: 't-flow', workload: 'ai-inference', payload: {} } });
+    selfObj.onmessage({ data: { id: 't-flow', type: 'token-flow', paused: true } });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(posts.some((post) => post.type === 'token' && post.id === 't-flow')).toBe(false);
+
+    selfObj.onmessage({ data: { id: 't-flow', type: 'token-flow', paused: false } });
+    await task;
+    expect(posts).toContainEqual(expect.objectContaining({ id: 't-flow', type: 'token', token: 'held' }));
+    expect(posts).toContainEqual(expect.objectContaining({ id: 't-flow', type: 'done' }));
   });
 });

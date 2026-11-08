@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleAiInference, registerAiModels, listAiModels } from '../ai-inference';
+import { handleAiInference, registerAiModels, listAiModels, MAX_PENDING_TOKEN_CALLBACKS } from '../ai-inference';
 
 const mockGenerate = vi.fn().mockResolvedValue([{ label: 'POSITIVE', score: 0.99 }]);
 const mockPipeline = vi.fn();
@@ -214,6 +214,26 @@ describe('AI Inference streaming sink', () => {
     expect(sink).toHaveBeenCalledTimes(1);
   });
 
+  it('stops generation before a slow token sink can grow an unbounded callback queue', async () => {
+    const sink = vi.fn();
+    mockGenerate.mockImplementationOnce(async (_input, options) => {
+      emit(options, ...Array.from({ length: MAX_PENDING_TOKEN_CALLBACKS + 1 }, () => 'x'));
+      return 'generated';
+    });
+
+    await expect(handleAiInference(payload(false), sink)).rejects.toThrow(/bounded stream buffer/);
+    expect(sink).toHaveBeenCalledTimes(0);
+  });
+
+  it('caps a buffered TextStreamer chunk before its flush timer runs', async () => {
+    mockGenerate.mockImplementationOnce(async (_input, options) => {
+      emit(options, 'x'.repeat(256 * 1024 + 1));
+      return 'generated';
+    });
+
+    await expect(handleAiInference(payload(true), vi.fn())).rejects.toThrow(/bounded stream buffer/);
+  });
+
   it('flushes a buffered tail immediately when generation finishes', async () => {
     const sink = vi.fn();
     mockGenerate.mockImplementationOnce(async (_input, options) => {
@@ -223,6 +243,33 @@ describe('AI Inference streaming sink', () => {
     await expect(handleAiInference(payload(true), sink)).resolves.toEqual({ output: 'generated' });
     expect(sink).toHaveBeenCalledTimes(1);
     expect(sink).toHaveBeenCalledWith('hello world');
+  });
+
+  it('rejects timer-driven queue overflow through the inference promise', async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseSink!: () => void;
+      const sink = vi.fn(() => new Promise<void>((resolve) => { releaseSink = resolve; }));
+      let finishGeneration!: (output: string) => void;
+      let streamerOptions!: any;
+      mockGenerate.mockImplementationOnce((_input, options) => {
+        streamerOptions = options;
+        return new Promise<string>((resolve) => { finishGeneration = resolve; });
+      });
+      const result = handleAiInference(payload(true), sink);
+      await vi.advanceTimersByTimeAsync(1);
+      for (let i = 0; i <= MAX_PENDING_TOKEN_CALLBACKS; i++) {
+        emit(streamerOptions, 'x');
+        await vi.advanceTimersByTimeAsync(1000);
+      }
+      expect(sink).toHaveBeenCalledTimes(1);
+      releaseSink();
+      finishGeneration('generated');
+      await expect(result).rejects.toThrow(/bounded stream buffer/);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('serializes timer flushes with the tail and waits for both', async () => {
@@ -368,5 +415,61 @@ describe('AI Inference model allowlist (#11)', () => {
       } as any),
     ).rejects.toThrow(/do_sample must be a boolean/);
     expect(mockPipeline).not.toHaveBeenCalled();
+  });
+});
+
+describe('AI Inference Light Inference (ondeviceOnly)', () => {
+  it('rejects a non-boolean ondeviceOnly before any download', async () => {
+    await expect(
+      handleAiInference({ task: 'text-generation', model: TEST_MODEL, input: 'hi', options: { ondeviceOnly: 'yes' } } as any),
+    ).rejects.toThrow(/ondeviceOnly must be a boolean/);
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('fails with 500 ONDEVICE_UNAVAILABLE when ondeviceOnly and model is not preloaded', async () => {
+    // Fresh model id never used in this process: no ready pipeline exists yet.
+    registerAiModels({
+      'test/ondevice-never-loaded': { repo: 'test/ondevice-never-loaded', revision: 'r', maxBytes: 1024 * 1024 },
+    });
+    let caught: unknown;
+    try {
+      await handleAiInference({
+        task: 'translation',
+        model: 'test/ondevice-never-loaded',
+        input: 'hello',
+        options: { ondeviceOnly: true },
+      } as any);
+    } catch (e) {
+      caught = e;
+    }
+    const err = caught as { code?: string; status?: number; message?: string };
+    expect(err?.code).toBe('ONDEVICE_UNAVAILABLE');
+    expect(err?.status).toBe(500);
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('serves ondeviceOnly once the model is preloaded without downloading', async () => {
+    registerAiModels({
+      'test/ondevice-warm': { repo: 'test/ondevice-warm', revision: 'r', maxBytes: 1024 * 1024 },
+    });
+    // Warm via a normal (delegating) call, then serve ondeviceOnly.
+    await handleAiInference({ task: 'translation', model: 'test/ondevice-warm', input: 'warm', options: {} });
+    expect(mockPipeline).toHaveBeenCalledTimes(1);
+    mockPipeline.mockClear();
+    const result = await handleAiInference({
+      task: 'translation',
+      model: 'test/ondevice-warm',
+      input: 'hello',
+      options: { ondeviceOnly: true },
+    } as any);
+    expect(result.output).toBeDefined();
+    // Serving from the warm cache must not trigger a new download.
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
+
+  it('isAiModelPreloaded reflects the warm state', async () => {
+    const { isAiModelPreloaded } = await import('../ai-inference');
+    expect(isAiModelPreloaded(TEST_MODEL)).toBe(true); // TEST_MODEL served above
+    expect(isAiModelPreloaded('test/ondevice-never-loaded')).toBe(false);
   });
 });

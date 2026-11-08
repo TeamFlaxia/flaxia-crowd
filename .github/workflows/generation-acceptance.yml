@@ -1,0 +1,76 @@
+name: Qwen3.5-2B generation acceptance
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: generation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generation:
+    name: Qwen3.5-2B (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [web, desktop]
+    env:
+      MODEL: /tmp/flaxia-crowd/Qwen3.5-2B-Q4_0.gguf
+      CHROME: /usr/bin/google-chrome
+      # Explicit software WebGPU for hosted CI; these are functional tests,
+      # not physical GPU performance measurements.
+      CHROME_GPU: swiftshader
+      GENERATION_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.6
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.target == 'desktop'
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.target == 'desktop'
+        with:
+          workspaces: packages/node-native
+      - name: Cache real Qwen3.5-2B weights by SHA-256
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MODEL }}
+          key: qwen35-2b-q4_0-cd70221bebaee0503e0f6717e174250cd7825aa88438b3aabec9ad55731d9bb1
+      - name: Download or verify the real model (no synthetic fallback)
+        run: node scripts/swarm-spike/prepare-generation-model.mjs
+      - run: npm ci
+      - run: npm run build --workspace=@flaxia/sdk
+      - name: Build native node
+        if: matrix.target == 'desktop'
+        run: cargo build --locked --release --manifest-path packages/node-native/Cargo.toml
+      - name: Install software Vulkan driver
+        if: matrix.target == 'desktop'
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - name: Verify browser availability
+        if: matrix.target == 'web'
+        run: '"$CHROME" --version'
+      - name: Generate with the same verified Qwen3.5-2B model and prompt
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:generation -- "$GENERATION_TARGET" 2>&1 | tee generation.log
+      - name: Preserve generation output and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen35-2b-${{ matrix.target }}-${{ github.run_attempt }}
+          path: generation.log
+          if-no-files-found: ignore

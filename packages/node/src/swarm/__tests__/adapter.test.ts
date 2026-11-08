@@ -84,4 +84,23 @@ describe('wrapPooledEngine', () => {
     delete (engine as { dispose?: unknown }).dispose;
     expect(() => wrapPooledEngine(engine).dispose()).not.toThrow();
   });
+
+  it('notifies the cache lifecycle after device disposal exactly once', () => {
+    const { engine } = fakeEngine();
+    const onDisposed = vi.fn();
+    const device = { destroy: vi.fn() };
+    const adapter = wrapPooledEngine(engine, device, onDisposed);
+    adapter.dispose();
+    adapter.dispose();
+    expect(device.destroy).toHaveBeenCalledTimes(1);
+    expect(onDisposed).toHaveBeenCalledTimes(1);
+  });
+});
+
+it('does not publish GPU readback after an asynchronous device error', async () => {
+  const { engine } = fakeEngine();
+  let failed = false;
+  engine.headFromHidden = async () => { failed = true; return new Float32Array([0]); };
+  const adapter = wrapPooledEngine(engine, undefined, undefined, () => { if (failed) throw new Error('GPU validation failed'); });
+  await expect(adapter.headFromHidden(new Float32Array(8))).rejects.toThrow('GPU validation failed');
 });

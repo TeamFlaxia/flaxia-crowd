@@ -127,6 +127,35 @@ describe('SwarmController host', () => {
     expect(done.mock.calls[0][0]).toMatchObject({ output: '6,7,8', tokens: ['6', '7', '8'] });
   });
 
+  it('pauses generated tokens at a boundary and resumes after subscriber credit returns', async () => {
+    const chain: SwarmChainNode[] = [
+      { nodeId: 'h', role: 'host', slice: { start: 0, end: 8, hasEmbed: true, hasHead: true } },
+    ];
+    const runtime = makeRuntime(hostEngine(), chain);
+    const init: SwarmInitMessage = {
+      type: 'swarm-init', sessionId: 's', taskId: 't', model: 'm', timeoutMs: 60000,
+      members: [{ nodeId: 'h', capacity: 4 }], prompt: 'hi', maxNewTokens: 3,
+    };
+    const { controller, tokens, done } = makeOptions(init, runtime);
+    await controller.start();
+    await controller.handleControl({
+      type: 'swarm-slice', sessionId: 's', taskId: 't', model: 'm', timeoutMs: 60000,
+      index: 0, chainLength: 1, role: 'host',
+      slice: { start: 0, end: 8, hasEmbed: true, hasHead: true },
+    });
+    await controller.handleControl({ type: 'swarm-flow', sessionId: 's', taskId: 't', paused: true });
+
+    const running = controller.handleControl({ type: 'swarm-start', sessionId: 's', taskId: 't' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(tokens).toEqual([]);
+    expect(done).not.toHaveBeenCalled();
+
+    await controller.handleControl({ type: 'swarm-flow', sessionId: 's', taskId: 't', paused: false });
+    await running;
+    expect(tokens).toEqual(['6', '7', '8']);
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
   it('reports a runtime failure through onError', async () => {
     const runtime: SwarmRuntime = {
       plan: vi.fn(async () => {

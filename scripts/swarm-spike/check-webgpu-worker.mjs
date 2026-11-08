@@ -22,6 +22,8 @@ import { fileURLToPath } from 'node:url';
 import { buildSynthGGUF } from '../../vendor/pooled/synth/synth.mjs';
 
 const CHROME = process.env.CHROME || '/usr/bin/google-chrome';
+// Use a trusted local browser binary; this harness only navigates to its
+// loopback fixture and keeps the CDP endpoint bound to loopback.
 const TIMEOUT_MS = 90000;
 const TOKENS = 12;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -177,8 +179,8 @@ async function main() {
     CHROME,
     [
       '--headless=new',
-      '--no-sandbox',
       '--disable-dev-shm-usage',
+      '--remote-debugging-address=127.0.0.1',
       `--remote-debugging-port=${debugPort}`,
       `--user-data-dir=${profile}`,
       '--enable-unsafe-webgpu',

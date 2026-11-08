@@ -19,6 +19,8 @@ scripts/output/
 # build
 dist/
 build/
+target/
+packages/node-native/node.toml
 .wrangler/
 .vite/
 .next/
@@ -29,6 +31,9 @@ build/
 !.env.example
 .dev.vars
 
+# Per-user local agent settings may contain internal endpoints and model names.
+.gemini/settings.json
+
 # logs
 *.log
 npm-debug.log*
@@ -38,3 +43,6 @@ yarn-error.log*
 # system
 .DS_Store
 Thumbs.db
+
+# Native WebGPU helper bundle
+packages/node-native/dist/

@@ -25,6 +25,7 @@ flaxia-crowd/
 ├── packages/
 │   ├── worker/    # Cloudflare Workers オーケストレーター (TaskQueue, Signaling)
 │   ├── node/      # ブラウザノードSDK (ConsentUI, WebRTC, WorkerPool)
+│   ├── node-native/ # Rust製常駐ノード（Linux画像処理・ネイティブWebGPU Swarm推論）
 │   └── sdk/       # 依頼者用SDK (Task Submission, Types)
 ```
 
@@ -37,6 +38,7 @@ flaxia-crowd/
 - [導入ガイド (Getting Started)](docs/getting-started.md)
 - [依頼者向けSDKガイド](docs/sdk-guide.md)
 - [ノード提供者向けガイド](docs/node-guide.md)
+- [Rust製ネイティブノード](packages/node-native/README.md)
 - [ワーカーオーケストレーターガイド](docs/worker-guide.md)
 
 
@@ -81,3 +83,10 @@ npm run test      # 全パッケージのテスト
 
 MIT
 ---
+
+## 生成テスト
+
+Web・デスクトップ共通の実モデル生成基準は **Qwen3.5-2B Q4_0** です。
+`npm run test:generation -- all` で両方を確認できます。
+モデルの用意・GPU条件・合成モデルの回帰試験との区別は
+[生成テストの手順](benchmarks/inference/README.md)を参照してください。

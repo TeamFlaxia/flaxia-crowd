@@ -58,6 +58,60 @@ describe('WorkerPool', () => {
     expect(result).toEqual({ output: 'ok' });
   });
 
+  it('distinguishes an unobserved CPU load from a measured zero', async () => {
+    let handler: Function;
+    class MockWorker {
+      postMessage = vi.fn(() => {
+        setTimeout(() => {
+          handler({ data: { id: 'cpu', type: 'heartbeat', cpuLoad: 0 } });
+          handler({ data: { id: 'cpu', type: 'done', result: { output: 'ok' } } });
+        }, 0);
+      });
+      terminate = vi.fn();
+      addEventListener = vi.fn((_event: string, listener: Function) => { handler = listener; });
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    pool = new WorkerPool();
+
+    expect(pool.hasCpuLoadSample).toBe(false);
+    await pool.run('cpu', 'ai-inference', {}, 100);
+    expect(pool.hasCpuLoadSample).toBe(true);
+    expect(pool.lastCpuLoad).toBe(0);
+  });
+
+  it('retains only a fresh validated executable model snapshot and clears it on terminate', async () => {
+    let handler: Function;
+    const now = Date.now();
+    class MockWorker {
+      postMessage = vi.fn(() => {
+        setTimeout(() => {
+          handler({ data: {
+            id: 'cache',
+            type: 'heartbeat',
+            modelCache: {
+              version: 1,
+              sampledAt: now,
+              expiresAt: now + 60_000,
+              entries: [{ modelId: 'm', revision: 'r1', dtype: 'q4f16', backend: 'wasm', state: 'ready', referenceCount: 1 }],
+            },
+          } });
+          handler({ data: { id: 'cache', type: 'done', result: {} } });
+        }, 0);
+      });
+      terminate = vi.fn();
+      addEventListener = vi.fn((_event: string, listener: Function) => { handler = listener; });
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    pool = new WorkerPool();
+
+    await pool.run('cache', 'ai-inference', {}, 100);
+    expect(pool.modelCacheSnapshot?.entries[0]).toMatchObject({ modelId: 'm', state: 'ready', referenceCount: 1 });
+    pool.terminate();
+    expect(pool.modelCacheSnapshot).toBeNull();
+  });
+
   it('should reject when worker returns error', async () => {
     let handler: Function;
     const mockAddEventListener = vi.fn((_event: string, h: Function) => {

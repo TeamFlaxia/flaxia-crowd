@@ -1,0 +1,18 @@
+{
+  "payload": {
+    "operation": "resize",
+    "imageBase64": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP4z8DA8J8BAAf/Af8Bf4mnAAAAAElFTkSuQmCC",
+    "mimeType": "image/png",
+    "options": {
+      "width": 1,
+      "height": 1,
+      "outputFormat": "png"
+    }
+  },
+  "expected": {
+    "width": 1,
+    "height": 1,
+    "mimeType": "image/png",
+    "originalSizeBytes": 72
+  }
+}

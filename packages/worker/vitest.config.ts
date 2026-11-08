@@ -20,6 +20,8 @@ export default defineWorkersConfig({
             NODE_TOKEN_SECRET: TEST_NODE_TOKEN_SECRET,
             WEBHOOK_SIGNING_SECRET: TEST_WEBHOOK_SIGNING_SECRET,
             SUBSCRIBE_TOKEN_SECRET: TEST_SUBSCRIBE_TOKEN_SECRET,
+            WORKER_VERSION: 'test-version',
+            WORKER_COMMIT_SHA: '0123456789abcdef0123456789abcdef01234567',
           },
         },
         isolatedStorage: false,

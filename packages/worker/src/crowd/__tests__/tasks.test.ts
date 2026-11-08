@@ -28,6 +28,7 @@ function submit(
   payload: unknown,
   workload = 'swarm-inference',
   apiKey = API_KEY,
+  options: { priority?: unknown } = {},
 ): Promise<Response> {
   return Promise.resolve(
     crowdApp.request(
@@ -38,7 +39,7 @@ function submit(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${API_KEY}`,
         },
-        body: JSON.stringify({ workload, payload }),
+        body: JSON.stringify({ workload, payload, ...options }),
       },
       envWithApiKey(apiKey),
     ),
@@ -66,6 +67,16 @@ describe('POST /tasks swarm payload validation', () => {
       swarm: { minNodes: 2, maxNodes: 4, preferWarm: false },
     });
     expect(res.status).toBe(200);
+  });
+
+  it('accepts a bounded scheduling priority', async () => {
+    const res = await submit({ model: 'qwen3-1.7b', prompt: 'hi' }, 'swarm-inference', API_KEY, { priority: 3 });
+    expect(res.status).toBe(200);
+  });
+
+  it.each([-1, 1.5, 4, '2', null])('rejects invalid scheduling priority %s', async (priority) => {
+    const res = await submit({ model: 'qwen3-1.7b', prompt: 'hi' }, 'swarm-inference', API_KEY, { priority });
+    expect(res.status).toBe(400);
   });
 
   const invalid: Array<[label: string, payload: unknown]> = [
@@ -99,5 +110,18 @@ describe('POST /tasks swarm payload validation', () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toBe('Invalid workload type');
+  });
+
+  it('exposes only the authenticated tenant queue statistics', async () => {
+    const unauthorized = await crowdApp.request('/queue/stats', {}, envWithApiKey(API_KEY));
+    expect(unauthorized.status).toBe(401);
+
+    const response = await crowdApp.request('/queue/stats', {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    }, envWithApiKey(API_KEY));
+    expect(response.status).toBe(200);
+    const stats = await response.json() as { pendingCount?: number; pendingByPriority?: Record<string, number> };
+    expect(typeof stats.pendingCount).toBe('number');
+    expect(stats.pendingByPriority).toMatchObject({ 0: expect.any(Number), 1: expect.any(Number), 2: expect.any(Number), 3: expect.any(Number) });
   });
 });
