@@ -1,6 +1,6 @@
 {
   "name": "@flaxia/node",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": false,
   "main": "dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",
-    "@flaxia/sdk": "^0.6.0",
+    "@flaxia/sdk": "^0.7.0",
     "@huggingface/transformers": "^4.3.2",
     "onnxruntime-web": "1.26.0",
     "parse5": "^8.1.0",

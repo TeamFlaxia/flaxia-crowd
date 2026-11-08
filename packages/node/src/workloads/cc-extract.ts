@@ -24,7 +24,7 @@ export const MAX_CC_HTTP_BODY_BYTES = 4 * 1024 * 1024;
 /** Per-record network timeout. The whole task is also bounded by the payload. */
 export const CC_RECORD_TIMEOUT_MS = 20_000;
 /** Identifies Flaxia Crowd to Common Crawl's data host. */
-export const CC_USER_AGENT = 'FlaxiaCrowd/0.6 (+https://flaxia.app/crowd)';
+export const CC_USER_AGENT = 'FlaxiaCrowd/0.7 (+https://flaxia.app/crowd)';
 
 const HTTP_MESSAGE_SEPARATOR = new Uint8Array([13, 10, 13, 10]);
 const LF_MESSAGE_SEPARATOR = new Uint8Array([10, 10]);
