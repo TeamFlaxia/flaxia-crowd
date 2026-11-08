@@ -59,9 +59,9 @@ const DEFAULT_AI_MODELS: Record<string, AiModelDefinition> = {
   },
   // Multimodal embedding (740M params, 768 dims, Apache-2.0). The ONNX variant
   // is loaded by workloads/vector-embed.ts (multimodal) and
-  // workloads/embed-gemma.ts (text-only). Per-file cap is 1 GiB to allow the
-  // fp16 audio/text encoders (~517-560 MB each) on WASM, which the 512 MiB
-  // default would reject.
+  // workloads/embed-gemma.ts (text-only, vision/audio disabled). Per-file cap
+  // is 1 GiB to allow the fp16 audio/text encoders (~517-560 MB each) on WASM,
+  // which the 512 MiB default would reject.
   'onnx-community/embeddinggemma-2-ONNX': {
     repo: 'onnx-community/embeddinggemma-2-ONNX',
     revision: 'main',

@@ -25,6 +25,7 @@
     "@flaxia/sdk": "^0.6.0",
     "@huggingface/transformers": "^4.3.2",
     "onnxruntime-web": "1.26.0",
+    "parse5": "^8.1.0",
     "rollup": "^4.61.0"
   },
   "devDependencies": {

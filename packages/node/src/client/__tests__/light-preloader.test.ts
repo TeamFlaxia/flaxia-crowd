@@ -22,7 +22,7 @@ describe('LightPreloader', () => {
   it('preloads every target that is not ready yet', async () => {
     vi.useFakeTimers();
     const preload = vi.fn().mockResolvedValue(undefined);
-    const isPreloaded = vi.fn((model: string) => model === 'ready-model');
+    const isPreloaded = vi.fn((target: { model: string }) => target.model === 'ready-model');
     const preloader = new LightPreloader(
       () => 'granted',
       {

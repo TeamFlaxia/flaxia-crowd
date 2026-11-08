@@ -26,5 +26,15 @@ describe('main.worker (incapable device)', () => {
     expect(posts[0].id).toBe('t1');
     expect(posts[0].type).toBe('error');
     expect(String(posts[0].error)).toMatch(/incapable/i);
+
+    // Light workloads do not need the heavy WASM memory budget. The invalid
+    // payload still fails, but not because the device is incapable.
+    await selfObj.onmessage({
+      data: { id: 't2', workload: 'cc-extract', payload: {} },
+    });
+    expect(posts).toHaveLength(2);
+    expect(posts[1].id).toBe('t2');
+    expect(posts[1].type).toBe('error');
+    expect(String(posts[1].error)).not.toMatch(/incapable/i);
   });
 });

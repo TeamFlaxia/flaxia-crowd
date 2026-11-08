@@ -14,7 +14,9 @@ export type WorkloadType =
   | 'vector-query'
   | 'moe-inference'
   | 'nudenet'
-  | 'swarm-inference';
+  | 'swarm-inference'
+  | 'cc-extract'
+  | 'embed-gemma';
 
 // --- AI Inference ---
 
@@ -478,6 +480,96 @@ export interface NudeNetResult {
   durationMs: number;
 }
 
+// --- Common Crawl extraction ---
+
+/** One WARC record located through the Common Crawl CDX index. */
+export interface CcExtractRecord {
+  /** Original page URL as recorded by the CDX index. */
+  url: string;
+  /** WARC object path below `https://data.commoncrawl.org/`. */
+  warcFilename: string;
+  /**
+   * Optional same-host proxy URL that serves this byte range. Browser nodes
+   * cannot fetch Common Crawl directly because the `Range` header triggers a
+   * CORS preflight that the archive host rejects, so hosts normally sign a
+   * range URL on their own origin instead.
+   */
+  fetchUrl?: string;
+  /** Byte offset of the compressed WARC record. */
+  offset: number;
+  /** Compressed byte length of the WARC record. */
+  length: number;
+  /** CDX content languages, when known. */
+  languages?: string;
+  /** CDX content digest, when known. */
+  contentDigest?: string;
+}
+
+export interface CcExtractPayload {
+  /** Crawl id, e.g. CC-MAIN-2026-43. */
+  crawl: string;
+  /** Records to extract in one task (bounded, see MAX_CC_EXTRACT_RECORDS). */
+  records: CcExtractRecord[];
+  /** Per-record compressed byte cap. */
+  maxRecordBytes?: number;
+  /** Whole-task timeout. */
+  timeoutMs?: number;
+}
+
+export interface CcExtractDocument {
+  /** Original URL requested from the CDX index. */
+  url: string;
+  /**
+   * Normalised `WARC-Target-URI` of the record. It must match `url` (apart from
+   * URL normalisation and any fragment), so it is informational rather than a
+   * redirect target.
+   */
+  targetUri?: string;
+  /** Canonical URL advertised by the page, when present. */
+  canonicalUrl?: string;
+  title: string;
+  /** Extracted readable text, bounded by MAX_CC_EXTRACT_TEXT_CHARS. */
+  text: string;
+  /** Short display excerpt. */
+  excerpt: string;
+  lang?: string;
+  publishedAt?: string;
+  contentType: string;
+  httpStatus: number;
+  warcFilename: string;
+  offset: number;
+  length: number;
+  /** True when the text or WARC body was truncated at a cap. */
+  truncated: boolean;
+  /** Set when this record failed; other records in the task may still succeed. */
+  error?: string;
+}
+
+export interface CcExtractResult {
+  documents: CcExtractDocument[];
+  durationMs: number;
+}
+
+// --- EmbeddingGemma 2 text embeddings ---
+
+/** Native output dimension of EmbeddingGemma 2. */
+export type EmbedGemmaDimensions = 768 | 512 | 256 | 128;
+
+export interface EmbedGemmaPayload {
+  /** 1..MAX_EMBED_GEMMA_TEXTS strings. Prefixes are applied by the host. */
+  texts: string[];
+  /** Matryoshka truncation target. Defaults to the native 768. */
+  dimensions?: EmbedGemmaDimensions;
+}
+
+export interface EmbedGemmaResult {
+  /** One normalised vector per input text (128, 256, 512 or 768 dimensions). */
+  vectors: number[][];
+  model: string;
+  dimensions: number;
+  durationMs: number;
+}
+
 // --- Core Task Types ---
 
 /** Scheduling hints any workload payload may carry. */
@@ -504,6 +596,8 @@ export type TaskPayload = (
   | MoEInferencePayload
   | NudeNetPayload
   | SwarmInferencePayload
+  | CcExtractPayload
+  | EmbedGemmaPayload
 ) & TaskPayloadRouting;
 
 export interface TaskRecord {
@@ -699,6 +793,8 @@ export interface NodeConfig {
   containerImageOrigins?: string[];
   /** Exact HTTPS origins from which signed container file sources may be fetched. */
   fileSourceOrigins?: string[];
+  /** Exact HTTPS origins allowed to serve signed Common Crawl byte ranges. */
+  ccRangeOrigins?: string[];
   moe?: MoENodeConfig;
   /**
    * Opt in to downloading model layer weights for swarm inference. Swarm jobs

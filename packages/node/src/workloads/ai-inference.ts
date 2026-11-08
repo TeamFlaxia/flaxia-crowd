@@ -45,14 +45,44 @@ export const MAX_PENDING_TOKEN_CALLBACKS = 64;
 export const MAX_PENDING_TOKEN_CHARS = 256 * 1024;
 
 /**
+ * Full cache identity for one model pipeline. The executable cache is keyed
+ * by `task/modelId/revision/dtype/backend` (see `modelPipelineKey`), but the
+ * snapshot descriptor carries everything except `task`. Checking only
+ * `modelId` lets an `ondeviceOnly` task for the same repo with a different
+ * `dtype`/`backend` pass the gate and then miss the cache, downloading a
+ * second quantization despite the caller forbidding downloads.
+ */
+export interface AiModelCacheIdentity {
+  modelId: string;
+  revision: string;
+  dtype: string;
+  backend: ModelCacheBackend;
+}
+
+/**
  * Whether the model already has a `ready` executable pipeline in memory.
  * Guards `ondeviceOnly` tasks: they must fail before any download when the
  * model is absent, so the check runs on the snapshot (no side effects).
+ *
+ * The string form is a model-only check kept for the public
+ * `FlaxiaNodeController.isAiModelPreloaded(model)` API and the Light
+ * Preloader dedup. The `ondeviceOnly` gate must use the identity form so a
+ * different `dtype`/`backend`/`revision` does not pass.
  */
-export const isAiModelPreloaded = (model: string): boolean => {
+export const isAiModelPreloaded = (model: string | AiModelCacheIdentity): boolean => {
   const snapshot = getModelCacheSnapshot();
+  if (typeof model === 'string') {
+    return snapshot.entries.some(
+      (entry) => entry.modelId === model && entry.state === 'ready',
+    );
+  }
   return snapshot.entries.some(
-    (entry) => entry.modelId === model && entry.state === 'ready',
+    (entry) =>
+      entry.modelId === model.modelId &&
+      entry.revision === model.revision &&
+      entry.dtype === model.dtype &&
+      entry.backend === model.backend &&
+      entry.state === 'ready',
   );
 };
 
@@ -223,17 +253,27 @@ export const handleAiInference = async (
   const generationOptions: Record<string, unknown> = {};
   applyGenerationOptions(generationOptions, options as Record<string, unknown>);
 
+  const resolvedDtype = dtype ?? 'q4f16';
+  const requestedBackend = (device ?? 'wasm') as ModelCacheBackend;
+
   // Light Inference gate: ondeviceOnly means the caller forbids download and
   // delegation. Fail immediately with a typed 500 instead of loading anything.
-  if (ondeviceOnly && !isAiModelPreloaded(model)) {
+  // The check uses the full cache identity so a preloaded q4f16/wasm pipeline
+  // does not satisfy an ondeviceOnly request for int8/webgpu on the same repo.
+  if (
+    ondeviceOnly &&
+    !isAiModelPreloaded({
+      modelId: model,
+      revision: definition.revision,
+      dtype: resolvedDtype,
+      backend: requestedBackend,
+    })
+  ) {
     throw new OndeviceUnavailableError(
       `ondeviceOnly: model ${model} is not preloaded on this device`,
       'preloading',
     );
   }
-
-  const resolvedDtype = dtype ?? 'q4f16';
-  const requestedBackend = (device ?? 'wasm') as ModelCacheBackend;
   const cacheKey = modelPipelineKey({
     task,
     modelId: model,
