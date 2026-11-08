@@ -17,7 +17,12 @@ export interface LightPreloaderOptions {
 }
 
 export type PreloadFn = (request: { task: string; model: string; dtype: string }) => Promise<void>;
-export type IsPreloadedFn = (model: string) => boolean;
+/**
+ * Check whether one preloader target is already resident. Must compare the
+ * full cache identity (model + dtype), not just the model id: the same repo
+ * preloaded as int8 does not satisfy a q4f16 ondeviceOnly task.
+ */
+export type IsPreloadedFn = (target: LightPreloaderTarget) => boolean;
 
 /** Defaults mirror `LIGHT_INFERENCE_TRANSLATE_*` in `ai-inference.ts`. */
 export const LIGHT_INFERENCE_TRANSLATE_MODEL = 'Xenova/m2m100_418M';
@@ -65,7 +70,7 @@ export class LightPreloader {
     if (this.stopped) return;
     if (this.getConsentState() !== 'granted') return;
     if (this.isUnconstrained() === false) return;
-    if (!this.targets.some((target) => !this.isPreloaded(target.model))) return;
+    if (!this.targets.some((target) => !this.isPreloaded(target))) return;
     if (this.preloading) return;
 
     const run = () => {
@@ -119,7 +124,7 @@ export class LightPreloader {
     try {
       for (const target of this.targets) {
         if (this.stopped || this.getConsentState() !== 'granted') return;
-        if (this.isPreloaded(target.model)) continue;
+        if (this.isPreloaded(target)) continue;
         try {
           await this.preload({ task: target.task, model: target.model, dtype: target.dtype });
           this.options.onPreloaded?.();
