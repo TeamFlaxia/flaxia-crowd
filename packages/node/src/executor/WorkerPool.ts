@@ -1,5 +1,6 @@
 import { isNodeModelCacheSnapshot } from "@flaxia/sdk";
 import type { NodeModelCacheSnapshot, WorkloadType } from "@flaxia/sdk";
+import { FlaxiaError } from "@flaxia/sdk";
 
 const log = (...args: unknown[]) => console.log("[flaxia-node]", ...args);
 
@@ -161,7 +162,13 @@ export class WorkerPool {
         settle(() => resolve(result));
       } else if (type === 'error') {
         log(`task failed id=${id} workload=${workload} error=${error}`);
-        settle(() => reject(new Error(error)));
+        const code = typeof event.data.errorCode === 'string' ? event.data.errorCode : 'TASK_FAILED';
+        const status = typeof event.data.errorStatus === 'number' ? event.data.errorStatus : 500;
+        const err = new FlaxiaError(String(error), code, status);
+        if (typeof event.data.detail === 'string') {
+          (err as unknown as { detail?: string }).detail = event.data.detail;
+        }
+        settle(() => reject(err));
       } else {
         log(`task unknown-message id=${id} type=${String(type)}`);
         settle(() => reject(new Error(`Unknown message type: ${String(type)}`)));

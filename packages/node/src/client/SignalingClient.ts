@@ -16,6 +16,15 @@ import { collectNodeResourceReport } from '../executor/resourceReporter';
 import { assertPublicUrl } from '../executor/egress-guard';
 import { isCurrentSwarmPeerSignal, SwarmPeerTransport } from '../swarm/peer-transport';
 import { evaluateMobileLifecycle } from './mobile-lifecycle';
+import { LightPreloader } from './light-preloader';
+import {
+  LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE,
+  LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL,
+  LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK,
+  LIGHT_INFERENCE_TRANSLATE_DTYPE,
+  LIGHT_INFERENCE_TRANSLATE_MODEL,
+  LIGHT_INFERENCE_TRANSLATE_TASK,
+} from './light-preloader';
 import {
   buildNodeSignalProtocols,
   buildWsUrl,
@@ -26,6 +35,8 @@ import {
 } from '@flaxia/sdk';
 
 import type { ConsentState, FlaxiaNodeController, NodeConfig, SwarmNodeCapabilities, WorkloadType } from '@flaxia/sdk';
+import type { AiInferencePayload, AiInferenceResult } from '@flaxia/sdk';
+import { OndeviceUnavailableError } from '@flaxia/sdk';
 
 const log = (...args: unknown[]) => console.log('[flaxia-node]', ...args);
 const logError = (...args: unknown[]) => console.error('[flaxia-node]', ...args);
@@ -87,6 +98,8 @@ class SignalingClient {
   private inflightTasks = new Set<string>();
   /** Tasks the coordinator told us to stop; their failure must not be echoed back. */
   private abortedTasks = new Set<string>();
+  private lightPreloader: LightPreloader | null = null;
+  private preloaderTask: string | null = null;
   private swarmSessions = new Map<string, string>();
   private retiredSwarmSessions = new Set<string>();
   /**
@@ -226,6 +239,9 @@ class SignalingClient {
       this.scheduleReconnect();
       return;
     }
+    // Light Inference: warm the translate model during idle time once the
+    // node is connected. Consent is Crowd's consent (checked inside).
+    this.startLightPreloader();
 
     // The token travels in the WebSocket subprotocol list: a browser cannot set
     // request headers, and a `?token=` query string would end up in proxy and
@@ -437,6 +453,7 @@ class SignalingClient {
     log(`disconnect nodeId=${this.nodeId}`);
     this.destroyed = true;
     this.suspended = false;
+    this.stopLightPreloader();
     this.removeMobileLifecycleHandlers();
     try {
       this.ws?.close();
@@ -460,6 +477,7 @@ class SignalingClient {
     if (this.suspended || this.destroyed) return;
     log('suspended (visibility or manual)');
     this.suspended = true;
+    this.stopLightPreloader();
     if (this.ws) {
       const old = this.ws;
       old.onclose = null;
@@ -740,6 +758,86 @@ class SignalingClient {
     }
   }
 
+  /**
+   * Run `ai-inference` locally without involving the orchestrator.
+   * Light Inference entry point for SPA callers: the same payload shape as a
+   * coordinator task, executed in this device's WorkerPool.
+   *
+   * When the caller passes `options.ondeviceOnly === true` and the model is
+   * not held, the worker fails with `ONDEVICE_UNAVAILABLE` (500) and nothing
+   * is delegated. Without a running node the same 500 is thrown here.
+   */
+  async runLocalAiInference(
+    payload: AiInferencePayload,
+    onToken?: (token: string) => void | Promise<void>,
+  ): Promise<AiInferenceResult> {
+    if (!this.workerPool) {
+      throw new OndeviceUnavailableError('No running Crowd node on this device', 'node_not_running');
+    }
+    // Consent is the gate: a local inference is still running a Crowd node.
+    if (getConsentState() !== 'granted') {
+      throw new OndeviceUnavailableError('Crowd consent is not granted', 'consent_not_granted');
+    }
+    const id = `local-${typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`}`;
+    const result = await this.workerPool.run(id, 'ai-inference', payload, 300000, onToken, {
+      maxCpuLoad: this.effectiveMaxCpuLoad(),
+      fileSourceOrigins: validatedHttpsOrigins(this.config.fileSourceOrigins),
+      containerImageOrigins: validatedHttpsOrigins(this.config.containerImageOrigins),
+    });
+    return result as AiInferenceResult;
+  }
+
+  /** Route a preload through the worker's `preloadAiModel` snapshot check. */
+  isAiModelPreloaded(model: string): boolean {
+    // Cheap signal via the heartbeat snapshot: a ready entry counts.
+    const snapshot = this.workerPool.modelCacheSnapshot;
+    if (!snapshot) return false;
+    return snapshot.entries.some((e) => e.modelId === model && e.state === 'ready');
+  }
+
+  /** Warm a model in the worker (Light Inference idle preload). */
+  async preloadAiModel(request: { task: string; model: string; dtype?: string; device?: string }): Promise<void> {
+    const id = `preload-${typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`}`;
+    await this.workerPool.run(
+      id,
+      'ai-preload' as unknown as WorkloadType,
+      request,
+      300000,
+      undefined,
+      { maxCpuLoad: this.effectiveMaxCpuLoad() },
+    );
+  }
+
+  private startLightPreloader(): void {
+    if (this.lightPreloader) this.lightPreloader.stop();
+    this.lightPreloader = new LightPreloader(
+      () => getConsentState(),
+      {
+        targets: [
+          {
+            model: LIGHT_INFERENCE_TRANSLATE_MODEL,
+            task: LIGHT_INFERENCE_TRANSLATE_TASK,
+            dtype: LIGHT_INFERENCE_TRANSLATE_DTYPE,
+          },
+          {
+            model: LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL,
+            task: LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK,
+            dtype: LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE,
+          },
+        ],
+        onPreloaded: () => { /* status chip refresh hook for host diagnostics */ },
+      },
+      (model) => this.isAiModelPreloaded(model),
+      (request) => this.preloadAiModel(request),
+    );
+    this.lightPreloader.start();
+  }
+
+  private stopLightPreloader(): void {
+    if (this.lightPreloader) this.lightPreloader.stop();
+    this.lightPreloader = null;
+  }
+
   private listenForLifecycle(target: EventTarget, type: string, listener: EventListener) {
     target.addEventListener(type, listener);
     this.lifecycleCleanup.push(() => target.removeEventListener(type, listener));
@@ -915,6 +1013,31 @@ class NodeController implements FlaxiaNodeController {
     clearPersistedConsent();
     this.stop();
     safeLocalStorageRemove(NODE_TOKEN_KEY);
+  }
+
+  async runLocalAiInference(
+    payload: AiInferencePayload,
+    onToken?: (token: string) => void | Promise<void>,
+  ): Promise<AiInferenceResult> {
+    const client: SignalingClient | undefined = (window as any)[WINDOW_KEY];
+    if (!client || !this.isRunning()) {
+      throw new OndeviceUnavailableError('No running Crowd node on this device', 'node_not_running');
+    }
+    return client.runLocalAiInference(payload, onToken);
+  }
+
+  isAiModelPreloaded(model: string): boolean {
+    const client: SignalingClient | undefined = (window as any)[WINDOW_KEY];
+    if (!client) return false;
+    return client.isAiModelPreloaded(model);
+  }
+
+  async preloadAiModel(request: { task: string; model: string; dtype?: string; device?: string }): Promise<void> {
+    const client: SignalingClient | undefined = (window as any)[WINDOW_KEY];
+    if (!client) {
+      throw new OndeviceUnavailableError('No running Crowd node on this device', 'node_not_running');
+    }
+    await client.preloadAiModel(request);
   }
 }
 

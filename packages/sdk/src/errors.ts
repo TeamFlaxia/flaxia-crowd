@@ -22,3 +22,15 @@ export class ValidationError extends FlaxiaError {
     super(message, 'VALIDATION_ERROR', 400);
   }
 }
+
+/**
+ * `ondeviceOnly: true` was requested but no runnable node holds the model.
+ * Status 500 by design: the caller explicitly forbids delegation/download,
+ * so the only honest answer is an immediate failure, never a queue wait.
+ */
+export class OndeviceUnavailableError extends FlaxiaError {
+  constructor(message = 'On-device model not available', detail?: string) {
+    super(detail ? `${message}: ${detail}` : message, 'ONDEVICE_UNAVAILABLE', 500);
+    if (detail) (this as unknown as { detail?: string }).detail = detail;
+  }
+}

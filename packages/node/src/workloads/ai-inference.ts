@@ -1,6 +1,7 @@
 import { env, pipeline, TextStreamer } from '@huggingface/transformers';
 import type { AiInferencePayload, AiInferenceResult, AiInferenceOptions } from '@flaxia/sdk';
 import type { ModelCacheBackend, NodeModelCacheSnapshot } from '@flaxia/sdk';
+import { OndeviceUnavailableError } from '@flaxia/sdk';
 import {
   MAX_AI_MODEL_MAX_BYTES,
   applyGenerationOptions,
@@ -8,6 +9,7 @@ import {
   resolveAiDevice,
   resolveAiDtype,
   resolveAiModel,
+  resolveOndeviceOnly,
   type AiModelDefinition,
 } from './ai-model-registry';
 import { ModelPipelineCache, modelPipelineKey } from './model-pipeline-cache';
@@ -41,6 +43,33 @@ const pipelineCache = new ModelPipelineCache<any>();
 /** Bound work queued behind TextStreamer's synchronous callback API. */
 export const MAX_PENDING_TOKEN_CALLBACKS = 64;
 export const MAX_PENDING_TOKEN_CHARS = 256 * 1024;
+
+/**
+ * Whether the model already has a `ready` executable pipeline in memory.
+ * Guards `ondeviceOnly` tasks: they must fail before any download when the
+ * model is absent, so the check runs on the snapshot (no side effects).
+ */
+export const isAiModelPreloaded = (model: string): boolean => {
+  const snapshot = getModelCacheSnapshot();
+  return snapshot.entries.some(
+    (entry) => entry.modelId === model && entry.state === 'ready',
+  );
+};
+
+/** Model preloaded by the Light Inference idle preloader (small enough for WASM). */
+export const LIGHT_INFERENCE_TRANSLATE_MODEL = 'Xenova/m2m100_418M';
+export const LIGHT_INFERENCE_TRANSLATE_TASK = 'translation';
+export const LIGHT_INFERENCE_TRANSLATE_DTYPE = 'q4f16';
+
+/**
+ * Flaxia's default translate model. PLaMO 3 Translate 0.8B is a decoder-only
+ * text-generation model, so its Light Inference task is `text-generation`,
+ * not `translation`. Kept warm alongside M2M100 so the default en↔ja pairs
+ * serve instantly on device instead of answering ONDEVICE_UNAVAILABLE.
+ */
+export const LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL = 'TeamFlaxia/plamo-3-translate-0.8b-onnx';
+export const LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK = 'text-generation';
+export const LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE = 'q4f16';
 
 /**
  * Drops all cached model pipelines so the (potentially hundreds of MB of)
@@ -189,9 +218,19 @@ export const handleAiInference = async (
   const definition: AiModelDefinition = resolveAiModel(model);
   const device = resolveAiDevice(options.device);
   const dtype = resolveAiDtype(options.dtype);
+  const ondeviceOnly = resolveOndeviceOnly(options.ondeviceOnly);
   const safeInput = assertAiInput(input);
   const generationOptions: Record<string, unknown> = {};
   applyGenerationOptions(generationOptions, options as Record<string, unknown>);
+
+  // Light Inference gate: ondeviceOnly means the caller forbids download and
+  // delegation. Fail immediately with a typed 500 instead of loading anything.
+  if (ondeviceOnly && !isAiModelPreloaded(model)) {
+    throw new OndeviceUnavailableError(
+      `ondeviceOnly: model ${model} is not preloaded on this device`,
+      'preloading',
+    );
+  }
 
   const resolvedDtype = dtype ?? 'q4f16';
   const requestedBackend = (device ?? 'wasm') as ModelCacheBackend;
@@ -287,4 +326,45 @@ export const handleAiInference = async (
   } finally {
     await lease.release();
   }
+};
+
+/**
+ * Download + warm a model pipeline for later ondeviceOnly serving. Runs the
+ * same registry-fail-closed load as a real task but without generating.
+ * Idempotent: callers deduplicate via `isAiModelPreloaded()`.
+ */
+export const preloadAiModel = async (request: {
+  task: string;
+  model: string;
+  dtype?: string;
+  device?: string;
+}): Promise<void> => {
+  const { task, model } = request;
+  const definition = resolveAiModel(model);
+  const device = resolveAiDevice(request.device);
+  const dtype = resolveAiDtype(request.dtype);
+  const resolvedDtype = dtype ?? LIGHT_INFERENCE_TRANSLATE_DTYPE;
+  const requestedBackend = (device ?? 'wasm') as ModelCacheBackend;
+  const cacheKey = modelPipelineKey({
+    task,
+    modelId: model,
+    revision: definition.revision,
+    dtype: resolvedDtype,
+    backend: requestedBackend,
+  });
+  const lease = await pipelineCache.acquire(
+    cacheKey,
+    { modelId: model, revision: definition.revision, dtype: resolvedDtype, backend: requestedBackend },
+    async () => {
+      console.log(`[flaxia-node] ai-inference: preloading task=${task} model=${definition.repo}`);
+      const loaded = await pipeline(task as any, definition.repo, {
+        dtype: resolvedDtype,
+        device,
+        revision: definition.revision,
+      });
+      return { value: loaded, descriptor: { backend: requestedBackend } };
+    },
+    (loaded) => loaded.dispose?.(),
+  );
+  await lease.release();
 };

@@ -164,6 +164,14 @@ async function runWorkload(
       cacheReleasers.set('decision', decision.releaseCache);
       return await ai.handleAiInference(payload as any, emitToken);
     }
+    case 'ai-preload' as WorkloadType: {
+      const preload = await import('../workloads/ai-inference');
+      cacheReleasers.set('ai-inference', preload.releaseCache);
+      cacheSnapshotters.set('ai-inference', preload.getModelCacheSnapshot);
+      const req = payload as { task: string; model: string; dtype?: string; device?: string };
+      await preload.preloadAiModel(req);
+      return { preloaded: true };
+    }
     case 'image-process':
       const image = await import('../workloads/image-process');
       return await image.handleImageProcess(payload as any);
@@ -340,9 +348,13 @@ self.onmessage = async (e: MessageEvent) => {
     }
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
+    const errRec = err as unknown as { code?: unknown; status?: unknown; detail?: unknown };
+    const errorCode = typeof errRec?.code === 'string' ? errRec.code : undefined;
+    const errorStatus = typeof errRec?.status === 'number' ? errRec.status : undefined;
+    const detail = typeof errRec?.detail === 'string' ? errRec.detail : undefined;
     console.error(`[flaxia-node:worker] task error id=${id} workload=${workload} error=${error}`);
     if (activeTaskId === id) activeTaskId = null;
     releaseTokenFlow(id);
-    self.postMessage({ id, type: 'error', error, modelCache: getModelCacheSnapshot() });
+    self.postMessage({ id, type: 'error', error, errorCode, errorStatus, detail, modelCache: getModelCacheSnapshot() });
   }
 };

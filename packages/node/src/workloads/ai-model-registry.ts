@@ -61,6 +61,24 @@ const DEFAULT_AI_MODELS: Record<string, AiModelDefinition> = {
     revision: 'main',
     maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
   },
+  // Light Inference translate model (M2M100, ONNX). Registered under its
+  // canonical repo id so `resolveAiModel()` stays fail-closed; hosts may
+  // alias it (e.g. 'm2m100-translate') via `registerAiModels` at startup.
+  'Xenova/m2m100_418M': {
+    repo: 'Xenova/m2m100_418M',
+    revision: 'main',
+    maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
+  },
+  // Flaxia's default translate model (PLaMO 3 Translate 0.8B, ONNX). The
+  // q4f16 weights weigh ~673 MiB, above the 512 MiB default cap, and the
+  // repo's fp16 weights reach ~1.7 GiB — so the entry raises the per-file
+  // cap to 2 GiB (the 4 GiB hard ceiling still applies at the fetch guard).
+  // Pinned to an immutable revision, matching Flaxia's PLAMO_MODEL_REVISION.
+  'TeamFlaxia/plamo-3-translate-0.8b-onnx': {
+    repo: 'TeamFlaxia/plamo-3-translate-0.8b-onnx',
+    revision: '1c8417ee1a72442440ad515b02f99186c81fd08a',
+    maxBytes: 2 * 1024 ** 3,
+  },
 };
 
 const registry = new Map<string, AiModelDefinition>(
@@ -164,6 +182,19 @@ export function resolveAiDtype(dtype: unknown): AllowedAiDtype | undefined {
     );
   }
   return dtype as AllowedAiDtype;
+}
+
+/**
+ * Validate `options.ondeviceOnly`. Absent = false (download on demand and
+ * allow coordinator delegation). Anything but a boolean is rejected so the
+ * flag cannot silently widen the download/delegation surface.
+ */
+export function resolveOndeviceOnly(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== 'boolean') {
+    throw new Error(`ai-inference: option ondeviceOnly must be a boolean, got ${JSON.stringify(value)}`);
+  }
+  return value;
 }
 
 /**

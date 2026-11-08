@@ -120,6 +120,45 @@ describe('#5 node identity is server-issued and token-bound', () => {
     expect(secondBody.nodeId).not.toBe(firstBody.nodeId);
   });
 
+  // Native nodes report physical RAM as `deviceMemory` (GiB) and never send
+  // `wasmMemoryBytes` (they run no WASM). Absent wasm data must fall back to
+  // the deviceMemory signal instead of marking the node low-memory forever,
+  // which would make it ineligible for every heavy workload.
+  it('treats a native-style registration (deviceMemory only) as not low-memory at >=4 GiB', async () => {
+    const env = makeEnv();
+    const registered = await registerNode(env, { capabilities: ['image-process'], deviceMemory: 8 });
+    expect(registered.status).toBe(200);
+    const { token, nodeId, lowMemory } = await registered.json() as { token: string; nodeId: string; lowMemory: boolean };
+    expect(lowMemory).toBe(false);
+
+    const connected = await upgradeSignal(env, token);
+    expect(connected.status).toBe(101);
+    expect((await readNodeRecord(nodeId))?.lowMemory).toBe(false);
+    (connected as unknown as { webSocket?: WebSocket }).webSocket?.accept();
+  });
+
+  it('marks a native-style node under 4 GiB of RAM as low-memory', async () => {
+    const env = makeEnv();
+    const registered = await registerNode(env, { capabilities: ['image-process'], deviceMemory: 2 });
+    expect(registered.status).toBe(200);
+    const { token, nodeId, lowMemory } = await registered.json() as { token: string; nodeId: string; lowMemory: boolean };
+    expect(lowMemory).toBe(true);
+
+    const connected = await upgradeSignal(env, token);
+    expect(connected.status).toBe(101);
+    expect((await readNodeRecord(nodeId))?.lowMemory).toBe(true);
+    (connected as unknown as { webSocket?: WebSocket }).webSocket?.accept();
+  });
+
+  it('prefers the measured wasmMemoryBytes over deviceMemory when both are sent', async () => {
+    const env = makeEnv();
+    const small = await registerNode(env, { capabilities: ['ai-inference'], deviceMemory: 16, wasmMemoryBytes: 1 * 1024 ** 3 });
+    expect(((await small.json()) as { lowMemory: boolean }).lowMemory).toBe(true);
+
+    const big = await registerNode(env, { capabilities: ['ai-inference'], deviceMemory: 2, wasmMemoryBytes: 3 * 1024 ** 3 });
+    expect(((await big.json()) as { lowMemory: boolean }).lowMemory).toBe(false);
+  });
+
   it('rejects a tampered node token', async () => {
     const env = makeEnv();
     const registered = await registerNode(env, { siteId: 'example.com' });
