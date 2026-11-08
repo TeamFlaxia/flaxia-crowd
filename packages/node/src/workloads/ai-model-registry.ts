@@ -47,19 +47,25 @@ const DEFAULT_AI_MODELS: Record<string, AiModelDefinition> = {
   },
   // Decision model (LFM2.5-Encoder-350M based, 587M params). Runs via the
   // custom `decision` driver in workloads/decision.ts (trust_remote_code),
-  // not the generic transformers.js pipeline path. Weights are ~2.4GB in
+  // not the generic transformers.js pipeline path. `trust_remote_code`
+  // executes Python code from the repo on the volunteer node, so the
+  // revision is pinned to an immutable commit (not mutable `main`) to
+  // prevent silent code changes from being loaded. Weights are ~2.4GB in
   // fp32, so the per-file cap is raised to 3GiB (hard ceiling 4GiB).
   'LiquidAI/d1-omni-600M': {
     repo: 'LiquidAI/d1-omni-600M',
-    revision: 'main',
+    revision: '02b55d7076f15129e59ab3f94783f32c4b088674',
     maxBytes: 3 * 1024 ** 3,
   },
-  // Multimodal embedding (740M params, 768 dims, Apache-2.0). ONNX variant
-  // loaded by workloads/vector-embed.ts.
-  'google/embeddinggemma-2': {
-    repo: 'google/embeddinggemma-2',
+  // Multimodal embedding (740M params, 768 dims, Apache-2.0). The ONNX variant
+  // is loaded by workloads/vector-embed.ts (multimodal) and
+  // workloads/embed-gemma.ts (text-only). Per-file cap is 1 GiB to allow the
+  // fp16 audio/text encoders (~517-560 MB each) on WASM, which the 512 MiB
+  // default would reject.
+  'onnx-community/embeddinggemma-2-ONNX': {
+    repo: 'onnx-community/embeddinggemma-2-ONNX',
     revision: 'main',
-    maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
+    maxBytes: 1024 * 1024 * 1024,
   },
   // Light Inference translate model (M2M100, ONNX). Registered under its
   // canonical repo id so `resolveAiModel()` stays fail-closed; hosts may

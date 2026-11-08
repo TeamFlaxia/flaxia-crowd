@@ -23,7 +23,7 @@
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",
     "@flaxia/sdk": "^0.6.0",
-    "@huggingface/transformers": "^4.2.0",
+    "@huggingface/transformers": "^4.3.2",
     "onnxruntime-web": "1.26.0",
     "rollup": "^4.61.0"
   },

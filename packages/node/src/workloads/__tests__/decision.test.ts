@@ -4,8 +4,22 @@ vi.mock('@huggingface/transformers', () => ({
   env: { backends: { onnx: { wasm: {} as Record<string, unknown> } } },
   pipeline: vi.fn(),
   AutoModel: { from_pretrained: vi.fn() },
+  AutoProcessor: { from_pretrained: vi.fn() },
   loadImage: vi.fn(),
+  loadAudio: vi.fn(),
+  loadVideo: vi.fn(),
   TextStreamer: class {},
+}));
+
+vi.mock('../../executor/egress-guard', () => ({
+  fetchGuarded: vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    contentType: 'image/png',
+    bytes: new Uint8Array([120]),
+    byteLength: 1,
+    url: 'https://example.com/photo.png',
+  }),
 }));
 
 // Importing modules registers single-threaded wasm config; we only exercise
@@ -17,6 +31,8 @@ describe('decision payload validation', () => {
   it('rejects images and audio in one call (model limit)', async () => {
     await expect(
       handleDecision({
+        task: 'decision',
+        model: 'LiquidAI/d1-omni-600M',
         decision: {
           state: '今日はレトロゲーム会',
           questions: {
@@ -32,6 +48,8 @@ describe('decision payload validation', () => {
   it('rejects non-https media URLs', async () => {
     await expect(
       handleDecision({
+        task: 'decision',
+        model: 'LiquidAI/d1-omni-600M',
         decision: {
           state: 'x',
           questions: {
@@ -44,9 +62,11 @@ describe('decision payload validation', () => {
   });
 
   it('rejects empty questions and null state without media', async () => {
-    await expect(handleDecision({ decision: { state: 'x', questions: {} } })).rejects.toThrow(/questions/);
+    await expect(handleDecision({ task: 'decision', model: 'LiquidAI/d1-omni-600M', decision: { state: 'x', questions: {} } })).rejects.toThrow(/questions/);
     await expect(
       handleDecision({
+        task: 'decision',
+        model: 'LiquidAI/d1-omni-600M',
         decision: {
           state: null,
           questions: { trend: { type: 'choice', instructions: 'x', criteria: { a: 'A', b: 'B' } } },
@@ -58,11 +78,15 @@ describe('decision payload validation', () => {
   it('requires criteria for choice and levels for score', async () => {
     await expect(
       handleDecision({
+        task: 'decision',
+        model: 'LiquidAI/d1-omni-600M',
         decision: { state: 'x', questions: { trend: { type: 'choice', instructions: 'x' } } },
       }),
     ).rejects.toThrow(/criteria/);
     await expect(
       handleDecision({
+        task: 'decision',
+        model: 'LiquidAI/d1-omni-600M',
         decision: { state: 'x', questions: { urgency: { type: 'score', instructions: 'x' } } },
       }),
     ).rejects.toThrow(/levels/);
@@ -126,8 +150,9 @@ describe('decision worked-example flow (mocked model)', () => {
           },
         };
         // Echo back the option order the caller supplied (ensures no option was dropped).
+        const trendProbabilities = (answers.trend as { probabilities: Record<string, number> }).probabilities;
         for (const option of Object.keys(criteria)) {
-          (answers.trend.probabilities as Record<string, number>)[option] ??= 0.01;
+          trendProbabilities[option] ??= 0.01;
         }
         return { answers, usage: { input_tokens: 128, output_tokens: 0 } };
       }),
@@ -136,12 +161,6 @@ describe('decision worked-example flow (mocked model)', () => {
       loadImage: ReturnType<typeof vi.fn>;
     };
     transformers.loadImage.mockResolvedValue({ fake: 'image' });
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      blob: () => Promise.resolve(new Blob(['x'], { type: 'image/png' })),
-    }) as unknown as typeof fetch;
     try {
       const { AutoModel } = (await import('@huggingface/transformers')) as unknown as {
         AutoModel: { from_pretrained: ReturnType<typeof vi.fn> };
@@ -155,6 +174,8 @@ describe('decision worked-example flow (mocked model)', () => {
       AutoModel.from_pretrained.mockResolvedValue(fakeModel);
 
       const result = await decisionModule.handleDecision({
+        task: 'decision',
+        model: 'LiquidAI/d1-omni-600M',
         decision: {
           state: '今日はレトロゲーム会で盛り上がった',
           questions: {
@@ -175,7 +196,7 @@ describe('decision worked-example flow (mocked model)', () => {
       expect(result.inputTokens).toBe(128);
       expect(result.durationMs).toBeDefined();
     } finally {
-      globalThis.fetch = originalFetch;
+      // fetchGuarded is mocked; nothing to restore.
     }
   });
 });

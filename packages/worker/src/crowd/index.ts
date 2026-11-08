@@ -184,13 +184,126 @@ export function validateAiInferencePayload(payload: unknown): string | null {
   }
   const body = payload as Record<string, unknown>
   const options = body.options
-  if (options === undefined || options === null) return null
-  if (typeof options !== 'object' || Array.isArray(options)) {
-    return 'payload.options must be an object'
+  if (options !== undefined && options !== null) {
+    if (typeof options !== 'object' || Array.isArray(options)) {
+      return 'payload.options must be an object'
+    }
+    const rec = options as Record<string, unknown>
+    if (rec.ondeviceOnly !== undefined && rec.ondeviceOnly !== null && typeof rec.ondeviceOnly !== 'boolean') {
+      return 'payload.options.ondeviceOnly must be a boolean'
+    }
   }
-  const rec = options as Record<string, unknown>
-  if (rec.ondeviceOnly !== undefined && rec.ondeviceOnly !== null && typeof rec.ondeviceOnly !== 'boolean') {
-    return 'payload.options.ondeviceOnly must be a boolean'
+  // Decision-mode (d1-omni): mirror the node's decision limits at the API
+  // boundary so malformed questions/media never occupy a volunteer slot.
+  // Limits mirror packages/node/src/workloads/decision.ts.
+  if (body.decision !== undefined) {
+    if (typeof body.model !== 'string' || body.model !== 'LiquidAI/d1-omni-600M') {
+      return 'payload.model must be LiquidAI/d1-omni-600M when payload.decision is set'
+    }
+    if (!body.decision || typeof body.decision !== 'object' || Array.isArray(body.decision)) {
+      return 'payload.decision must be an object'
+    }
+    const decision = body.decision as Record<string, unknown>
+    const questions = decision.questions
+    if (!questions || typeof questions !== 'object' || Array.isArray(questions)) {
+      return 'payload.decision.questions must be an object'
+    }
+    const names = Object.keys(questions as Record<string, unknown>)
+    if (names.length === 0 || names.length > 8) {
+      return 'payload.decision.questions must hold 1..8 entries'
+    }
+    for (const q of Object.values(questions as Record<string, unknown>)) {
+      if (!q || typeof q !== 'object' || Array.isArray(q)) {
+        return 'payload.decision.questions entries must be objects'
+      }
+      const rec = q as Record<string, unknown>
+      if (rec.type !== 'noul' && rec.type !== 'choice' && rec.type !== 'score') {
+        return 'payload.decision.questions entries must have type noul, choice, or score'
+      }
+      if (typeof rec.instructions !== 'string' || !rec.instructions) {
+        return 'payload.decision.questions entries need instructions'
+      }
+      if (rec.type === 'choice' && (!rec.criteria || typeof rec.criteria !== 'object' || Array.isArray(rec.criteria))) {
+        return 'payload.decision.questions choice entries need criteria object'
+      }
+      if (rec.type === 'score' && (!Array.isArray(rec.criteria) || rec.criteria.length < 2 || rec.criteria.length > 10)) {
+        return 'payload.decision.questions score entries need 2..10 levels'
+      }
+    }
+    const state = decision.state
+    if (state !== undefined && state !== null && typeof state !== 'string') {
+      return 'payload.decision.state must be a string or null'
+    }
+    if (typeof state === 'string' && state.length > 20000) {
+      return 'payload.decision.state exceeds 20000 characters'
+    }
+    const imageUrls = decision.imageUrls ?? []
+    if (decision.imageUrls !== undefined && !Array.isArray(imageUrls)) {
+      return 'payload.decision.imageUrls must be an array'
+    }
+    if (Array.isArray(imageUrls) && imageUrls.length > 8) {
+      return 'payload.decision.imageUrls must hold 0..8 URLs'
+    }
+    for (const url of (Array.isArray(imageUrls) ? imageUrls : [])) {
+      if (typeof url !== 'string' || !url.startsWith('https://')) {
+        return 'payload.decision.imageUrls must be https:// URLs'
+      }
+    }
+    const audioUrl = decision.audioUrl
+    if (audioUrl !== undefined && (typeof audioUrl !== 'string' || !audioUrl.startsWith('https://'))) {
+      return 'payload.decision.audioUrl must be an https:// URL'
+    }
+    if (Array.isArray(imageUrls) && imageUrls.length > 0 && audioUrl !== undefined) {
+      return 'payload.decision: pass images or audio in one call, not both'
+    }
+    if ((state === null || state === '' || state === undefined) && (!Array.isArray(imageUrls) || imageUrls.length === 0) && audioUrl === undefined) {
+      return 'payload.decision: null state needs at least one image or an audio clip'
+    }
+  }
+  return null
+}
+
+/**
+ * Validate a `vector-embed` payload at the API boundary. Mirrors the node's
+ * multimodal limits (packages/node/src/workloads/vector-embed.ts) so malformed
+ * media references never occupy a volunteer slot.
+ */
+export function validateVectorEmbedPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return 'payload must be an object'
+  }
+  const body = payload as Record<string, unknown>
+  const text = body.text
+  if (text !== undefined && typeof text !== 'string') {
+    return 'payload.text must be a string'
+  }
+  if (typeof text === 'string' && text.length > 100000) {
+    return 'payload.text exceeds 100000 characters'
+  }
+  const imageUrls = body.imageUrls ?? []
+  if (body.imageUrls !== undefined && !Array.isArray(imageUrls)) {
+    return 'payload.imageUrls must be an array'
+  }
+  if (Array.isArray(imageUrls) && imageUrls.length > 29) {
+    return 'payload.imageUrls must hold 0..29 URLs'
+  }
+  for (const url of (Array.isArray(imageUrls) ? imageUrls : [])) {
+    if (typeof url !== 'string' || !url.startsWith('https://')) {
+      return 'payload.imageUrls must be https:// URLs'
+    }
+  }
+  const audioUrl = body.audioUrl
+  if (audioUrl !== undefined && (typeof audioUrl !== 'string' || !audioUrl.startsWith('https://'))) {
+    return 'payload.audioUrl must be an https:// URL'
+  }
+  const videoUrl = body.videoUrl
+  if (videoUrl !== undefined && (typeof videoUrl !== 'string' || !videoUrl.startsWith('https://'))) {
+    return 'payload.videoUrl must be an https:// URL'
+  }
+  const hasText = typeof text === 'string' && text.length > 0
+  const hasMedia = (Array.isArray(imageUrls) && imageUrls.length > 0) || audioUrl !== undefined || videoUrl !== undefined
+  if (!hasText && !hasMedia) {
+    return 'payload needs at least text or one media URL'
   }
   return null
 }
@@ -442,6 +555,11 @@ app.post('/tasks', async (c) => {
   if (body.workload === 'ai-inference') {
     const aiError = validateAiInferencePayload(body.payload)
     if (aiError) return c.json({ error: aiError }, 400)
+  }
+
+  if (body.workload === 'vector-embed') {
+    const embedError = validateVectorEmbedPayload(body.payload)
+    if (embedError) return c.json({ error: embedError }, 400)
   }
 
   const { sites: allowedSites, error: sitesError } = parseAllowedSites(body.payload)

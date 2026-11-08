@@ -1,9 +1,11 @@
 import type {
+  AiInferencePayload,
   AiInferenceResult,
   DecisionAnswer,
   DecisionQuestions,
 } from '@flaxia/sdk';
 import { resolveAiModel } from './ai-model-registry';
+import { fetchGuarded } from '../executor/egress-guard';
 
 /**
  * Decision-model driver for d1-omni-600M (LiquidAI).
@@ -15,7 +17,8 @@ import { resolveAiModel } from './ai-model-registry';
  * questions in one forward pass, returning full probability distributions.
  *
  * Multimodal fetch contract mirrors NSFW `imageUrl`: media travels as
- * publicly fetchable URLs, the node fetches bytes itself.
+ * publicly fetchable URLs, the node fetches bytes itself via the egress
+ * guard (https only, public hosts only, bounded size/timeout).
  */
 
 const DECISION_MODEL_ID = 'LiquidAI/d1-omni-600M';
@@ -30,6 +33,12 @@ export const DECISION_MAX_QUESTIONS = 8;
 export const DECISION_MAX_OPTIONS = 64;
 export const DECISION_MAX_STATE_CHARS = 20_000;
 export const DECISION_MAX_MEDIA_URLS = 8;
+
+/** Per-file media caps (compressed bytes). */
+export const MAX_DECISION_IMAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_DECISION_AUDIO_BYTES = 8 * 1024 * 1024;
+/** Media fetch timeout. */
+const DECISION_FETCH_TIMEOUT_MS = 20_000;
 
 let decisionModel: any = null;
 let decisionLoadPromise: Promise<any> | null = null;
@@ -123,26 +132,31 @@ function assertDecisionPayload(payload: {
   return { state, questions, imageUrls: [...imageUrls], audioUrl };
 }
 
-async function loadDecisionModel(): Promise<any> {
+async function loadDecisionModel(modelId: string): Promise<any> {
   if (decisionModel) return decisionModel;
   if (decisionLoadPromise) return decisionLoadPromise;
 
   const loadStartedAt = performance.now();
   decisionLoadPromise = (async () => {
-    // Fail-closed gate: never load a repo that is not allowlisted.
-    resolveAiModel(DECISION_MODEL_ID);
+    // Fail-closed gate: never load a repo that is not allowlisted, and pin to
+    // the registry revision (immutable SHA) so trust_remote_code cannot drift.
+    const definition = resolveAiModel(modelId);
+    if (definition.repo !== 'LiquidAI/d1-omni-600M') {
+      throw new Error(`decision: model ${modelId} is not a d1-omni decision model`);
+    }
     const { AutoModel, env } = (await import('@huggingface/transformers')) as any;
     if (env?.backends?.onnx?.wasm) {
       env.backends.onnx.wasm.numThreads = 1;
       env.backends.onnx.wasm.proxy = false;
     }
-    const model = await AutoModel.from_pretrained(DECISION_MODEL_ID, {
+    const model = await AutoModel.from_pretrained(definition.repo, {
       trust_remote_code: true,
       dtype: 'q8',
+      revision: definition.revision,
     });
     decisionModel = model;
     console.log(
-      `[flaxia-node] decision: pipeline ready model=${DECISION_MODEL_ID} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
+      `[flaxia-node] decision: model ready model=${definition.repo} revision=${definition.revision} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
     );
     return model;
   })().catch((err) => {
@@ -188,17 +202,13 @@ export function normalizeDecisionAnswer(raw: any): DecisionAnswer {
   return answer;
 }
 
-export async function handleDecision(payload: {
-  decision?: {
-    state?: string | null;
-    questions?: DecisionQuestions;
-    imageUrls?: string[];
-    audioUrl?: string;
-  };
-}): Promise<AiInferenceResult> {
+export async function handleDecision(payload: AiInferencePayload): Promise<AiInferenceResult> {
   const startTime = performance.now();
+  if (payload.model !== DECISION_MODEL_ID) {
+    throw new Error(`decision: model must be ${DECISION_MODEL_ID} for decision payloads, got ${JSON.stringify(payload.model)}`);
+  }
   const { state, questions, imageUrls, audioUrl } = assertDecisionPayload(payload);
-  const model = await loadDecisionModel();
+  const model = await loadDecisionModel(payload.model);
 
   // Fetch media as bytes; the model expects PIL images / int16|float samples.
   let images: any[] | undefined;
@@ -206,19 +216,34 @@ export async function handleDecision(payload: {
     const { loadImage } = (await import('@huggingface/transformers')) as any;
     images = [];
     for (const url of imageUrls) {
-      const res = await fetch(url);
+      const res = await fetchGuarded({
+        url,
+        allowContentTypes: ['image/*', 'application/octet-stream'],
+        maxBytes: MAX_DECISION_IMAGE_BYTES,
+        timeoutMs: DECISION_FETCH_TIMEOUT_MS,
+      });
       if (!res.ok) throw new Error(`decision: image fetch failed (${res.status}): ${url}`);
-      const blob = await res.blob();
-      images.push(await loadImage(URL.createObjectURL(blob)));
+      const blob = new Blob([res.bytes], { type: res.contentType || 'application/octet-stream' });
+      const blobUrl = URL.createObjectURL(blob);
+      try {
+        images.push(await loadImage(blobUrl));
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
     }
   }
   let audio: Int16Array | Float32Array | undefined;
   if (audioUrl) {
-    const res = await fetch(audioUrl);
+    const res = await fetchGuarded({
+      url: audioUrl,
+      allowContentTypes: ['audio/*', 'application/octet-stream'],
+      maxBytes: MAX_DECISION_AUDIO_BYTES,
+      timeoutMs: DECISION_FETCH_TIMEOUT_MS,
+    });
     if (!res.ok) throw new Error(`decision: audio fetch failed (${res.status}): ${audioUrl}`);
     // Decode to mono 16kHz in the browser: prefer OfflineAudioContext,
     // fall back to a raw PCM passthrough when the container lacks it.
-    const arrayBuffer = await res.arrayBuffer();
+    const arrayBuffer = res.bytes.buffer.slice(res.bytes.byteOffset, res.bytes.byteOffset + res.bytes.byteLength) as ArrayBuffer;
     const AudioContextImpl =
       (globalThis as any).OfflineAudioContext ??
       (globalThis as any).webkitOfflineAudioContext;

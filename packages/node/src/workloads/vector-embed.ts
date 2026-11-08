@@ -1,4 +1,6 @@
 import type { VectorEmbedPayload, VectorEmbedResult } from '@flaxia/sdk';
+import { resolveAiModel } from './ai-model-registry';
+import { fetchGuarded } from '../executor/egress-guard';
 
 /**
  * Multimodal vector-embed workload (EmbeddingGemma 2).
@@ -6,47 +8,102 @@ import type { VectorEmbedPayload, VectorEmbedResult } from '@flaxia/sdk';
  * Produces one unified 768-dim vector per post from interleaved text + image
  * (+ audio / video frames). The SDK payload carries media as publicly
  * fetchable URLs (same contract as NSFW `imageUrl`); the node fetches bytes
- * itself so hosts never ship base64 through the orchestrator.
+ * itself (via the egress guard) so hosts never ship base64 through the
+ * orchestrator.
  *
  * Placeholder convention (sentence-transformers): `<|image|>`, `<|video|>`,
  * `<|audio|>` markers in `text` are filled in order from the URL arrays.
+ *
+ * Loading uses AutoProcessor/AutoModel (not the `feature-extraction` pipeline):
+ * Transformers.js 4.3+ documents multimodal EmbeddingGemma2 as
+ * `processor(text, images, audio, videos)` -> `model(processed).sentence_embedding`.
+ * The pipeline is text-only.
  */
 
-const EMBEDDING_MODEL = 'google/embeddinggemma-2';
+const EMBEDDING_MODEL = 'onnx-community/embeddinggemma-2-ONNX';
 const EMBEDDING_DIMENSIONS = 768;
+const EMBEDDING_AUDIO_SAMPLE_RATE = 16_000;
 
-let embeddingPipeline: any = null;
-let embeddingLoadPromise: Promise<any> | null = null;
+/** Per-file media caps (compressed bytes). */
+export const MAX_VECTOR_EMBED_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_VECTOR_EMBED_AUDIO_BYTES = 25 * 1024 * 1024;
+export const MAX_VECTOR_EMBED_VIDEO_BYTES = 50 * 1024 * 1024;
+/** Media fetch timeout. */
+const VECTOR_EMBED_FETCH_TIMEOUT_MS = 30_000;
+/** Text length cap (mirrors ai-inference MAX_AI_INPUT_CHARS). */
+const MAX_VECTOR_EMBED_TEXT_CHARS = 100_000;
+
+interface LoadedEmbeddingModel {
+  processor: any;
+  model: any;
+}
+
+let embeddingModel: LoadedEmbeddingModel | null = null;
+let embeddingLoadPromise: Promise<LoadedEmbeddingModel> | null = null;
 
 export const releaseCache = (): void => {
-  embeddingPipeline = null;
+  embeddingModel = null;
   embeddingLoadPromise = null;
 };
 
-async function loadEmbeddingPipeline(): Promise<any> {
-  if (embeddingPipeline) return embeddingPipeline;
+let downloadGuardInstalled = false;
+
+/**
+ * Keep model downloads on Hugging Face and bound a single file by the
+ * registry's `maxBytes`. The ai-inference fetch guard is installed only when
+ * that workload is used, so vector-embed needs its own check when it is the
+ * first model task (same pattern as embed-gemma).
+ */
+function installDownloadGuard(env: any, maxBytes: number): void {
+  if (downloadGuardInstalled) return;
+  downloadGuardInstalled = true;
+  const inner = typeof env.fetch === 'function' ? env.fetch.bind(env) : globalThis.fetch.bind(globalThis);
+  env.fetch = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+    const url = new URL(String(input));
+    if (!/(^|\.)huggingface\.co$/.test(url.hostname) && !/(^|\.)hf\.co$/.test(url.hostname)) {
+      throw new Error(`vector-embed: model download blocked from ${url.hostname}`);
+    }
+    const response = await inner(url, init);
+    const declared = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new Error(`vector-embed: model file too large (${declared} bytes > ${maxBytes})`);
+    }
+    return response;
+  };
+}
+
+async function loadEmbeddingModel(): Promise<LoadedEmbeddingModel> {
+  if (embeddingModel) return embeddingModel;
   if (embeddingLoadPromise) return embeddingLoadPromise;
 
   const loadStartedAt = performance.now();
   embeddingLoadPromise = (async () => {
-    console.log(`[flaxia-node] vector-embed: loading pipeline model=${EMBEDDING_MODEL} device=wasm`);
-    const { pipeline, env } = await import('@huggingface/transformers');
-    // Force single-threaded wasm (see ai-inference.ts for rationale): avoids
-    // spawning a worker per CPU core and OOMing low-memory mobile devices.
+    const definition = resolveAiModel(EMBEDDING_MODEL);
+    console.log(`[flaxia-node] vector-embed: loading model=${definition.repo} revision=${definition.revision} device=wasm dtype=fp16`);
+    const { AutoModel, AutoProcessor, env } = await import('@huggingface/transformers');
     if (env?.backends?.onnx?.wasm) {
       env.backends.onnx.wasm.numThreads = 1;
       env.backends.onnx.wasm.proxy = false;
     }
-    const pipe = await pipeline('feature-extraction', EMBEDDING_MODEL, { device: 'wasm' } as any);
-    embeddingPipeline = pipe;
+    installDownloadGuard(env, definition.maxBytes);
+    const [processor, model] = await Promise.all([
+      AutoProcessor.from_pretrained(definition.repo, { revision: definition.revision }),
+      AutoModel.from_pretrained(definition.repo, {
+        device: 'wasm',
+        dtype: 'fp16',
+        revision: definition.revision,
+      } as any),
+    ]);
+    const loaded: LoadedEmbeddingModel = { processor, model };
+    embeddingModel = loaded;
     console.log(
-      `[flaxia-node] vector-embed: pipeline ready loadMs=${Math.round(performance.now() - loadStartedAt)}`,
+      `[flaxia-node] vector-embed: model ready loadMs=${Math.round(performance.now() - loadStartedAt)}`,
     );
-    return pipe;
+    return loaded;
   })().catch((err) => {
     embeddingLoadPromise = null;
     console.error(
-      `[flaxia-node] vector-embed: pipeline load FAILED error=${err instanceof Error ? err.message : String(err)}`,
+      `[flaxia-node] vector-embed: model load FAILED error=${err instanceof Error ? err.message : String(err)}`,
     );
     throw err;
   });
@@ -60,6 +117,9 @@ function assertMultimodalPayload(payload: VectorEmbedPayload): {
   videoUrl?: string;
 } {
   const text = typeof payload.text === 'string' ? payload.text : '';
+  if (text.length > MAX_VECTOR_EMBED_TEXT_CHARS) {
+    throw new Error(`vector-embed: text exceeds ${MAX_VECTOR_EMBED_TEXT_CHARS} characters`);
+  }
   const imageUrls = payload.imageUrls ?? [];
   if (!Array.isArray(imageUrls) || imageUrls.length > 29) {
     throw new Error('vector-embed: imageUrls must hold 0..29 URLs');
@@ -96,19 +156,76 @@ export function buildInterleavedText(
   return out;
 }
 
+async function fetchImageForEmbed(url: string): Promise<unknown> {
+  const res = await fetchGuarded({
+    url,
+    allowContentTypes: ['image/*', 'application/octet-stream'],
+    maxBytes: MAX_VECTOR_EMBED_IMAGE_BYTES,
+    timeoutMs: VECTOR_EMBED_FETCH_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(`vector-embed: image fetch failed (${res.status}): ${url}`);
+  const blob = new Blob([res.bytes], { type: res.contentType || 'application/octet-stream' });
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const { loadImage } = (await import('@huggingface/transformers')) as any;
+    return await loadImage(blobUrl);
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+async function fetchAudioForEmbed(url: string): Promise<unknown> {
+  const res = await fetchGuarded({
+    url,
+    allowContentTypes: ['audio/*', 'application/octet-stream'],
+    maxBytes: MAX_VECTOR_EMBED_AUDIO_BYTES,
+    timeoutMs: VECTOR_EMBED_FETCH_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(`vector-embed: audio fetch failed (${res.status}): ${url}`);
+  const blob = new Blob([res.bytes], { type: res.contentType || 'application/octet-stream' });
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const { loadAudio } = (await import('@huggingface/transformers')) as any;
+    return await loadAudio(blobUrl, EMBEDDING_AUDIO_SAMPLE_RATE);
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+async function fetchVideoForEmbed(url: string): Promise<unknown> {
+  const res = await fetchGuarded({
+    url,
+    allowContentTypes: ['video/*', 'application/octet-stream'],
+    maxBytes: MAX_VECTOR_EMBED_VIDEO_BYTES,
+    timeoutMs: VECTOR_EMBED_FETCH_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(`vector-embed: video fetch failed (${res.status}): ${url}`);
+  const blob = new Blob([res.bytes], { type: res.contentType || 'application/octet-stream' });
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const { loadVideo } = (await import('@huggingface/transformers')) as any;
+    return await loadVideo(blobUrl, { fps: 1 });
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
 export async function handleVectorEmbed(payload: VectorEmbedPayload): Promise<VectorEmbedResult> {
   const startTime = performance.now();
-  const pipe = await loadEmbeddingPipeline();
   const { text, imageUrls, audioUrl, videoUrl } = assertMultimodalPayload(payload);
+  const loaded = await loadEmbeddingModel();
 
   const modelStartedAt = performance.now();
-  const multimodal =
-    imageUrls.length > 0 || audioUrl || videoUrl;
+  const multimodal = imageUrls.length > 0 || audioUrl || videoUrl;
 
   if (!multimodal) {
-    // Backward-compatible text-only path.
-    const result = await pipe(text, { pooling: 'mean', normalize: true });
-    const vector = Array.from(result.data) as number[];
+    const processed = await loaded.processor(text);
+    const output = await loaded.model(processed);
+    const embedding = output?.sentence_embedding;
+    if (!embedding || !embedding.data) {
+      throw new Error('vector-embed: model did not return sentence_embedding');
+    }
+    const vector = Array.from(embedding.data) as number[];
     const durationMs = Math.round(performance.now() - startTime);
     console.log(
       `[flaxia-node] vector-embed: done dims=${vector.length} modelMs=${Math.round(performance.now() - modelStartedAt)} totalMs=${durationMs} textLen=${text.length}`,
@@ -116,40 +233,27 @@ export async function handleVectorEmbed(payload: VectorEmbedPayload): Promise<Ve
     return { vector, model: EMBEDDING_MODEL, dimensions: EMBEDDING_DIMENSIONS, durationMs };
   }
 
-  // Fetch media bytes; encode interleaved text + media in one call.
-  const { loadImage } = (await import('@huggingface/transformers')) as any;
-  const input: Record<string, unknown> = {};
+  // Multimodal: fetch media via the egress guard, decode with Transformers.js
+  // loaders, then processor(text, images, audio, video) as documented.
+  const images: unknown[] = [];
+  for (const url of imageUrls) {
+    images.push(await fetchImageForEmbed(url));
+  }
+  const audio = audioUrl ? await fetchAudioForEmbed(audioUrl) : null;
+  const video = videoUrl ? await fetchVideoForEmbed(videoUrl) : null;
+
   const interleaved = buildInterleavedText(
     text || ' ',
-    { images: imageUrls.length, videos: videoUrl ? 1 : 0, audio: audioUrl ? 1 : 0 },
+    { images: images.length, videos: video ? 1 : 0, audio: audio ? 1 : 0 },
   );
-  input.text = interleaved;
-
-  if (imageUrls.length > 0) {
-    const images: unknown[] = [];
-    for (const url of imageUrls) {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`vector-embed: image fetch failed (${res.status}): ${url}`);
-      images.push(await loadImage(URL.createObjectURL(await res.blob())));
-    }
-    input.image = images.length === 1 ? images[0] : images;
+  const imageInput = images.length === 0 ? null : images.length === 1 ? images[0] : images;
+  const processed = await loaded.processor(interleaved, imageInput, audio, video);
+  const output = await loaded.model(processed);
+  const embedding = output?.sentence_embedding;
+  if (!embedding || !embedding.data) {
+    throw new Error('vector-embed: model did not return sentence_embedding');
   }
-  if (audioUrl) {
-    const res = await fetch(audioUrl);
-    if (!res.ok) throw new Error(`vector-embed: audio fetch failed (${res.status}): ${audioUrl}`);
-    const arrayBuffer = await res.arrayBuffer();
-    input.audio = new Int16Array(arrayBuffer.slice(0));
-  }
-  if (videoUrl) {
-    const res = await fetch(videoUrl);
-    if (!res.ok) throw new Error(`vector-embed: video fetch failed (${res.status}): ${videoUrl}`);
-    // Video bytes are consumed as sampled frames by the processor (1fps);
-    // pass the blob URL so transformers.js can decode frames.
-    input.video = URL.createObjectURL(await res.blob());
-  }
-
-  const result = await pipe(input, { pooling: 'mean', normalize: true });
-  const vector = Array.from(result.data) as number[];
+  const vector = Array.from(embedding.data) as number[];
   const durationMs = Math.round(performance.now() - startTime);
   console.log(
     `[flaxia-node] vector-embed: done dims=${vector.length} modelMs=${Math.round(performance.now() - modelStartedAt)} totalMs=${durationMs} textLen=${text.length} images=${imageUrls.length} audio=${audioUrl ? 1 : 0} video=${videoUrl ? 1 : 0}`,
