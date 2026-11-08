@@ -472,4 +472,51 @@ describe('AI Inference Light Inference (ondeviceOnly)', () => {
     expect(isAiModelPreloaded(TEST_MODEL)).toBe(true); // TEST_MODEL served above
     expect(isAiModelPreloaded('test/ondevice-never-loaded')).toBe(false);
   });
+
+  it('rejects ondeviceOnly when only a different dtype/backend is preloaded', async () => {
+    registerAiModels({
+      'test/ondevice-tuple': { repo: 'test/ondevice-tuple', revision: 'r', maxBytes: 1024 * 1024 },
+    });
+    // Preload the default q4f16/wasm pipeline.
+    await handleAiInference({ task: 'translation', model: 'test/ondevice-tuple', input: 'warm', options: {} });
+    expect(mockPipeline).toHaveBeenCalledTimes(1);
+    mockPipeline.mockClear();
+    // Same repo, different dtype: the caller forbade downloads, so this must
+    // fail with ONDEVICE_UNAVAILABLE instead of downloading int8 weights.
+    let caught: unknown;
+    try {
+      await handleAiInference({
+        task: 'translation',
+        model: 'test/ondevice-tuple',
+        input: 'hello',
+        options: { dtype: 'int8', ondeviceOnly: true },
+      } as any);
+    } catch (e) {
+      caught = e;
+    }
+    const err = caught as { code?: string; status?: number };
+    expect(err?.code).toBe('ONDEVICE_UNAVAILABLE');
+    expect(err?.status).toBe(500);
+    expect(mockPipeline).not.toHaveBeenCalled();
+    // Same repo, different backend.
+    mockPipeline.mockClear();
+    await expect(
+      handleAiInference({
+        task: 'translation',
+        model: 'test/ondevice-tuple',
+        input: 'hello',
+        options: { device: 'webgpu', ondeviceOnly: true },
+      } as any),
+    ).rejects.toMatchObject({ code: 'ONDEVICE_UNAVAILABLE' });
+    expect(mockPipeline).not.toHaveBeenCalled();
+    // The exact preloaded identity still serves locally.
+    const result = await handleAiInference({
+      task: 'translation',
+      model: 'test/ondevice-tuple',
+      input: 'hello',
+      options: { ondeviceOnly: true },
+    } as any);
+    expect(result.output).toBeDefined();
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
 });

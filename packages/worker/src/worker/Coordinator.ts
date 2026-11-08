@@ -1688,13 +1688,23 @@ export class Coordinator extends DurableObject<Env> {
           cpuMetric.expiresAt > now && cpuMetric.value !== null
           ? cpuMetric.value
           : now - node.lastPongAt <= STALE_NODE_MS ? loadBucket(node.cpuLoad) : null;
-        const payload = task.payload as { model?: unknown } | null;
+        const payload = task.payload as { model?: unknown; options?: { dtype?: unknown; device?: unknown } } | null;
         const model = typeof payload?.model === "string" ? payload.model : "";
+        const wantDtype = typeof payload?.options?.dtype === "string" ? payload.options.dtype : undefined;
+        const wantBackend = typeof payload?.options?.device === "string" ? payload.options.device : undefined;
         candidates.push({
           nodeId,
           warmModel: !!model && (
             !!node.warmModels?.some((entry) => entry.modelId === model) ||
-            !!(node.modelCache && node.modelCache.expiresAt > now && node.modelCache.entries.some((entry) => entry.modelId === model && entry.state === "ready"))
+            !!(node.modelCache && node.modelCache.expiresAt > now && node.modelCache.entries.some((entry) => {
+              if (entry.modelId !== model || entry.state !== "ready") return false;
+              // A different quantization/backend is a different download: only
+              // count it as warm when the task's dtype/device matches (or the
+              // task does not pin one, matching the node's q4f16/wasm default).
+              if (wantDtype !== undefined && entry.dtype !== wantDtype) return false;
+              if (wantBackend !== undefined && entry.backend !== wantBackend) return false;
+              return true;
+            }))
           ),
           gpuCompletionMs,
           capacityBytes: clampByteCapacity(node.wasmMemoryBytes) ??

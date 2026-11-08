@@ -788,11 +788,19 @@ class SignalingClient {
   }
 
   /** Route a preload through the worker's `preloadAiModel` snapshot check. */
-  isAiModelPreloaded(model: string): boolean {
+  isAiModelPreloaded(model: string | { model: string; dtype?: string; device?: string }): boolean {
     // Cheap signal via the heartbeat snapshot: a ready entry counts.
     const snapshot = this.workerPool.modelCacheSnapshot;
     if (!snapshot) return false;
-    return snapshot.entries.some((e) => e.modelId === model && e.state === 'ready');
+    if (typeof model === 'string') {
+      return snapshot.entries.some((e) => e.modelId === model && e.state === 'ready');
+    }
+    const wantDtype = model.dtype ?? 'q4f16';
+    const wantBackend = (model.device ?? 'wasm') as 'wasm' | 'cpu' | 'webgpu';
+    return snapshot.entries.some(
+      (e) =>
+        e.modelId === model.model && e.dtype === wantDtype && e.backend === wantBackend && e.state === 'ready',
+    );
   }
 
   /** Warm a model in the worker (Light Inference idle preload). */
@@ -827,7 +835,7 @@ class SignalingClient {
         ],
         onPreloaded: () => { /* status chip refresh hook for host diagnostics */ },
       },
-      (model) => this.isAiModelPreloaded(model),
+      (target) => this.isAiModelPreloaded({ model: target.model, dtype: target.dtype }),
       (request) => this.preloadAiModel(request),
     );
     this.lightPreloader.start();
