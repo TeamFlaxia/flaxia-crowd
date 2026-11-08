@@ -156,11 +156,14 @@ async function runWorkload(
   hostConfig?: { fileSourceOrigins?: string[]; containerImageOrigins?: string[] },
 ): Promise<unknown> {
   switch (workload) {
-    case 'ai-inference':
+    case 'ai-inference': {
       const ai = await import('../workloads/ai-inference');
       cacheReleasers.set(workload, ai.releaseCache);
       cacheSnapshotters.set(workload, ai.getModelCacheSnapshot);
+      const decision = await import('../workloads/decision');
+      cacheReleasers.set('decision', decision.releaseCache);
       return await ai.handleAiInference(payload as any, emitToken);
+    }
     case 'image-process':
       const image = await import('../workloads/image-process');
       return await image.handleImageProcess(payload as any);

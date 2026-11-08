@@ -47,23 +47,91 @@ export interface AiInferenceOptions {
   tgt_lang?: string;
 }
 
+export type DecisionQuestionType = 'noul' | 'choice' | 'score';
+
+export interface DecisionQuestion {
+  type: DecisionQuestionType;
+  /** Instruction text (Japanese allowed). */
+  instructions: string;
+  /**
+   * `choice`: named options -> description.
+   * `noul`: optional { true: ..., false: ... }.
+   * `score`: ordered level descriptions (2..10 entries).
+   */
+  criteria?: Record<string, string> | string[];
+}
+
+export type DecisionQuestions = Record<string, DecisionQuestion>;
+
+export interface DecisionAnswer {
+  /** `noul`: P(yes) in [0,1]. */
+  noul?: number;
+  /** `choice`: winning option name. */
+  choice?: string;
+  /** `choice`/`score`: confidence in [0,1]. */
+  confidence?: number;
+  /** `score`: expected level. */
+  score?: number;
+  /**
+   * `choice`: full probability distribution keyed by option name.
+   * Hosts use this to compute Top-K (e.g. Top3 + none) instead of relying on
+   * top-1 only.
+   */
+  probabilities?: Record<string, number>;
+  /** `score`: per-level probabilities in criteria order. */
+  levelProbabilities?: number[];
+  /** `score`: echoed level descriptions. */
+  legend?: string[];
+}
+
 export interface AiInferencePayload {
   /**
-   * Transformer.js pipeline task name (e.g. 'text-classification')
+   * Transformer.js pipeline task name (e.g. 'text-classification').
+   * For d1 decision models use 'decision' with `decision` set (see below);
+   * the generic pipeline path is skipped for those models.
    */
   task: string;
   /**
    * HuggingFace model name (e.g. 'Xenova/distilbert-base-uncased-finetuned-sst-2-english')
    */
   model: string;
-  /** Text input (single or array) */
-  input: string | string[];
+  /** Text input (single or array). Ignored when `decision` is set. */
+  input?: string | string[];
   /** pipeline() and generation options */
   options?: AiInferenceOptions;
+  /**
+   * Decision-model mode (d1-omni-600M). When set, the node runs
+   * `system_one(state, questions, images?, audio?)` and returns calibrated
+   * probabilities instead of generated text.
+   *
+   * Multimodal input goes through publicly fetchable URLs (same contract as
+   * NSFW `imageUrl`): the node fetches bytes itself, so no signed ticket or
+   * base64 blob needs to cross the orchestrator.
+   * - `images`: text + image(s) in a single forward pass (tiled).
+   * - `audioUrl`: text + one 16kHz mono clip (<=30s) in a single forward pass.
+   * - Images and audio together are rejected (model limit): split into two
+   *   tasks and merge the results host-side.
+   */
+  decision?: {
+    /** State text (or JSON stringified). `null` when media is the whole state. */
+    state?: string | null;
+    questions: DecisionQuestions;
+    imageUrls?: string[];
+    audioUrl?: string;
+  };
 }
 
 export interface AiInferenceResult {
   output: unknown;
+  /**
+   * Decision-mode answers keyed by question name (d1-omni). Each answer
+   * carries the full option distribution in `probabilities` so hosts can
+   * compute Top-K without a second round-trip.
+   */
+  answers?: Record<string, DecisionAnswer>;
+  /** Decision-mode input token count (output_tokens is always 0). */
+  inputTokens?: number;
+  durationMs?: number;
 }
 
 // --- MoE Inference ---
@@ -302,10 +370,23 @@ export interface ContainerResult {
 // --- Vector Embedding ---
 
 export interface VectorEmbedPayload {
-  text: string;
+  /** Text portion of the input (may be empty when media alone is the state). */
+  text?: string;
   model?: string;
   chunkIndex?: number;
   docId?: string;
+  /**
+   * Multimodal inputs as publicly fetchable URLs (same contract as NSFW
+   * `imageUrl`): the node fetches bytes itself.
+   * - `imageUrls`: image(s) interleaved with text via placeholders.
+   * - `audioUrl`: mono 16kHz clip (<=327s, model context limit).
+   * - `videoUrl`: sampled frames at 1fps (140 tokens/frame).
+   * All modalities share one 8192-token context; omit to embed text only
+   * (backward compatible payload).
+   */
+  imageUrls?: string[];
+  audioUrl?: string;
+  videoUrl?: string;
 }
 
 export interface VectorEmbedResult {

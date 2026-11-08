@@ -172,6 +172,14 @@ export const handleAiInference = async (
 ): Promise<AiInferenceResult> => {
   const { task, model, input, options = {} } = payload;
 
+  // d1 decision models (`trust_remote_code` AutoModel) bypass the generic
+  // pipeline path entirely: they emit calibrated probabilities via
+  // `system_one`, not generated text.
+  if (payload.decision) {
+    const { handleDecision } = await import('./decision');
+    return await handleDecision(payload);
+  }
+
   if (!SUPPORTED_TASKS.includes(task as any)) {
     throw new Error(`Invalid or unsupported task: ${task}. Supported tasks are: ${SUPPORTED_TASKS.join(', ')}`);
   }

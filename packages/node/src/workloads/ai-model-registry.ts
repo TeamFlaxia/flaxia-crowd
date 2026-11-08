@@ -45,6 +45,22 @@ const DEFAULT_AI_MODELS: Record<string, AiModelDefinition> = {
     revision: 'main',
     maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
   },
+  // Decision model (LFM2.5-Encoder-350M based, 587M params). Runs via the
+  // custom `decision` driver in workloads/decision.ts (trust_remote_code),
+  // not the generic transformers.js pipeline path. Weights are ~2.4GB in
+  // fp32, so the per-file cap is raised to 3GiB (hard ceiling 4GiB).
+  'LiquidAI/d1-omni-600M': {
+    repo: 'LiquidAI/d1-omni-600M',
+    revision: 'main',
+    maxBytes: 3 * 1024 ** 3,
+  },
+  // Multimodal embedding (740M params, 768 dims, Apache-2.0). ONNX variant
+  // loaded by workloads/vector-embed.ts.
+  'google/embeddinggemma-2': {
+    repo: 'google/embeddinggemma-2',
+    revision: 'main',
+    maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
+  },
 };
 
 const registry = new Map<string, AiModelDefinition>(
