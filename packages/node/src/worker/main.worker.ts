@@ -158,11 +158,14 @@ async function runWorkload(
   yieldToThrottle?: () => void | Promise<void>,
 ): Promise<unknown> {
   switch (workload) {
-    case 'ai-inference':
+    case 'ai-inference': {
       const ai = await import('../workloads/ai-inference');
       cacheReleasers.set(workload, ai.releaseCache);
       cacheSnapshotters.set(workload, ai.getModelCacheSnapshot);
+      const decision = await import('../workloads/decision');
+      cacheReleasers.set('decision', decision.releaseCache);
       return await ai.handleAiInference(payload as any, emitToken);
+    }
     case 'ai-preload' as WorkloadType: {
       const preload = await import('../workloads/ai-inference');
       cacheReleasers.set('ai-inference', preload.releaseCache);

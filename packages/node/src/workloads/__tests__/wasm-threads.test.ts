@@ -11,6 +11,17 @@ const { transformersEnv, ortEnv } = vi.hoisted(() => ({
 vi.mock('@huggingface/transformers', () => ({
   env: transformersEnv,
   pipeline: vi.fn().mockResolvedValue(vi.fn().mockResolvedValue({ data: new Float32Array(1024) })),
+  AutoModel: {
+    from_pretrained: vi.fn().mockResolvedValue(
+      vi.fn().mockResolvedValue({ sentence_embedding: { data: new Float32Array(768) } }),
+    ),
+  },
+  AutoProcessor: {
+    from_pretrained: vi.fn().mockResolvedValue(async () => ({})),
+  },
+  loadImage: vi.fn(),
+  loadAudio: vi.fn(),
+  loadVideo: vi.fn(),
   TextStreamer: class {},
 }));
 
