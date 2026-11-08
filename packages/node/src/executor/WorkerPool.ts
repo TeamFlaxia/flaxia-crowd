@@ -74,7 +74,7 @@ export class WorkerPool {
     payload: unknown,
     timeoutMs?: number,
     onToken?: (token: string) => void,
-    config?: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[] },
+    config?: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[] },
     swarm?: SwarmCallbacks,
   ): Promise<unknown> {
     return new Promise((resolve, reject) => {
@@ -98,7 +98,7 @@ export class WorkerPool {
     payload: unknown,
     timeoutMs: number | undefined,
     onToken: ((token: string) => void) | undefined,
-    config: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[] } | undefined,
+    config: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[] } | undefined,
     resolve: (value: unknown) => void,
     reject: (error: Error) => void,
     swarm?: SwarmCallbacks,

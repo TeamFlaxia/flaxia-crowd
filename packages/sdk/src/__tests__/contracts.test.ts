@@ -9,6 +9,8 @@ import {
   isHeavyWorkload,
   defaultTimeoutFor,
 } from '../workloads';
+import { ccWarcPathMatchesCrawl, isValidCcWarcPath } from '../cc-extract';
+import { isEmbedGemmaDimensions } from '../embed-gemma';
 import {
   parseCrowdWebhook,
   extractCallbackOutput,
@@ -25,6 +27,8 @@ describe('workloads', () => {
     expect(WORKLOAD_TYPES).toContain('vector-embed');
     expect(WORKLOAD_TYPES).toContain('moe-inference');
     expect(WORKLOAD_TYPES).toContain('swarm-inference');
+    expect(WORKLOAD_TYPES).toContain('cc-extract');
+    expect(WORKLOAD_TYPES).toContain('embed-gemma');
     expect(new Set(WORKLOAD_TYPES).size).toBe(WORKLOAD_TYPES.length);
   });
 
@@ -42,12 +46,16 @@ describe('workloads', () => {
     expect(isRoutableWorkload('nudenet')).toBe(true);
     expect(isRoutableWorkload('moe-inference')).toBe(false);
     expect(isRoutableWorkload('swarm-inference')).toBe(true);
+    expect(isRoutableWorkload('cc-extract')).toBe(true);
+    expect(isRoutableWorkload('embed-gemma')).toBe(true);
   });
 
   it('classifies heavy workloads', () => {
     expect(isHeavyWorkload('nudenet')).toBe(true);
     expect(isHeavyWorkload('swarm-inference')).toBe(true);
     expect(isHeavyWorkload('vector-store')).toBe(false);
+    expect(isHeavyWorkload('cc-extract')).toBe(false);
+    expect(isHeavyWorkload('embed-gemma')).toBe(true);
     expect(HEAVY_WORKLOADS.has('moe-inference')).toBe(false);
   });
 
@@ -56,6 +64,48 @@ describe('workloads', () => {
       expect(defaultTimeoutFor(workload)).toBe(DEFAULT_WORKLOAD_TIMEOUT_MS[workload]);
       expect(defaultTimeoutFor(workload)).toBeGreaterThan(0);
     }
+    expect(defaultTimeoutFor('cc-extract')).toBe(60_000);
+    expect(defaultTimeoutFor('embed-gemma')).toBe(120_000);
+  });
+
+  it('accepts only supported Matryoshka dimensions', () => {
+    expect(isEmbedGemmaDimensions(768)).toBe(true);
+    expect(isEmbedGemmaDimensions(512)).toBe(true);
+    expect(isEmbedGemmaDimensions(256)).toBe(true);
+    expect(isEmbedGemmaDimensions(128)).toBe(true);
+    expect(isEmbedGemmaDimensions(384)).toBe(false);
+    expect(isEmbedGemmaDimensions('512')).toBe(false);
+  });
+
+  it('accepts only Common Crawl WARC object paths', () => {
+    expect(
+      isValidCcWarcPath(
+        'crawl-data/CC-MAIN-2026-43/segments/1700000000000.0/warc/CC-MAIN-20260101000000-20260101010000-00000.warc.gz',
+      ),
+    ).toBe(true);
+    expect(isValidCcWarcPath('CC-MAIN-2026-43.warc.gz')).toBe(false);
+    expect(isValidCcWarcPath('crawl-data/../etc/passwd')).toBe(false);
+    expect(isValidCcWarcPath('https://data.commoncrawl.org/x.warc.gz')).toBe(false);
+    // Dot segments must be rejected: a *host* may join this value into a
+    // signed proxy URL, where `..` would escape the intended directory.
+    expect(
+      isValidCcWarcPath('crawl-data/CC-MAIN-2026-43/segments/../warc/x.warc.gz'),
+    ).toBe(false);
+    expect(
+      isValidCcWarcPath('crawl-data/CC-MAIN-2026-43/segments/./warc/x.warc.gz'),
+    ).toBe(false);
+    expect(
+      isValidCcWarcPath('crawl-data/CC-MAIN-2026-43/segments/..%2f/warc/x.warc.gz'),
+    ).toBe(false);
+  });
+
+  it('matches a WARC path to its crawl id', () => {
+    const path =
+      'crawl-data/CC-MAIN-2026-43/segments/1700000000000.0/warc/CC-MAIN-20260101000000-20260101010000-00000.warc.gz';
+    expect(ccWarcPathMatchesCrawl(path, 'CC-MAIN-2026-43')).toBe(true);
+    expect(ccWarcPathMatchesCrawl(path, 'CC-MAIN-2026-39')).toBe(false);
+    expect(ccWarcPathMatchesCrawl(path, 'not-a-crawl')).toBe(false);
+    expect(ccWarcPathMatchesCrawl(42, 'CC-MAIN-2026-43')).toBe(false);
   });
 
   it('gives swarm inference room for a cold model download', () => {

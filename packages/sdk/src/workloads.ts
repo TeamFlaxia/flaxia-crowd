@@ -16,6 +16,8 @@ export const WORKLOAD_TYPES = [
   'moe-inference',
   'nudenet',
   'swarm-inference',
+  'cc-extract',
+  'embed-gemma',
 ] as const satisfies readonly WorkloadType[];
 
 /**
@@ -34,6 +36,8 @@ export const ROUTABLE_WORKLOADS = [
   'vector-query',
   'nudenet',
   'swarm-inference',
+  'cc-extract',
+  'embed-gemma',
 ] as const satisfies readonly WorkloadType[];
 
 /**
@@ -50,6 +54,7 @@ export const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set<WorkloadType>(
   'vector-query',
   'nudenet',
   'swarm-inference',
+  'embed-gemma',
 ]);
 
 /** Default per-workload task timeout in milliseconds. */
@@ -66,6 +71,11 @@ export const DEFAULT_WORKLOAD_TIMEOUT_MS: Readonly<Record<WorkloadType, number>>
   // Swarm jobs include a cold-download/load phase before generation, so they
   // need far more headroom than single-node inference.
   'swarm-inference': 1_800_000,
+  // A handful of WARC range fetches plus HTML parsing. The node uses a tighter
+  // per-record timeout internally.
+  'cc-extract': 60_000,
+  // EmbeddingGemma 2 text-only: model load plus a bounded batch.
+  'embed-gemma': 120_000,
 };
 
 /** Narrowing guard for untrusted input (HTTP bodies, postMessage, storage). */

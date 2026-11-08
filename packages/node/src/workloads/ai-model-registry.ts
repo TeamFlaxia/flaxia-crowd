@@ -45,6 +45,13 @@ const DEFAULT_AI_MODELS: Record<string, AiModelDefinition> = {
     revision: 'main',
     maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
   },
+  'onnx-community/embeddinggemma-2-ONNX': {
+    repo: 'onnx-community/embeddinggemma-2-ONNX',
+    revision: 'main',
+    // The fp16 text-only encoder is substantially larger than the 512 MiB
+    // default; the vision/audio encoders are disabled for this workload.
+    maxBytes: 1024 * 1024 * 1024,
+  },
   // Light Inference translate model (M2M100, ONNX). Registered under its
   // canonical repo id so `resolveAiModel()` stays fail-closed; hosts may
   // alias it (e.g. 'm2m100-translate') via `registerAiModels` at startup.

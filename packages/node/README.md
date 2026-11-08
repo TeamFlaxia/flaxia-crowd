@@ -170,6 +170,8 @@ initFlaxiaNode({ /* ... */ })
 | `image-process` | `workloads/image-process.ts` | OffscreenCanvas API |
 | `container` | `workloads/container.ts` | container2wasm + WASI |
 | `nudenet` | `workloads/nudenet.ts` | NSFW（成人向け）画像判定 |
+| `cc-extract` | `workloads/cc-extract.ts` | Common Crawl WARC の range 取得 + parse5 本文抽出 |
+| `embed-gemma` | `workloads/embed-gemma.ts` | EmbeddingGemma 2（text-only, MRL） |
 
 ## フロー
 
