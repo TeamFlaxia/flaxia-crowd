@@ -11,7 +11,7 @@ import {
   safeRandomUUID,
 } from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
-import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes } from '../executor/memoryProbe';
+import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes, hasEnoughWasmMemoryForHeavy } from '../executor/memoryProbe';
 import { collectNodeResourceReport } from '../executor/resourceReporter';
 import { assertPublicUrl } from '../executor/egress-guard';
 import { isCurrentSwarmPeerSignal, SwarmPeerTransport } from '../swarm/peer-transport';
@@ -845,6 +845,9 @@ class SignalingClient {
           },
         ],
         onPreloaded: () => { /* status chip refresh hook for host diagnostics */ },
+        // Never warm models on a memory-constrained device: two translate
+        // models commit ~1 GiB of wasm memory the page cannot reclaim.
+        hasMemoryHeadroom: () => hasEnoughWasmMemoryForHeavy(),
       },
       (target) => this.isAiModelPreloaded({ model: target.model, dtype: target.dtype }),
       (request) => this.preloadAiModel(request),
