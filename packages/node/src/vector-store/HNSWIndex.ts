@@ -30,11 +30,14 @@ export interface NodeExport {
  * - `MAX_HNSW_NODES` bounds how many vectors a volunteer node persists (the
  *   IndexedDB graph is writable by any same-origin script, so a corrupted or
  *   hostile dump must not be able to grow the in-memory graph without limit).
+ *   It is also a memory bound: at 1024 dimensions a `Float32Array` vector is
+ *   4 KiB, so 100 k nodes meant ~400 MB of vectors plus adjacency — enough to
+ *   OOM a 4 GB phone. 20 k nodes keeps the vector store near ~80 MB.
  * - `MAX_HNSW_LEVEL` matches `randomLevel()`; an imported level above it would
  *   otherwise be used to index `neighbors` maps that were never created.
  * - `MAX_HNSW_NEIGHBORS_PER_LEVEL` bounds adjacency lists read back from disk.
  */
-export const MAX_HNSW_NODES = 100_000;
+export const MAX_HNSW_NODES = 20_000;
 export const MAX_HNSW_LEVEL = 16;
 export const MAX_HNSW_NEIGHBORS_PER_LEVEL = 1024;
 
@@ -117,7 +120,10 @@ export class HNSWIndex {
           neighbors.push(s.nodeId);
         }
       }
-      currNode.neighbors.set(l, neighbors);
+      // Trim the entry-point node too: without this its adjacency grows
+      // without bound across many inserts (only the selected neighbour's list
+      // was trimmed below).
+      currNode.neighbors.set(l, neighbors.slice(-this.M));
 
       for (const s of selected) {
         const sNode = this.nodes.get(s.nodeId);
@@ -180,9 +186,11 @@ export class HNSWIndex {
   ): Candidate[] {
     const visited = new Set<number>([entry.id]);
     const candidates: Candidate[] = [{ nodeId: entry.id, distance: this.distance(query, entry.vector) }];
-    const result: Candidate[] = [...candidates];
-    const distMap = new Map<number, number>();
-    distMap.set(entry.id, candidates[0].distance);
+    const result: Candidate[] = [candidates[0]];
+    // Track the farthest result incrementally. Recomputing `Math.max(...)` over
+    // the result on every candidate expansion made search O(ef) per expansion,
+    // which pinned the worker for large queries.
+    let farthestDist = candidates[0].distance;
 
     while (candidates.length > 0) {
       let nearestIdx = 0;
@@ -192,10 +200,6 @@ export class HNSWIndex {
         }
       }
       const nearest = candidates[nearestIdx];
-
-      const farthestDist = result.length > 0
-        ? Math.max(...result.map(r => r.distance))
-        : Infinity;
 
       if (nearest.distance > farthestDist && result.length >= ef) break;
 
@@ -210,19 +214,23 @@ export class HNSWIndex {
         const nNode = this.nodes.get(nId);
         if (!nNode) continue;
         const d = this.distance(query, nNode.vector);
-        distMap.set(nId, d);
 
-        const farthestInResult = result.length > 0
-          ? Math.max(...result.map(r => r.distance))
-          : Infinity;
-
-        if (result.length < ef || d < farthestInResult) {
-          candidates.push({ nodeId: nId, distance: d });
-          result.push({ nodeId: nId, distance: d });
+        if (result.length < ef || d < farthestDist) {
+          const candidate = { nodeId: nId, distance: d };
+          candidates.push(candidate);
+          result.push(candidate);
+          if (d > farthestDist) farthestDist = d;
 
           if (result.length > ef) {
-            result.sort((a, b) => b.distance - a.distance);
-            result.pop();
+            // Drop the farthest result; recompute the new maximum only then.
+            let farthestIdx = 0;
+            for (let i = 1; i < result.length; i++) {
+              if (result[i].distance > result[farthestIdx].distance) farthestIdx = i;
+            }
+            result.splice(farthestIdx, 1);
+            farthestDist = result.length > 0
+              ? result.reduce((max, r) => (r.distance > max ? r.distance : max), -Infinity)
+              : Infinity;
           }
         }
       }

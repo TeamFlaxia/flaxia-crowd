@@ -51,6 +51,7 @@ export const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set<WorkloadType>(
   'image-process',
   'container',
   'vector-embed',
+  'vector-store',
   'vector-query',
   'nudenet',
   'swarm-inference',

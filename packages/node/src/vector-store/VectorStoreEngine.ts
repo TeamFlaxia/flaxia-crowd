@@ -102,6 +102,17 @@ function putRecord(db: IDBDatabase, storeName: string, value: unknown): Promise<
   });
 }
 
+/** Write many records in a single transaction (one snapshot = one commit). */
+function putRecords(db: IDBDatabase, storeName: string, values: unknown[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    for (const value of values) store.put(value);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 function getAllRecords<T>(db: IDBDatabase, storeName: string): Promise<T[]> {
   return new Promise((resolve, reject) => {
     const req = getStore(db, storeName).getAll();
@@ -284,13 +295,19 @@ export class VectorStoreEngine {
 
     const vectors = new Map<number, Float32Array>();
     const nodeExports: NodeExport[] = [];
+    // Load every vector in one query instead of one getRecord per node: at the
+    // 20 k-node quota that was 20 k sequential IndexedDB reads on startup.
+    const vectorRecords = await getAllRecords<VectorRecord>(this.db!, 'vectors');
+    const nodeIdByDocId = new Map<string, number>();
+    for (const rec of records) nodeIdByDocId.set(rec.docId, rec.nodeId);
+    for (const vecRecord of vectorRecords) {
+      const nodeId = nodeIdByDocId.get(vecRecord.docId);
+      if (nodeId === undefined) continue;
+      vectors.set(nodeId, vecRecord.vector instanceof Float32Array
+        ? vecRecord.vector
+        : new Float32Array(vecRecord.vector));
+    }
     for (const rec of records) {
-      const vecRecord = await getRecord<VectorRecord>(this.db!, 'vectors', rec.docId);
-      if (vecRecord && vecRecord.vector) {
-        vectors.set(rec.nodeId, vecRecord.vector instanceof Float32Array
-          ? vecRecord.vector
-          : new Float32Array(vecRecord.vector));
-      }
       nodeExports.push({
         id: rec.nodeId,
         docId: rec.docId,
@@ -304,13 +321,16 @@ export class VectorStoreEngine {
 
   private async saveGraphSnapshot(): Promise<void> {
     const nodes = this.hnsw!.exportNodes();
+    const records: HNSWGraphRecord[] = [];
     for (const [nodeId, data] of nodes) {
-      await putRecord(this.db!, 'hnsw-graph', {
+      records.push({
         nodeId,
         docId: data.docId,
         level: data.level,
         neighbors: data.neighbors,
       });
     }
+    // One transaction for the whole snapshot instead of one commit per node.
+    await putRecords(this.db!, 'hnsw-graph', records);
   }
 }
