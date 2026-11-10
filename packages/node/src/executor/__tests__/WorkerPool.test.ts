@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WorkerPool } from '../WorkerPool';
+import { MAX_TASK_RESULT_BYTES } from '../resultLimits';
 
 describe('WorkerPool', () => {
   let pool: WorkerPool;
@@ -249,5 +250,58 @@ describe('WorkerPool', () => {
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: '2', workload: 'image-process' }));
 
     void queued.catch(() => {});
+  });
+
+  it('rejects a duplicate task id while it is already in flight', async () => {
+    class MockWorker {
+      postMessage = vi.fn();
+      terminate = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+
+    pool = new WorkerPool(undefined, 5000);
+    void pool.run('1', 'ai-inference', {}).catch(() => {});
+
+    await expect(pool.run('1', 'ai-inference', {})).rejects.toThrow(/already has task 1/);
+  });
+
+  it('rejects new tasks once the queue is full', async () => {
+    class MockWorker {
+      postMessage = vi.fn();
+      terminate = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+
+    pool = new WorkerPool(undefined, 5000);
+    void pool.run('1', 'ai-inference', {}).catch(() => {});
+    for (let id = 2; id <= 17; id++) {
+      void pool.run(String(id), 'ai-inference', {}).catch(() => {});
+    }
+
+    await expect(pool.run('18', 'ai-inference', {})).rejects.toThrow(/queue is full/);
+  });
+
+  it('rejects an oversized result on the main thread instead of resolving it', async () => {
+    let handler: Function;
+    class MockWorker {
+      postMessage = vi.fn(() => {
+        setTimeout(() => {
+          handler({ data: { id: '1', type: 'done', result: { imageBase64: 'x'.repeat(MAX_TASK_RESULT_BYTES) } } });
+        }, 0);
+      });
+      terminate = vi.fn();
+      addEventListener = vi.fn((_event: string, h: Function) => {
+        handler = h;
+      });
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+
+    pool = new WorkerPool();
+    await expect(pool.run('1', 'image-process', {}, 100)).rejects.toThrow(/exceeds the .* byte limit/);
   });
 });

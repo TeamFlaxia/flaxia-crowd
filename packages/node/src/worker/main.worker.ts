@@ -1,6 +1,7 @@
 import type { WorkloadType, SwarmInitMessage, SwarmSliceMessage, NodeModelCacheSnapshot } from '@flaxia/sdk';
 import { HEAVY_WORKLOADS } from '@flaxia/sdk';
 import { CpuThrottle, DEFAULT_WAIT_SLOT_MS, ThrottleBusyError } from '../executor/throttle';
+import { MAX_TASK_RESULT_BYTES, isResultWithinLimit } from '../executor/resultLimits';
 import {
   HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
   hasEnoughWasmMemoryForHeavy,
@@ -351,6 +352,11 @@ self.onmessage = async (e: MessageEvent) => {
             },
           );
 
+      if (!isResultWithinLimit(result)) {
+        throw new Error(
+          `${workload}: result exceeds the ${MAX_TASK_RESULT_BYTES} byte limit; refused before posting to the main thread`,
+        );
+      }
       self.postMessage({ id, type: 'done', result, modelCache: getModelCacheSnapshot() });
       console.log(
         `[flaxia-node:worker] task done id=${id} workload=${workload} durationMs=${Math.round(performance.now() - taskStartedAt)}`,
