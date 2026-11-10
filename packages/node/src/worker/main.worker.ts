@@ -108,7 +108,7 @@ function createTokenSink(id: string): (token: string) => Promise<void> {
 // workloads (cc-extract, file-convert, vector-store, ...) remain available on
 // constrained devices.
 const WASM_MEMORY_BYTES = probeMaxWasmMemoryBytes();
-const CAPABLE = WASM_MEMORY_BYTES >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
+const CAPABLE = hasEnoughWasmMemoryForHeavy();
 console.log(
   `[flaxia-node:worker] startup memory probe wasmMemoryBytes=${WASM_MEMORY_BYTES} capable=${CAPABLE}`,
 );
