@@ -44,8 +44,15 @@ let decisionModel: any = null;
 let decisionLoadPromise: Promise<any> | null = null;
 
 export const releaseCache = (): void => {
+  const current = decisionModel;
   decisionModel = null;
   decisionLoadPromise = null;
+  if (!current) return;
+  // Dispose the wasm model explicitly; dropping the reference only leaves the
+  // buffers to GC and keeps the wasm heap pinned until then.
+  void (async () => {
+    try { current.dispose?.(); } catch {}
+  })();
 };
 
 function assertDecisionPayload(payload: {
