@@ -158,27 +158,25 @@ async function loadImage(payload: NudeNetPayload): Promise<ImageBitmap> {
 function preprocess(bitmap: ImageBitmap): { tensor: ort.Tensor; ratio: number } {
   const { width, height } = bitmap;
   const maxSize = Math.max(width, height);
+  const scale = IMG_SIZE / maxSize;
+  const drawWidth = Math.max(1, Math.round(width * scale));
+  const drawHeight = Math.max(1, Math.round(height * scale));
 
-  const whiteBg = new OffscreenCanvas(width, height);
-  const whiteCtx = whiteBg.getContext('2d');
-  if (!whiteCtx) throw new Error('Failed to get OffscreenCanvas 2D context');
-  whiteCtx.fillStyle = '#ffffff';
-  whiteCtx.fillRect(0, 0, width, height);
-  whiteCtx.drawImage(bitmap, 0, 0);
-
-  const padded = new OffscreenCanvas(maxSize, maxSize);
-  const padCtx = padded.getContext('2d');
-  if (!padCtx) throw new Error('Failed to get OffscreenCanvas 2D context');
-  padCtx.fillStyle = '#000000';
-  padCtx.fillRect(0, 0, maxSize, maxSize);
-  padCtx.drawImage(whiteBg, 0, 0);
-
+  // Draw straight into the 320x320 destination. The reference preprocessing
+  // flattens transparency over white, pads to a square with black, then
+  // resizes; materializing the white and padded canvases allocates up to
+  // ~384 MB for an 8192x4096 input. Compositing in the destination keeps the
+  // peak at one 320x320 canvas plus the decoded bitmap.
   const resized = new OffscreenCanvas(IMG_SIZE, IMG_SIZE);
   const resizedCtx = resized.getContext('2d', { willReadFrequently: true });
   if (!resizedCtx) throw new Error('Failed to get OffscreenCanvas 2D context');
   resizedCtx.imageSmoothingEnabled = true;
   resizedCtx.imageSmoothingQuality = 'high';
-  resizedCtx.drawImage(padded, 0, 0, IMG_SIZE, IMG_SIZE);
+  resizedCtx.fillStyle = '#000000';
+  resizedCtx.fillRect(0, 0, IMG_SIZE, IMG_SIZE);
+  resizedCtx.fillStyle = '#ffffff';
+  resizedCtx.fillRect(0, 0, drawWidth, drawHeight);
+  resizedCtx.drawImage(bitmap, 0, 0, drawWidth, drawHeight);
 
   const imageData = resizedCtx.getImageData(0, 0, IMG_SIZE, IMG_SIZE).data;
   const pixels = IMG_SIZE * IMG_SIZE;

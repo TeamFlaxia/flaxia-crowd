@@ -25,7 +25,13 @@ vi.mock('../../executor/egress-guard', () => ({
 // Importing modules registers single-threaded wasm config; we only exercise
 // the pure validation/normalisation helpers here (no model load).
 import { handleDecision, normalizeDecisionAnswer } from '../decision';
-import { buildInterleavedText } from '../vector-embed';
+import {
+  buildInterleavedText,
+  handleVectorEmbed,
+  MAX_VECTOR_EMBED_AUDIO_SAMPLES,
+  MAX_VECTOR_EMBED_VIDEO_FRAMES,
+  releaseCache as releaseVectorEmbedCache,
+} from '../vector-embed';
 
 describe('decision payload validation', () => {
   it('rejects images and audio in one call (model limit)', async () => {
@@ -160,7 +166,7 @@ describe('decision worked-example flow (mocked model)', () => {
     const transformers = (await import('@huggingface/transformers')) as unknown as {
       loadImage: ReturnType<typeof vi.fn>;
     };
-    transformers.loadImage.mockResolvedValue({ fake: 'image' });
+    transformers.loadImage.mockResolvedValue({ fake: 'image', width: 8, height: 8 });
     try {
       const { AutoModel } = (await import('@huggingface/transformers')) as unknown as {
         AutoModel: { from_pretrained: ReturnType<typeof vi.fn> };
@@ -198,5 +204,92 @@ describe('decision worked-example flow (mocked model)', () => {
     } finally {
       // fetchGuarded is mocked; nothing to restore.
     }
+  });
+});
+
+describe('decision/vector-embed media decode caps', () => {
+  async function stubEmbeddingModel(): Promise<void> {
+    const transformers = (await import('@huggingface/transformers')) as unknown as {
+      AutoModel: { from_pretrained: ReturnType<typeof vi.fn> };
+      AutoProcessor: { from_pretrained: ReturnType<typeof vi.fn> };
+    };
+    transformers.AutoModel.from_pretrained.mockResolvedValue(
+      Object.assign(async () => ({ sentence_embedding: { data: new Float32Array(768) } }), { dispose: vi.fn() }),
+    );
+    transformers.AutoProcessor.from_pretrained.mockResolvedValue(
+      Object.assign(async () => ({}), { dispose: vi.fn() }),
+    );
+  }
+
+  it('rejects a decision image that decodes above the pixel cap', async () => {
+    const transformers = (await import('@huggingface/transformers')) as unknown as {
+      AutoModel: { from_pretrained: ReturnType<typeof vi.fn> };
+      loadImage: ReturnType<typeof vi.fn>;
+    };
+    transformers.AutoModel.from_pretrained.mockResolvedValue({});
+    transformers.loadImage.mockResolvedValue({ width: 8192, height: 8192 });
+
+    const decisionModule = await import('../decision');
+    decisionModule.releaseCache();
+
+    await expect(decisionModule.handleDecision({
+      task: 'decision',
+      model: 'LiquidAI/d1-omni-600M',
+      decision: {
+        state: 'x',
+        questions: { trend: { type: 'choice', instructions: 'x', criteria: { a: 'A', b: 'B' } } },
+        imageUrls: ['https://example.com/photo.png'],
+      },
+    })).rejects.toThrow(/pixel limit/);
+  });
+
+  it('rejects a vector-embed image that decodes above the pixel cap', async () => {
+    const transformers = (await import('@huggingface/transformers')) as unknown as {
+      loadImage: ReturnType<typeof vi.fn>;
+    };
+    await stubEmbeddingModel();
+    transformers.loadImage.mockResolvedValue({ width: 8192, height: 8192 });
+
+    releaseVectorEmbedCache();
+    await expect(handleVectorEmbed({
+      text: 'hello',
+      imageUrls: ['https://example.com/photo.png'],
+    })).rejects.toThrow(/pixel limit/);
+    releaseVectorEmbedCache();
+  });
+
+  it('rejects vector-embed audio above the sample cap', async () => {
+    const transformers = (await import('@huggingface/transformers')) as unknown as {
+      loadAudio: ReturnType<typeof vi.fn>;
+    };
+    await stubEmbeddingModel();
+    transformers.loadAudio.mockResolvedValue(new Float32Array(MAX_VECTOR_EMBED_AUDIO_SAMPLES + 1));
+
+    releaseVectorEmbedCache();
+    await expect(handleVectorEmbed({
+      text: 'hello',
+      audioUrl: 'https://example.com/a.wav',
+    })).rejects.toThrow(/sample limit/);
+    releaseVectorEmbedCache();
+  });
+
+  it('bounds vector-embed video frame sampling before decoding', async () => {
+    const transformers = (await import('@huggingface/transformers')) as unknown as {
+      loadVideo: ReturnType<typeof vi.fn>;
+    };
+    await stubEmbeddingModel();
+    transformers.loadVideo.mockResolvedValue({ frames: [], duration: 0 });
+
+    releaseVectorEmbedCache();
+    await handleVectorEmbed({
+      text: 'hello',
+      videoUrl: 'https://example.com/v.mp4',
+    });
+
+    expect(transformers.loadVideo).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ num_frames: MAX_VECTOR_EMBED_VIDEO_FRAMES }),
+    );
+    releaseVectorEmbedCache();
   });
 });

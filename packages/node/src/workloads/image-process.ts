@@ -12,8 +12,15 @@ export const MAX_CANVAS_SIDE = 8192;
 export const MAX_CANVAS_PIXELS = 32 * 1024 * 1024;
 /** Maximum encoded input before data-URL decoding or image bitmap allocation. */
 export const MAX_IMAGE_PROCESS_INPUT_BYTES = 16 * 1024 * 1024;
-
-type ImageFormat = 'png' | 'jpeg' | 'webp';
+/**
+ * Maximum encoded output. A lossless PNG of a 32 M-pixel canvas can exceed
+ * 100 MB, which is enough to OOM a 4 GB phone when the result is cloned to the
+ * main thread and JSON-serialized for the orchestrator.
+ */
+export const MAX_IMAGE_PROCESS_OUTPUT_BYTES = 8 * 1024 * 1024;
+/** Encoders the payload may select; `png` is lossless and can be huge. */
+export const ALLOWED_IMAGE_OUTPUT_FORMATS = ['png', 'jpeg', 'webp'] as const;
+type ImageFormat = (typeof ALLOWED_IMAGE_OUTPUT_FORMATS)[number];
 type ImageDimensions = { width: number; height: number; format: ImageFormat };
 
 function readU32BE(bytes: Uint8Array, offset: number): number {
@@ -124,6 +131,25 @@ function parseRequestedSide(value: unknown, name: 'width' | 'height'): number | 
 }
 
 /**
+ * Encode a blob as base64 without building a data-URL string first.
+ * `FileReader.readAsDataURL` materializes the whole blob as a UTF-16 string
+ * and then splits it, which doubles the peak for a large output.
+ */
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  // 32 KiB keeps String.fromCharCode.apply well below the argument limit.
+  const CHUNK = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(offset, offset + CHUNK) as unknown as number[],
+    );
+  }
+  return btoa(binary);
+}
+
+/**
  * Resolve the output canvas size: validate the requested size against the hard
  * caps, then clamp it to the source bitmap so a payload can never upscale (and
  * therefore never allocate more than the decoded source needs).
@@ -194,23 +220,25 @@ export const handleImageProcess = async (payload: ImageProcessPayload): Promise<
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
 
     // Convert back to Base64
-    const outputFormat = options.outputFormat || (mimeType.split('/')[1] as any);
+    const outputFormat = options.outputFormat ?? (mimeType.split('/')[1] as ImageFormat);
+    if (typeof outputFormat !== 'string' || !ALLOWED_IMAGE_OUTPUT_FORMATS.includes(outputFormat as ImageFormat)) {
+      throw new Error(
+        `image-process: unsupported output format ${JSON.stringify(outputFormat)} (allowed: ${ALLOWED_IMAGE_OUTPUT_FORMATS.join(', ')})`,
+      );
+    }
+    const quality = typeof options.quality === 'number' && options.quality > 0 && options.quality <= 1
+      ? options.quality
+      : 0.8;
     const outputMimeType = `image/${outputFormat}`;
 
-    const outputBlob = await canvas.convertToBlob({
-      type: outputMimeType,
-      quality: options.quality || 0.8
-    });
+    const outputBlob = await canvas.convertToBlob({ type: outputMimeType, quality });
+    if (outputBlob.size > MAX_IMAGE_PROCESS_OUTPUT_BYTES) {
+      throw new Error(
+        `image-process: encoded output ${outputBlob.size} bytes exceeds the ${MAX_IMAGE_PROCESS_OUTPUT_BYTES} byte limit`,
+      );
+    }
 
-    const reader = new FileReader();
-    const resultBase64 = await new Promise<string>((resolve, reject) => {
-      reader.onloadend = () => {
-        const base64data = (reader.result as string).split(',')[1];
-        resolve(base64data);
-      };
-      reader.onerror = reject;
-      reader.readAsDataURL(outputBlob);
-    });
+    const resultBase64 = await blobToBase64(outputBlob);
 
     console.log(
       `[flaxia-node] image-process: done operation=${operation} output=${outputFormat} size=${size.width}x${size.height} inputBytes=${inputBytes} resultBytes=${outputBlob.size} durationMs=${Math.round(performance.now() - startedAt)}`,
