@@ -447,6 +447,13 @@ describe('#13 webhook signing fails closed', () => {
     expect(validateCallbackUrl('https://hooks.example/callback')).toBe('https://hooks.example/callback');
   });
 
+  it('rejects a non-default HTTPS port', () => {
+    // Match the node egress guard: only the default HTTPS port is allowed, so
+    // a public hostname cannot be used to reach an arbitrary internal port.
+    expect(validateCallbackUrl('https://hooks.example:8443/callback')).toBeNull();
+    expect(validateCallbackUrl('https://hooks.example:443/callback')).not.toBeNull();
+  });
+
   it('rejects a callbackUrl when the signing secret is not configured', async () => {
     const env = makeEnv({ API_KEYS: 'key-hook:tenant-hook', WEBHOOK_SIGNING_SECRET: '' });
     const resp = await submitTask(

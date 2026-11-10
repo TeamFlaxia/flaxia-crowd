@@ -243,6 +243,15 @@ export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetRes
   const topK = payload.topK ?? 100;
   const iouThreshold = payload.iouThreshold ?? 0.45;
   const scoreThreshold = payload.scoreThreshold ?? 0.25;
+  if (!Number.isInteger(topK) || topK < 1 || topK > 1000) {
+    throw new Error(`NudeNet topK must be an integer within 1..1000, got ${JSON.stringify(payload.topK)}`);
+  }
+  if (typeof iouThreshold !== 'number' || !Number.isFinite(iouThreshold) || iouThreshold < 0 || iouThreshold > 1) {
+    throw new Error(`NudeNet iouThreshold must be a number within 0..1, got ${JSON.stringify(payload.iouThreshold)}`);
+  }
+  if (typeof scoreThreshold !== 'number' || !Number.isFinite(scoreThreshold) || scoreThreshold < 0 || scoreThreshold > 1) {
+    throw new Error(`NudeNet scoreThreshold must be a number within 0..1, got ${JSON.stringify(payload.scoreThreshold)}`);
+  }
 
   const bitmap = await loadImage(payload);
   try {

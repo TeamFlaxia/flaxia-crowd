@@ -27,6 +27,14 @@ describe('NudeNet input caps', () => {
     await expect(handleNudeNet({ imageBase64: '!!!' } as any)).rejects.toThrow(/base64/);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it('rejects non-numeric or out-of-range generation parameters', async () => {
+    await expect(handleNudeNet({ ...payload(), topK: 0 })).rejects.toThrow(/topK/);
+    await expect(handleNudeNet({ ...payload(), topK: 1.5 })).rejects.toThrow(/topK/);
+    await expect(handleNudeNet({ ...payload(), topK: 1001 })).rejects.toThrow(/topK/);
+    await expect(handleNudeNet({ ...payload(), iouThreshold: 2 })).rejects.toThrow(/iouThreshold/);
+    await expect(handleNudeNet({ ...payload(), scoreThreshold: Number.NaN })).rejects.toThrow(/scoreThreshold/);
+  });
 });
 
 describe('NudeNet decoded image limits', () => {
