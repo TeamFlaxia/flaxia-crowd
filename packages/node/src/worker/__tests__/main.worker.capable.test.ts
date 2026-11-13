@@ -14,6 +14,7 @@ vi.mock('../../executor/memoryProbe', () => probeMockFactory());
 // without pulling in transformers/onnxruntime.
 vi.mock('../../workloads/ai-inference', () => ({
   handleAiInference: vi.fn().mockResolvedValue({ output: 'ok' }),
+  preloadAiModel: vi.fn().mockResolvedValue(undefined),
   releaseCache: vi.fn(),
   getModelCacheSnapshot: () => ({ version: 1, sampledAt: Date.now(), expiresAt: Date.now() + 60_000, entries: [] }),
 }));
@@ -38,5 +39,25 @@ describe('main.worker (capable device)', () => {
     const done = posts.find((p) => p.type === 'done');
     expect(done).toBeDefined();
     expect(done.id).toBe('t2');
+  });
+
+  it('allows the local ai-preload warm-up when the device is capable', async () => {
+    vi.resetModules();
+    const posts: any[] = [];
+    const selfObj: any = { postMessage: (m: any) => posts.push(m) };
+    Object.defineProperty(globalThis, 'self', { value: selfObj, configurable: true });
+
+    await import('../main.worker');
+
+    await selfObj.onmessage({
+      data: { id: 'preload', workload: 'ai-preload', payload: { task: 'translation', model: 'Xenova/m2m100_418M' } },
+    });
+
+    const done = posts.find((p) => p.id === 'preload' && p.type === 'done');
+    expect(done).toBeDefined();
+    const incapable = posts
+      .filter((p) => p.type === 'error')
+      .find((e) => /incapable/i.test(String(e.error)));
+    expect(incapable).toBeUndefined();
   });
 });

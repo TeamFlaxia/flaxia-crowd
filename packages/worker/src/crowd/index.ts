@@ -69,6 +69,14 @@ function isLowMemoryNode(
 const MAX_ALLOWED_SITES = 16
 /** Upper bound on a single site id. */
 const MAX_SITE_ID_CHARS = 128
+/** Upper bound on the number of capabilities a node may advertise. */
+const MAX_NODE_CAPABILITIES = 32
+/** Upper bound on a single capability string. */
+const MAX_CAPABILITY_CHARS = 64
+/** Upper bound on the self-reported GPU architecture string (it is signed). */
+const MAX_GPU_ARCHITECTURE_CHARS = 64
+/** Upper bound on a warm-model repository id. */
+const MAX_WARM_MODEL_ID_CHARS = 128
 
 function originAllowed(origin: string, env: Env): boolean {
   const allowed = (env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
@@ -103,7 +111,12 @@ export function parseSwarmCapabilities(value: unknown): SwarmNodeCapabilities | 
   const record = value as Record<string, unknown>
   if (typeof record.webgpu !== 'boolean') return undefined
   const swarm: SwarmNodeCapabilities = { webgpu: record.webgpu }
-  if (typeof record.gpuArchitecture === 'string') swarm.gpuArchitecture = record.gpuArchitecture
+  if (typeof record.gpuArchitecture === 'string') {
+    // Self-reported and signed into the node token, then echoed into a URL
+    // query parameter: clamp it so a multi-megabyte value cannot inflate the
+    // token, the WebSocket upgrade, or the DO request.
+    swarm.gpuArchitecture = record.gpuArchitecture.slice(0, MAX_GPU_ARCHITECTURE_CHARS)
+  }
   // Self-reported: clamp it, otherwise `maxStorageBufferBindingSize: 1e300` would
   // be enough to win every swarm host election.
   const maxBuffer = clampByteCapacity(record.maxStorageBufferBindingSize)
@@ -120,6 +133,7 @@ export function parseWarmModels(value: unknown): WarmModelRange[] | undefined {
     const record = entry as Record<string, unknown>
     const layers = record.layers
     if (typeof record.modelId !== 'string' || !record.modelId) continue
+    if (record.modelId.length > MAX_WARM_MODEL_ID_CHARS) continue
     if (!Array.isArray(layers) || layers.length !== 2) continue
     const [start, end] = layers
     if (typeof start !== 'number' || typeof end !== 'number') continue
@@ -495,6 +509,11 @@ function upgradeResponse(resp: Response, protocol: string): Response {
 // --- Node registration & signaling ---
 
 app.post('/nodes/register', async (c) => {
+  // Bound the body before parsing: register is unauthenticated, so an
+  // arbitrarily large JSON body must not be buffered by the Worker.
+  const rawBody = await c.req.text()
+  if (!validatePayloadSize(c.env, rawBody)) return c.json({ error: 'Payload too large' }, 413)
+
   let body: {
     siteId?: string
     nodeId?: string
@@ -507,7 +526,7 @@ app.post('/nodes/register', async (c) => {
     warmModels?: unknown
   }
   try {
-    body = await c.req.json()
+    body = JSON.parse(rawBody)
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400)
   }
@@ -521,9 +540,23 @@ app.post('/nodes/register', async (c) => {
     return c.json({ error: 'fileSources must be a boolean' }, 400)
   }
 
-  const capabilities = Array.isArray(body.capabilities)
-    ? body.capabilities.filter((cap): cap is string => typeof cap === 'string')
-    : []
+  if (!Array.isArray(body?.capabilities) && body?.capabilities !== undefined) {
+    return c.json({ error: 'capabilities must be an array of strings' }, 400)
+  }
+  const rawCapabilities = Array.isArray(body?.capabilities) ? body.capabilities : []
+  if (rawCapabilities.length > MAX_NODE_CAPABILITIES) {
+    return c.json({ error: `capabilities must hold at most ${MAX_NODE_CAPABILITIES} entries` }, 400)
+  }
+  const capabilities: string[] = []
+  for (const cap of rawCapabilities) {
+    if (typeof cap !== 'string') {
+      return c.json({ error: 'capabilities must be an array of strings' }, 400)
+    }
+    if (!cap || cap.length > MAX_CAPABILITY_CHARS) {
+      return c.json({ error: `capability entries must be non-empty and at most ${MAX_CAPABILITY_CHARS} characters` }, 400)
+    }
+    capabilities.push(cap)
+  }
   const fileSources = body.fileSources === true
   // Node identity is server-issued, always. A client-supplied `nodeId` is
   // ignored so it cannot register (and later connect) as another live node.
@@ -532,6 +565,14 @@ app.post('/nodes/register', async (c) => {
   if (!c.env.NODE_TOKEN_SECRET) {
     return c.json({ error: 'Node token secret is not configured' }, 503)
   }
+
+  // Rate limit the unauthenticated register endpoint through the coordinator's
+  // storage-backed limiter (shared across isolates), before signing a token.
+  const rateStub = getCoordinator(c)
+  const rateResponse = await rateStub.fetch(new Request('http://internal/register-rate', {
+    headers: c.req.raw.headers,
+  }))
+  if (!rateResponse.ok) return c.json({ error: 'Rate limit exceeded' }, 429)
 
   // A `null`/undefined deviceMemory means a mobile WebView or unknown device.
   const deviceMemory = typeof body.deviceMemory === 'number' ? body.deviceMemory : null
@@ -799,9 +840,11 @@ app.get('/queue/stats', async (c) => {
 app.post('/swarm/prewarm', async (c) => {
   const tenantId = await resolveCallerTenant(c.env, c.req.header('Authorization'))
   if (!tenantId) return c.json({ error: 'Unauthorized' }, 401)
+  const rawBody = await c.req.text()
+  if (!validatePayloadSize(c.env, rawBody)) return c.json({ error: 'Payload too large' }, 413)
   let body: { model?: unknown; minNodes?: unknown; maxNodes?: unknown }
   try {
-    body = await c.req.json()
+    body = JSON.parse(rawBody)
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400)
   }

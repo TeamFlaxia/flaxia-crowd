@@ -387,5 +387,10 @@ export function validateCallbackUrl(raw: string): string | null {
   // Webhooks are always HTTPS and must never target a literal private host.
   // This validation is repeated at delivery time because stored task records
   // can outlive submission and may have been created by an older deployment.
-  return url.protocol === 'https:' && isSafeHostname(url.hostname) ? url.toString() : null;
+  if (url.protocol !== 'https:' || !isSafeHostname(url.hostname)) return null;
+  // Match the node egress guard: only the default HTTPS port. A public host
+  // on an arbitrary port is an SSRF-adjacent surface (internal service on a
+  // public hostname, or a redirect to an internal port).
+  if (url.port && Number(url.port) !== 443) return null;
+  return url.toString();
 }

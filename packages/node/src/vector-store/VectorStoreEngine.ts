@@ -271,6 +271,21 @@ export class VectorStoreEngine {
   }
 
   /**
+   * Drop the in-memory HNSW graph and close the IndexedDB connection so the
+   * idle eviction actually releases the vectors, adjacency maps and the DB
+   * handle instead of pinning them for the life of the worker.
+   */
+  close(): void {
+    this.hnsw = null;
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+    this.shardInfo = null;
+    this.saveCounter = 0;
+  }
+
+  /**
    * Rebuild the in-memory graph from IndexedDB.
    *
    * The records are same-origin writable storage, so they are treated as
