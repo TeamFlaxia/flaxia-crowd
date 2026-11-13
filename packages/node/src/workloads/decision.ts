@@ -37,6 +37,8 @@ export const DECISION_MAX_MEDIA_URLS = 8;
 /** Per-file media caps (compressed bytes). */
 export const MAX_DECISION_IMAGE_BYTES = 8 * 1024 * 1024;
 export const MAX_DECISION_AUDIO_BYTES = 8 * 1024 * 1024;
+/** Bound decoded pixels per image before the model sees it (RGBA ~4 bytes/pixel). */
+export const MAX_DECISION_IMAGE_PIXELS = 16 * 1024 * 1024;
 /** Media fetch timeout. */
 const DECISION_FETCH_TIMEOUT_MS = 20_000;
 
@@ -233,7 +235,19 @@ export async function handleDecision(payload: AiInferencePayload): Promise<AiInf
       const blob = new Blob([res.bytes], { type: res.contentType || 'application/octet-stream' });
       const blobUrl = URL.createObjectURL(blob);
       try {
-        images.push(await loadImage(blobUrl));
+        const image = await loadImage(blobUrl);
+        if (
+          !Number.isSafeInteger(image.width) ||
+          !Number.isSafeInteger(image.height) ||
+          image.width < 1 ||
+          image.height < 1 ||
+          image.width * image.height > MAX_DECISION_IMAGE_PIXELS
+        ) {
+          throw new Error(
+            `decision: image ${url} decodes to ${image.width}x${image.height}, above the ${MAX_DECISION_IMAGE_PIXELS} pixel limit`,
+          );
+        }
+        images.push(image);
       } finally {
         URL.revokeObjectURL(blobUrl);
       }

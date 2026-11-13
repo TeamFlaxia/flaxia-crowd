@@ -23,6 +23,42 @@ const CONTAINER_FILE_SOURCE_CONTENT_TYPES = ['application/octet-stream'] as cons
 export const MAX_CONTAINER_INPUT_BYTES = 25 * 1024 * 1024;
 const MAX_CONTAINER_INPUT_FILES = 4096;
 
+/**
+ * Per-stream cap on captured container output. A chatty container can print
+ * gigabytes; accumulating that as JS strings and then joining it is enough to
+ * OOM a phone and to blow past the orchestrator's result-size limit.
+ */
+export const MAX_CONTAINER_OUTPUT_CHARS = 1_000_000;
+
+export interface BoundedOutputCapture {
+  write: (data: Uint8Array) => number;
+  text: () => string;
+}
+
+/**
+ * Build a stdout/stderr sink that keeps at most `MAX_CONTAINER_OUTPUT_CHARS`
+ * characters per stream and marks the result when it was truncated.
+ */
+export function createBoundedOutputCapture(): BoundedOutputCapture {
+  const buffer: string[] = [];
+  const decoder = new TextDecoder();
+  let chars = 0;
+  let truncated = false;
+  return {
+    write: (data: Uint8Array): number => {
+      const text = decoder.decode(data);
+      const room = MAX_CONTAINER_OUTPUT_CHARS - chars;
+      if (room > 0) {
+        buffer.push(text.length > room ? text.slice(0, room) : text);
+        chars += Math.min(text.length, room);
+      }
+      if (text.length > room) truncated = true;
+      return data.length;
+    },
+    text: () => buffer.join('') + (truncated ? '\n[truncated]' : ''),
+  };
+}
+
 /** Memory bounds for `memoryLimitMb` (clamped): 32 MiB .. 4 GiB. */
 export const MIN_CONTAINER_MEMORY_MB = 32;
 export const MAX_CONTAINER_MEMORY_MB = 4096;
@@ -257,6 +293,25 @@ function isContainerFileSource(value: unknown): value is ContainerFileSource {
   );
 }
 
+/**
+ * Decode base64 into a preallocated Uint8Array. `Uint8Array.from(binary, ...)`
+ * builds an intermediate JS array of numbers (up to ~200 MB transient for a
+ * 25 MB file) before copying; a plain loop avoids that spike.
+ */
+function decodeBase64ToBytes(name: string, encoded: string): Uint8Array {
+  let binary: string;
+  try {
+    binary = atob(encoded);
+  } catch {
+    throw new Error(`Container file ${name} is not valid base64`);
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 /** Decode inline files and download scoped references before mounting either. */
 export async function resolveContainerFiles(
   payload: Pick<ContainerPayload, 'files' | 'fileSources'>,
@@ -284,13 +339,7 @@ export async function resolveContainerFiles(
     if (encoded.length > Math.ceil(MAX_CONTAINER_INPUT_BYTES / 3) * 4) {
       throw new Error(`Container file ${name} exceeds the 25 MiB input limit`);
     }
-    let binary: string;
-    try {
-      binary = atob(encoded);
-    } catch {
-      throw new Error(`Container file ${name} is not valid base64`);
-    }
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const bytes = decodeBase64ToBytes(name, encoded);
     totalBytes += bytes.byteLength;
     if (totalBytes > MAX_CONTAINER_INPUT_BYTES) throw new Error('Container input files exceed the 25 MiB limit');
     resolved.set(name, bytes);
@@ -341,22 +390,12 @@ export const runContainer = async (
 
   // 1. Prepare Filesystem
   const fds: any[] = [];
-  const stdoutBuffer: string[] = [];
-  const stderrBuffer: string[] = [];
+  const stdoutCapture = createBoundedOutputCapture();
+  const stderrCapture = createBoundedOutputCapture();
 
   // Mock stdout/stderr streams
-  const stdout = {
-    write: (data: Uint8Array) => {
-      stdoutBuffer.push(new TextDecoder().decode(data));
-      return data.length;
-    }
-  };
-  const stderr = {
-    write: (data: Uint8Array) => {
-      stderrBuffer.push(new TextDecoder().decode(data));
-      return data.length;
-    }
-  };
+  const stdout = { write: stdoutCapture.write } as any;
+  const stderr = { write: stderrCapture.write } as any;
 
   const rootFiles = new Map<string, any>();
   
@@ -413,15 +452,15 @@ export const runContainer = async (
 
     return {
       files: outputFiles,
-      stdout: stdoutBuffer.join(''),
-      stderr: stderrBuffer.join(''),
+      stdout: stdoutCapture.text(),
+      stderr: stderrCapture.text(),
       exitCode
     };
   } catch (err) {
     return {
       files: {},
-      stdout: stdoutBuffer.join(''),
-      stderr: stderrBuffer.join(''),
+      stdout: stdoutCapture.text(),
+      stderr: stderrCapture.text(),
       exitCode: -1
     };
   }
