@@ -13,6 +13,13 @@ import { isSwarmControlEnvelope } from '../swarm/messages';
 let throttle: CpuThrottle | null = null;
 
 /**
+ * Workloads that need the heavy memory budget. `ai-preload` is the local
+ * Light Inference warm-up path: it is not a protocol `WorkloadType`, but it
+ * loads the same multi-hundred-MB translate models and must be gated too.
+ */
+const HEAVY_EXECUTION: ReadonlySet<string> = new Set<string>([...HEAVY_WORKLOADS, 'ai-preload']);
+
+/**
  * CPU-budget policy for a task that arrives while the device is saturated.
  *
  * The wait budget must stay well under the WorkerPool timeout (300s default)
@@ -162,8 +169,12 @@ async function runWorkload(
       const ai = await import('../workloads/ai-inference');
       cacheReleasers.set(workload, ai.releaseCache);
       cacheSnapshotters.set(workload, ai.getModelCacheSnapshot);
-      const decision = await import('../workloads/decision');
-      cacheReleasers.set('decision', decision.releaseCache);
+      // Only pay for the decision module when the payload actually needs it:
+      // `trust_remote_code` d1-omni pulls in a separate model registry.
+      if (payload && typeof payload === 'object' && (payload as { decision?: unknown }).decision) {
+        const decision = await import('../workloads/decision');
+        cacheReleasers.set('decision', decision.releaseCache);
+      }
       return await ai.handleAiInference(payload as any, emitToken);
     }
     case 'ai-preload' as WorkloadType: {
@@ -307,7 +318,7 @@ self.onmessage = async (e: MessageEvent) => {
     // a heavy workload to an incapable node, but if one still arrives, reject it
     // here before any model is loaded so the device is never killed. Light
     // workloads (e.g. cc-extract) remain runnable on low-memory devices.
-    if (HEAVY_WORKLOADS.has(workload as WorkloadType) && !hasEnoughMemoryForHeavyWorkload()) {
+    if (HEAVY_EXECUTION.has(workload as WorkloadType) && !hasEnoughMemoryForHeavyWorkload()) {
       throw new Error(`${workload}: node incapable: insufficient WASM memory (${WASM_MEMORY_BYTES} bytes < ${HEAVY_WORKLOAD_WASM_MEMORY_BYTES})`);
     }
 
