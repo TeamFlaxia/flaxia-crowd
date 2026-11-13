@@ -11,7 +11,7 @@ import {
   safeRandomUUID,
 } from '../consent/storage';
 import { WorkerPool } from '../executor/WorkerPool';
-import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, probeMaxWasmMemoryBytes, hasEnoughWasmMemoryForHeavy } from '../executor/memoryProbe';
+import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, getAdvertisedWasmMemoryBytes, hasEnoughWasmMemoryForHeavy } from '../executor/memoryProbe';
 import { collectNodeResourceReport } from '../executor/resourceReporter';
 import { assertPublicUrl } from '../executor/egress-guard';
 import { isCurrentSwarmPeerSignal, SwarmPeerTransport } from '../swarm/peer-transport';
@@ -519,7 +519,7 @@ class SignalingClient {
       // therefore unsafe). Incapable devices still advertise light workloads
       // (for example cc-extract), so the orchestrator can use them without
       // risking a multi-GB allocation.
-      const wasmMemoryBytes = probeMaxWasmMemoryBytes();
+      const wasmMemoryBytes = getAdvertisedWasmMemoryBytes();
       const capable = wasmMemoryBytes >= HEAVY_WORKLOAD_WASM_MEMORY_BYTES;
       const requested = this.config.capabilities ?? ['ai-inference', 'image-process'];
       let capabilities = [...requested];
@@ -577,10 +577,10 @@ class SignalingClient {
           capabilities,
           // Only nodes with an explicit trusted-origin list can receive file refs.
           fileSources: validatedHttpsOrigins(this.config.fileSourceOrigins).length > 0,
-          // Measured WASM memory the device could actually commit (bytes). The
-          // orchestrator uses this to avoid routing heavy workloads to devices
-          // that cannot run them.
-          wasmMemoryBytes: probeMaxWasmMemoryBytes(),
+          // Measured WASM memory the device could actually commit (bytes), or 0
+          // when the device is memory-constrained. The orchestrator uses this to
+          // avoid routing heavy workloads to devices that cannot run them.
+          wasmMemoryBytes: getAdvertisedWasmMemoryBytes(),
           // Only defined on desktop Chrome; mobile WebViews report null so the
           // orchestrator never routes heavy WASM workloads to weak devices.
           deviceMemory:
