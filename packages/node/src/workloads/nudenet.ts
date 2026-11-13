@@ -86,6 +86,12 @@ function getSession(url: string): Promise<ort.InferenceSession> {
       );
       return session;
     })();
+    // A failed load must not poison the cache: the rejected promise captures
+    // the downloaded buffer (up to 512 MB) and would otherwise be returned
+    // forever, leaking both the buffer and the failed session.
+    cached.catch(() => {
+      if (sessionCache.get(url) === cached) sessionCache.delete(url);
+    });
     sessionCache.set(url, cached);
   }
   return cached;
@@ -266,5 +272,15 @@ export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetRes
 };
 
 export function releaseCache(): void {
+  // `ort.InferenceSession.release()` frees the wasm heap and model buffers;
+  // clearing the map alone only drops our reference and leaves the session
+  // alive until GC. A rejected entry is dropped by the catch installed in
+  // getSession, so it is safe to release here too.
+  for (const session of sessionCache.values()) {
+    void session.then(
+      (loaded) => loaded.release?.(),
+      () => {},
+    );
+  }
   sessionCache.clear();
 }

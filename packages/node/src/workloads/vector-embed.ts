@@ -48,8 +48,16 @@ let embeddingModel: LoadedEmbeddingModel | null = null;
 let embeddingLoadPromise: Promise<LoadedEmbeddingModel> | null = null;
 
 export const releaseCache = (): void => {
+  const loaded = embeddingModel;
   embeddingModel = null;
   embeddingLoadPromise = null;
+  if (!loaded) return;
+  // Dispose the wasm model/processor explicitly; dropping the references only
+  // leaves the buffers to GC and keeps the wasm heap pinned until then.
+  void (async () => {
+    try { loaded.model?.dispose?.(); } catch {}
+    try { loaded.processor?.dispose?.(); } catch {}
+  })();
 };
 
 let downloadGuardInstalled = false;
