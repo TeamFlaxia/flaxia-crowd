@@ -57,6 +57,24 @@ describe('HNSWIndex distance validation (#18)', () => {
       random.mockRestore();
     }
   });
+
+  it('trims the entry-point adjacency on insert to the per-level cap', () => {
+    // All nodes stay on level 0, so the first node remains the entry point.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.9);
+    try {
+      const index = new HNSWIndex(4, 'cosine', 4, 10);
+      for (let i = 0; i < 50; i++) {
+        const v = new Float32Array(4);
+        v[i % 4] = 1;
+        index.insert(`doc-${i}`, v);
+      }
+
+      const entry = index.exportNodes().get(0)!;
+      expect(entry.neighbors[0]?.length ?? 0).toBeLessThanOrEqual(4);
+    } finally {
+      random.mockRestore();
+    }
+  });
 });
 
 describe('HNSWIndex importNodes validation (#18)', () => {
@@ -155,6 +173,6 @@ describe('HNSWIndex importNodes validation (#18)', () => {
   });
 
   it('exposes a bounded node quota', () => {
-    expect(MAX_HNSW_NODES).toBe(100_000);
+    expect(MAX_HNSW_NODES).toBe(20_000);
   });
 });

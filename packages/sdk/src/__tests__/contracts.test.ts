@@ -53,7 +53,10 @@ describe('workloads', () => {
   it('classifies heavy workloads', () => {
     expect(isHeavyWorkload('nudenet')).toBe(true);
     expect(isHeavyWorkload('swarm-inference')).toBe(true);
-    expect(isHeavyWorkload('vector-store')).toBe(false);
+    // The node-local HNSW index holds up to MAX_HNSW_NODES vectors in memory,
+    // so both the store and the query path need the heavy-memory gate.
+    expect(isHeavyWorkload('vector-store')).toBe(true);
+    expect(isHeavyWorkload('vector-query')).toBe(true);
     expect(isHeavyWorkload('cc-extract')).toBe(false);
     expect(isHeavyWorkload('embed-gemma')).toBe(true);
     expect(HEAVY_WORKLOADS.has('moe-inference')).toBe(false);

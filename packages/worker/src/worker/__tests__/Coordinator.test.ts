@@ -530,6 +530,22 @@ describe('Coordinator', () => {
     expect(got429).toBe(true);
   });
 
+  it('rate limits the register-rate endpoint per IP in storage', async () => {
+    stub = newStub();
+    let got429 = false;
+    for (let i = 0; i < 110; i++) {
+      const resp = await stub.fetch('http://internal/register-rate', {
+        headers: { 'CF-Connecting-IP': '203.0.113.9' },
+      });
+      if (resp.status === 429) {
+        got429 = true;
+        break;
+      }
+      expect(resp.status).toBe(200);
+    }
+    expect(got429).toBe(true);
+  });
+
   // --- #6: queue and fan-out DoS bounds ---
 
   it('rejects an enqueue once the global pending cap is reached', async () => {
@@ -1080,6 +1096,13 @@ describe('node capability parsing', () => {
       const parsed = parseSwarmCapabilities({ webgpu: true, maxStorageBufferBindingSize: 1e300 });
       expect(parsed?.maxStorageBufferBindingSize).toBe(16 * 1024 ** 3);
     });
+
+    it('clamps an over-long gpuArchitecture instead of signing it into the token', () => {
+      // The architecture is signed into the node token and echoed into a URL
+      // query parameter; a multi-megabyte value would inflate both.
+      const parsed = parseSwarmCapabilities({ webgpu: true, gpuArchitecture: 'x'.repeat(5_000) });
+      expect(parsed?.gpuArchitecture).toBe('x'.repeat(64));
+    });
   });
 
   describe('parseWarmModels', () => {
@@ -1114,6 +1137,10 @@ describe('node capability parsing', () => {
       expect(parseWarmModels([])).toBeUndefined();
       expect(parseWarmModels('nope')).toBeUndefined();
       expect(parseWarmModels([{ modelId: 'bad' }])).toBeUndefined();
+    });
+
+    it('drops an over-long model id', () => {
+      expect(parseWarmModels([{ modelId: 'm'.repeat(5_000), layers: [0, 4] }])).toBeUndefined();
     });
   });
 });

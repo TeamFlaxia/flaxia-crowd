@@ -24,6 +24,8 @@ packages/node-native/node.toml
 .wrangler/
 .vite/
 .next/
+# TypeScript incremental build info
+packages/*/tsconfig.tsbuildinfo
 
 # environment
 .env
