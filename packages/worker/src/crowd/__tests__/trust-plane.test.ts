@@ -480,3 +480,30 @@ describe('#13 webhook signing fails closed', () => {
     expect(resp.status).toBe(200);
   });
 });
+
+describe('register endpoint hardening', () => {
+  it('rejects an oversized body before parsing', async () => {
+    const env = makeEnv({ MAX_PAYLOAD_SIZE: '1024' });
+    const resp = await registerNode(env, { capabilities: ['ai-inference'], siteId: 'x'.repeat(2048) });
+    expect(resp.status).toBe(413);
+  });
+
+  it('rejects more than 32 capabilities', async () => {
+    const env = makeEnv();
+    const capabilities = Array.from({ length: 33 }, (_, index) => `cap-${index}`);
+    const resp = await registerNode(env, { capabilities });
+    expect(resp.status).toBe(400);
+  });
+
+  it('rejects an over-long capability string', async () => {
+    const env = makeEnv();
+    const resp = await registerNode(env, { capabilities: ['x'.repeat(65)] });
+    expect(resp.status).toBe(400);
+  });
+
+  it('rejects non-array and non-string capabilities', async () => {
+    const env = makeEnv();
+    expect((await registerNode(env, { capabilities: 'ai-inference' })).status).toBe(400);
+    expect((await registerNode(env, { capabilities: [42] })).status).toBe(400);
+  });
+});

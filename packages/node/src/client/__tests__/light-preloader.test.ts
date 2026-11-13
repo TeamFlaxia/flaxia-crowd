@@ -64,6 +64,48 @@ describe('LightPreloader', () => {
     preloader.stop();
     expect(preload).not.toHaveBeenCalled();
   });
+
+  it('does not preload when the device has no memory headroom', () => {
+    const preload = vi.fn().mockResolvedValue(undefined);
+    const preloader = new LightPreloader(
+      () => 'granted',
+      { hasMemoryHeadroom: () => false },
+      () => false,
+      preload,
+    );
+    preloader.start();
+    preloader.stop();
+    expect(preload).not.toHaveBeenCalled();
+  });
+
+  it('preloads when the device has memory headroom', async () => {
+    vi.useFakeTimers();
+    const preload = vi.fn().mockResolvedValue(undefined);
+    const preloader = new LightPreloader(
+      () => 'granted',
+      { hasMemoryHeadroom: () => true },
+      () => false,
+      preload,
+    );
+    preloader.start();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(preload).toHaveBeenCalledTimes(1);
+    preloader.stop();
+    vi.useRealTimers();
+  });
+
+  it('treats a throwing memory probe as no headroom instead of crashing', () => {
+    const preload = vi.fn().mockResolvedValue(undefined);
+    const preloader = new LightPreloader(
+      () => 'granted',
+      { hasMemoryHeadroom: () => { throw new Error('probe unavailable'); } },
+      () => false,
+      preload,
+    );
+    preloader.start();
+    preloader.stop();
+    expect(preload).not.toHaveBeenCalled();
+  });
 });
 
 afterEach(() => {

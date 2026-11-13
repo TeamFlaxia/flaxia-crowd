@@ -69,4 +69,35 @@ describe('NudeNet decoded image limits', () => {
     await expect(handleNudeNet(payload())).rejects.toThrow(/getContext/);
     expect(bitmapClose).toHaveBeenCalledTimes(1);
   });
+
+  it('preprocesses a large image without materializing full-size intermediate canvases', async () => {
+    const canvasSizes: Array<{ width: number; height: number }> = [];
+    class TrackingCanvas {
+      constructor(public readonly width: number, public readonly height: number) {
+        canvasSizes.push({ width, height });
+      }
+      getContext() {
+        return {
+          imageSmoothingEnabled: false,
+          imageSmoothingQuality: 'low' as const,
+          fillStyle: '',
+          fillRect: vi.fn(),
+          drawImage: vi.fn(),
+          getImageData: () => ({ data: new Uint8ClampedArray(320 * 320 * 4) }),
+        };
+      }
+    }
+    vi.stubGlobal('OffscreenCanvas', TrackingCanvas);
+    globalThis.fetch = vi.fn().mockResolvedValue({ blob: async () => new Blob(['x'], { type: 'image/jpeg' }) }) as any;
+    globalThis.createImageBitmap = vi.fn().mockResolvedValue({
+      width: MAX_NUDENET_IMAGE_SIDE,
+      height: Math.floor(MAX_NUDENET_IMAGE_PIXELS / MAX_NUDENET_IMAGE_SIDE),
+      close: bitmapClose,
+    }) as any;
+
+    // The session load fails (onnxruntime is not mocked here), but
+    // preprocessing runs first and its canvas allocations are what we assert.
+    await expect(handleNudeNet(payload())).rejects.toThrow();
+    expect(canvasSizes).toEqual([{ width: 320, height: 320 }]);
+  });
 });

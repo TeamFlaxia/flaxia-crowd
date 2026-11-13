@@ -1,18 +1,13 @@
 import type { VectorStorePayload, VectorStoreResult } from '@flaxia/sdk';
-import { VectorStoreEngine } from '../vector-store/VectorStoreEngine';
-
-let engine: VectorStoreEngine | null = null;
+import type { VectorStoreEngine } from '../vector-store/VectorStoreEngine';
+import { getVectorEngine, releaseVectorEngine } from '../vector-store/sharedEngine';
 
 export const releaseCache = (): void => {
-  engine = null;
+  releaseVectorEngine();
 };
 
 async function getEngine(): Promise<VectorStoreEngine> {
-  if (!engine) {
-    engine = new VectorStoreEngine();
-    await engine.initialize();
-  }
-  return engine;
+  return getVectorEngine();
 }
 
 export async function handleVectorStore(payload: VectorStorePayload): Promise<VectorStoreResult> {

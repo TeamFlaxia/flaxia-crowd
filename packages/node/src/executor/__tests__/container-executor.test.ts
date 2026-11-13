@@ -4,9 +4,11 @@ import {
   MAX_CONTAINER_MEMORY_MB,
   MAX_CONTAINER_IMAGE_BYTES,
   MAX_CONTAINER_INPUT_BYTES,
+  MAX_CONTAINER_OUTPUT_CHARS,
   MIN_CONTAINER_MEMORY_MB,
   assertWasmMemoryWithinLimit,
   configureContainerImageOrigins,
+  createBoundedOutputCapture,
   getAllowedContainerImageOrigins,
   parseWasmMemoryLimits,
   resolveContainerFiles,
@@ -178,6 +180,24 @@ describe('container memoryLimitMb enforcement (#10-4)', () => {
 
   it('caps the container image download size', () => {
     expect(MAX_CONTAINER_IMAGE_BYTES).toBe(128 * 1024 * 1024);
+  });
+
+  it('caps captured stdout/stderr instead of accumulating unbounded output', () => {
+    const capture = createBoundedOutputCapture();
+    const chunk = new Uint8Array(1_000).fill(65);
+    for (let i = 0; i < 2_000; i++) {
+      capture.write(chunk);
+    }
+
+    const text = capture.text();
+    expect(text.length).toBe(MAX_CONTAINER_OUTPUT_CHARS + '\n[truncated]'.length);
+    expect(text.endsWith('[truncated]')).toBe(true);
+  });
+
+  it('does not mark short output as truncated', () => {
+    const capture = createBoundedOutputCapture();
+    capture.write(new TextEncoder().encode('hello'));
+    expect(capture.text()).toBe('hello');
   });
 
   it('keeps legacy inline files and mounts only verified file-source bytes', async () => {
