@@ -36,5 +36,16 @@ describe('main.worker (incapable device)', () => {
     expect(posts[1].id).toBe('t2');
     expect(posts[1].type).toBe('error');
     expect(String(posts[1].error)).not.toMatch(/incapable/i);
+
+    // `ai-preload` is the local Light Inference warm-up path: not a protocol
+    // WorkloadType, but it loads the same multi-hundred-MB translate models,
+    // so it must be gated by the same memory budget.
+    await selfObj.onmessage({
+      data: { id: 't3', workload: 'ai-preload', payload: { task: 'translation', model: 'Xenova/m2m100_418M' } },
+    });
+    expect(posts).toHaveLength(3);
+    expect(posts[2].id).toBe('t3');
+    expect(posts[2].type).toBe('error');
+    expect(String(posts[2].error)).toMatch(/incapable/i);
   });
 });
