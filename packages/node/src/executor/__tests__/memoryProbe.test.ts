@@ -4,15 +4,21 @@ import {
   hasEnoughWasmMemoryForHeavy,
   getWasmMemoryBytes,
   getWasmMemoryProbeRuns,
+  getAdvertisedWasmMemoryBytes,
+  hasDeviceMemoryHeadroom,
+  getDeviceMemoryGib,
   resetWasmMemoryProbeCache,
   HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
+  MIN_HEAVY_DEVICE_MEMORY_GIB,
 } from '../memoryProbe';
 
 const PAGE = 65536;
 const GB = 1024 ** 3;
+const COMMIT_BYTES = 64 * 1024 * 1024;
 
 describe('memoryProbe', () => {
   const original = (globalThis as any).WebAssembly;
+  const originalUint8Array = (globalThis as any).Uint8Array;
 
   beforeEach(() => {
     resetWasmMemoryProbeCache();
@@ -20,8 +26,14 @@ describe('memoryProbe', () => {
 
   afterEach(() => {
     (globalThis as any).WebAssembly = original;
+    (globalThis as any).Uint8Array = originalUint8Array;
+    delete (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
     resetWasmMemoryProbeCache();
   });
+
+  function setDeviceMemory(value: number | undefined): void {
+    Object.defineProperty(navigator, 'deviceMemory', { value, configurable: true });
+  }
 
   // Installs a WebAssembly.Memory mock that can only grow up to `capacityBytes`
   // of committed pages, then throws a RangeError (as a real engine does when
@@ -115,5 +127,78 @@ describe('memoryProbe', () => {
     installMock(3 * GB);
     expect(probeMaxWasmMemoryBytes(1 * GB)).toBe(1 * GB);
     expect(getWasmMemoryProbeRuns()).toBe(1);
+  });
+
+  it('writes only a bounded prefix of a multi-GiB probe instead of committing it all', () => {
+    // The probe must grow the full target (to prove the engine can reserve it)
+    // but only write a small prefix. Writing every page commits 2 GiB in the
+    // worker and 2 GiB on the main thread, which is what kills a 4 GB phone.
+    const touchedPages: number[] = [];
+    const maxPages = Math.floor((4 * GB) / PAGE);
+    let pages = 0;
+
+    class MockMemory {
+      readonly buffer: { grownBytes: number } = { grownBytes: 0 };
+      grow(extra: number): number {
+        if (pages + extra > maxPages) throw new RangeError('grow failed');
+        const prev = pages;
+        pages += extra;
+        this.buffer.grownBytes = pages * PAGE;
+        return prev;
+      }
+    }
+
+    class FakeUint8Array {
+      constructor(buffer: { grownBytes: number }) {
+        const target: Record<string | symbol, unknown> = { byteLength: buffer.grownBytes };
+        return new Proxy(target, {
+          set(t, prop, value) {
+            if (typeof prop === 'string' && /^\d+$/.test(prop)) touchedPages.push(Number(prop));
+            t[prop] = value;
+            return true;
+          },
+        }) as unknown as FakeUint8Array;
+      }
+    }
+
+    (globalThis as any).WebAssembly = { Memory: MockMemory as any };
+    (globalThis as any).Uint8Array = FakeUint8Array;
+
+    const bytes = probeMaxWasmMemoryBytes();
+    expect(bytes).toBe(HEAVY_WORKLOAD_WASM_MEMORY_BYTES);
+    expect(touchedPages.length).toBe(COMMIT_BYTES / PAGE);
+  });
+
+  it('excludes a 4 GB phone from heavy workloads even when the probe succeeds', () => {
+    installMock(4 * GB);
+    setDeviceMemory(4);
+
+    expect(probeMaxWasmMemoryBytes()).toBe(HEAVY_WORKLOAD_WASM_MEMORY_BYTES);
+    expect(getDeviceMemoryGib()).toBe(4);
+    expect(hasDeviceMemoryHeadroom()).toBe(false);
+    expect(hasEnoughWasmMemoryForHeavy()).toBe(false);
+    expect(getAdvertisedWasmMemoryBytes()).toBe(0);
+  });
+
+  it('allows an 8 GB device when the probe succeeds', () => {
+    installMock(4 * GB);
+    setDeviceMemory(8);
+
+    expect(hasDeviceMemoryHeadroom()).toBe(true);
+    expect(hasEnoughWasmMemoryForHeavy()).toBe(true);
+    expect(getAdvertisedWasmMemoryBytes()).toBe(HEAVY_WORKLOAD_WASM_MEMORY_BYTES);
+  });
+
+  it('falls back to the probe when navigator.deviceMemory is unavailable', () => {
+    installMock(4 * GB);
+    setDeviceMemory(undefined);
+
+    expect(getDeviceMemoryGib()).toBeUndefined();
+    expect(hasDeviceMemoryHeadroom()).toBe(true);
+    expect(hasEnoughWasmMemoryForHeavy()).toBe(true);
+  });
+
+  it('advertises the minimum heavy device memory threshold', () => {
+    expect(MIN_HEAVY_DEVICE_MEMORY_GIB).toBe(8);
   });
 });
