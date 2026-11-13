@@ -8,6 +8,7 @@ vi.mock('../../executor/memoryProbe', () => ({
   HEAVY_WORKLOAD_WASM_MEMORY_BYTES: 2 * 1024 ** 3,
   probeMaxWasmMemoryBytes: () => 0,
   hasEnoughWasmMemoryForHeavy: () => false,
+  getAdvertisedWasmMemoryBytes: () => 0,
 }));
 
 function mockFetchToken() {

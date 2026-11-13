@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  ALLOWED_IMAGE_OUTPUT_FORMATS,
   MAX_CANVAS_PIXELS,
   MAX_CANVAS_SIDE,
   MAX_IMAGE_PROCESS_INPUT_BYTES,
+  MAX_IMAGE_PROCESS_OUTPUT_BYTES,
   handleImageProcess,
   resolveCanvasSize,
 } from '../image-process';
@@ -29,8 +31,7 @@ if (typeof OffscreenCanvas === 'undefined') {
       };
     }
     convertToBlob(...args: any[]) {
-      mockConvertToBlob(...args);
-      return Promise.resolve(new Blob(['mock-data'], { type: 'image/jpeg' }));
+      return Promise.resolve(mockConvertToBlob(...args));
     }
   } as any;
 }
@@ -83,7 +84,8 @@ function encoded(bytes: Uint8Array): string {
 
 describe('Image Processing Workload', () => {
   beforeEach(() => {
-    mockConvertToBlob.mockClear();
+    mockConvertToBlob.mockReset();
+    mockConvertToBlob.mockReturnValue(new Blob(['mock-data'], { type: 'image/jpeg' }));
     mockCreateImageBitmap.mockClear();
     mockClose.mockClear();
   });
@@ -158,6 +160,40 @@ describe('Image Processing Workload', () => {
 
     expect(mockConvertToBlob).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'image/jpeg', quality: 0.3 })
+    );
+  });
+
+  it('rejects an output format outside the allowlist', async () => {
+    await expect(handleImageProcess({
+      operation: 'resize',
+      imageBase64: sampleBase64,
+      mimeType: 'image/png',
+      options: { outputFormat: 'gif' as any },
+    })).rejects.toThrow(/unsupported output format/);
+    expect(ALLOWED_IMAGE_OUTPUT_FORMATS).toEqual(['png', 'jpeg', 'webp']);
+  });
+
+  it('rejects an encoded output above the byte cap', async () => {
+    mockConvertToBlob.mockResolvedValueOnce(
+      new Blob([new Uint8Array(MAX_IMAGE_PROCESS_OUTPUT_BYTES + 1)]),
+    );
+    await expect(handleImageProcess({
+      operation: 'resize',
+      imageBase64: sampleBase64,
+      mimeType: 'image/png',
+      options: { outputFormat: 'png' },
+    })).rejects.toThrow(/exceeds the .* byte limit/);
+  });
+
+  it('clamps an out-of-range quality to the default instead of passing it through', async () => {
+    await handleImageProcess({
+      operation: 'compress',
+      imageBase64: sampleBase64,
+      mimeType: 'image/png',
+      options: { quality: 5, outputFormat: 'jpeg' },
+    });
+    expect(mockConvertToBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ quality: 0.8 }),
     );
   });
 });
