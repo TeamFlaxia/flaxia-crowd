@@ -7,7 +7,7 @@ export interface LightPreloaderTarget {
 }
 
 export interface LightPreloaderOptions {
-  /** Model id to keep warm. Defaults to the M2M100 translate model. */
+  /** Model id to keep warm. Defaults to the PLaMO translate model. */
   model?: string;
   task?: string;
   dtype?: string;
@@ -16,9 +16,9 @@ export interface LightPreloaderOptions {
   onPreloaded?: () => void;
   /**
    * Whether the device has enough memory headroom for a multi-hundred-MB
-   * model. Preloading two translate models on a 4 GB phone commits ~1 GiB of
-   * wasm memory that the page then cannot reclaim, so the preloader must stay
-   * idle on constrained devices. Omitted = always allowed.
+   * model. Preloading the translate model on a 4 GB phone commits hundreds of
+   * MB of wasm memory that the page then cannot reclaim, so the preloader must
+   * stay idle on constrained devices. Omitted = always allowed.
    */
   hasMemoryHeadroom?: () => boolean;
 }
@@ -31,15 +31,17 @@ export type PreloadFn = (request: { task: string; model: string; dtype: string }
  */
 export type IsPreloadedFn = (target: LightPreloaderTarget) => boolean;
 
-/** Defaults mirror `LIGHT_INFERENCE_TRANSLATE_*` in `ai-inference.ts`. */
-export const LIGHT_INFERENCE_TRANSLATE_MODEL = 'Xenova/m2m100_418M';
-export const LIGHT_INFERENCE_TRANSLATE_TASK = 'translation';
-export const LIGHT_INFERENCE_TRANSLATE_DTYPE = 'q4f16';
-
-/** Flaxia's default translate model, mirroring `LIGHT_INFERENCE_PLAMO_*`. */
+/** Flaxia's translate model, mirroring `LIGHT_INFERENCE_PLAMO_*`. */
 export const LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL = 'TeamFlaxia/plamo-3-translate-0.8b-onnx';
 export const LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK = 'text-generation';
 export const LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE = 'q4f16';
+
+/** @deprecated Use the PLaMO constants. Kept as aliases for host compatibility. */
+export const LIGHT_INFERENCE_TRANSLATE_MODEL = LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL;
+/** @deprecated Use the PLaMO constants. */
+export const LIGHT_INFERENCE_TRANSLATE_TASK = LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK;
+/** @deprecated Use the PLaMO constants. */
+export const LIGHT_INFERENCE_TRANSLATE_DTYPE = LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE;
 
 /**
  * Light Inference idle preloader.
@@ -65,9 +67,9 @@ export class LightPreloader {
   ) {
     this.targets = options.targets ?? [
       {
-        model: options.model ?? LIGHT_INFERENCE_TRANSLATE_MODEL,
-        task: options.task ?? LIGHT_INFERENCE_TRANSLATE_TASK,
-        dtype: options.dtype ?? LIGHT_INFERENCE_TRANSLATE_DTYPE,
+        model: options.model ?? LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL,
+        task: options.task ?? LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK,
+        dtype: options.dtype ?? LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE,
       },
     ];
   }

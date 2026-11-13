@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { listAiModels, resolveAiModel } from '../ai-model-registry';
 
 describe('default model registry', () => {
-  it('registers both Light Inference translate models', () => {
-    expect(listAiModels()).toContain('Xenova/m2m100_418M');
+  it('registers the PLaMO translate model', () => {
     expect(listAiModels()).toContain('TeamFlaxia/plamo-3-translate-0.8b-onnx');
+    expect(listAiModels()).not.toContain('Xenova/m2m100_418M');
   });
 
   it('pins PLaMo to the Flaxia model revision with a cap above the q4f16 weights', () => {

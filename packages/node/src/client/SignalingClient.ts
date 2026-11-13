@@ -21,9 +21,6 @@ import {
   LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE,
   LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL,
   LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK,
-  LIGHT_INFERENCE_TRANSLATE_DTYPE,
-  LIGHT_INFERENCE_TRANSLATE_MODEL,
-  LIGHT_INFERENCE_TRANSLATE_TASK,
 } from './light-preloader';
 import {
   HEAVY_WORKLOADS,
@@ -834,19 +831,15 @@ class SignalingClient {
       {
         targets: [
           {
-            model: LIGHT_INFERENCE_TRANSLATE_MODEL,
-            task: LIGHT_INFERENCE_TRANSLATE_TASK,
-            dtype: LIGHT_INFERENCE_TRANSLATE_DTYPE,
-          },
-          {
             model: LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL,
             task: LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK,
             dtype: LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE,
           },
         ],
         onPreloaded: () => { /* status chip refresh hook for host diagnostics */ },
-        // Never warm models on a memory-constrained device: two translate
-        // models commit ~1 GiB of wasm memory the page cannot reclaim.
+        // Never warm the translate model on a memory-constrained device:
+        // the PLaMO weights commit hundreds of MB of wasm memory the page
+        // cannot reclaim.
         hasMemoryHeadroom: () => hasEnoughWasmMemoryForHeavy(),
       },
       (target) => this.isAiModelPreloaded({ model: target.model, dtype: target.dtype }),

@@ -50,7 +50,7 @@ describe('main.worker (capable device)', () => {
     await import('../main.worker');
 
     await selfObj.onmessage({
-      data: { id: 'preload', workload: 'ai-preload', payload: { task: 'translation', model: 'Xenova/m2m100_418M' } },
+      data: { id: 'preload', workload: 'ai-preload', payload: { task: 'text-generation', model: 'TeamFlaxia/plamo-3-translate-0.8b-onnx' } },
     });
 
     const done = posts.find((p) => p.id === 'preload' && p.type === 'done');

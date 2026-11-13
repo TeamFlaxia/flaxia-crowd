@@ -41,7 +41,7 @@ describe('main.worker (incapable device)', () => {
     // WorkloadType, but it loads the same multi-hundred-MB translate models,
     // so it must be gated by the same memory budget.
     await selfObj.onmessage({
-      data: { id: 't3', workload: 'ai-preload', payload: { task: 'translation', model: 'Xenova/m2m100_418M' } },
+      data: { id: 't3', workload: 'ai-preload', payload: { task: 'text-generation', model: 'TeamFlaxia/plamo-3-translate-0.8b-onnx' } },
     });
     expect(posts).toHaveLength(3);
     expect(posts[2].id).toBe('t3');

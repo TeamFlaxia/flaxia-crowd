@@ -86,20 +86,21 @@ export const isAiModelPreloaded = (model: string | AiModelCacheIdentity): boolea
   );
 };
 
-/** Model preloaded by the Light Inference idle preloader (small enough for WASM). */
-export const LIGHT_INFERENCE_TRANSLATE_MODEL = 'Xenova/m2m100_418M';
-export const LIGHT_INFERENCE_TRANSLATE_TASK = 'translation';
-export const LIGHT_INFERENCE_TRANSLATE_DTYPE = 'q4f16';
-
 /**
- * Flaxia's default translate model. PLaMO 3 Translate 0.8B is a decoder-only
+ * Flaxia's translate model. PLaMO 3 Translate 0.8B is a decoder-only
  * text-generation model, so its Light Inference task is `text-generation`,
- * not `translation`. Kept warm alongside M2M100 so the default en↔ja pairs
- * serve instantly on device instead of answering ONDEVICE_UNAVAILABLE.
+ * not `translation`.
  */
 export const LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL = 'TeamFlaxia/plamo-3-translate-0.8b-onnx';
 export const LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK = 'text-generation';
 export const LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE = 'q4f16';
+
+/** @deprecated Use the PLaMO constants. Kept as aliases for host compatibility. */
+export const LIGHT_INFERENCE_TRANSLATE_MODEL = LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL;
+/** @deprecated Use the PLaMO constants. */
+export const LIGHT_INFERENCE_TRANSLATE_TASK = LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK;
+/** @deprecated Use the PLaMO constants. */
+export const LIGHT_INFERENCE_TRANSLATE_DTYPE = LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE;
 
 /**
  * Drops all cached model pipelines so the (potentially hundreds of MB of)
@@ -383,7 +384,7 @@ export const preloadAiModel = async (request: {
   const definition = resolveAiModel(model);
   const device = resolveAiDevice(request.device);
   const dtype = resolveAiDtype(request.dtype);
-  const resolvedDtype = dtype ?? LIGHT_INFERENCE_TRANSLATE_DTYPE;
+  const resolvedDtype = dtype ?? LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE;
   const requestedBackend = (device ?? 'wasm') as ModelCacheBackend;
   const cacheKey = modelPipelineKey({
     task,
