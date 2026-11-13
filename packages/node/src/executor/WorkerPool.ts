@@ -1,6 +1,7 @@
 import { isNodeModelCacheSnapshot } from "@flaxia/sdk";
 import type { NodeModelCacheSnapshot, WorkloadType } from "@flaxia/sdk";
 import { FlaxiaError } from "@flaxia/sdk";
+import { MAX_TASK_RESULT_BYTES, isResultWithinLimit } from "./resultLimits";
 
 const log = (...args: unknown[]) => console.log("[flaxia-node]", ...args);
 
@@ -46,6 +47,12 @@ export class WorkerPool {
   /** Control messages that arrived for a task that has not started yet. */
   private pendingControls: Array<{ taskId: string; message: unknown }> = [];
   private static readonly MAX_PENDING_CONTROLS = 64;
+  /**
+   * Bound on queued tasks. Each queued entry closes over its payload (up to a
+   * 16 MB base64 image), so an unbounded queue is a memory-amplification
+   * surface for redelivery storms.
+   */
+  private static readonly MAX_QUEUE_LENGTH = 16;
   private _lastCpuLoad = 0;
   private _hasCpuLoadSample = false;
   private _modelCacheSnapshot: NodeModelCacheSnapshot | null = null;
@@ -80,6 +87,14 @@ export class WorkerPool {
     return new Promise((resolve, reject) => {
       if (!this.worker) {
         reject(new Error('Worker not available'));
+        return;
+      }
+      if (this.active?.id === id || this.queue.some((task) => task.id === id)) {
+        reject(new Error(`WorkerPool already has task ${id} in flight`));
+        return;
+      }
+      if (this.queue.length >= WorkerPool.MAX_QUEUE_LENGTH) {
+        reject(new Error('WorkerPool queue is full; task rejected (retryable)'));
         return;
       }
       const job = () => this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, swarm);
@@ -159,6 +174,12 @@ export class WorkerPool {
       }
       if (type === 'done') {
         log(`task done id=${id} workload=${workload} durationMs=${Math.round(performance.now() - startedAt)}`);
+        if (!isResultWithinLimit(result)) {
+          settle(() => reject(new Error(
+            `task result exceeds the ${MAX_TASK_RESULT_BYTES} byte limit; refused on the main thread`,
+          )));
+          return;
+        }
         settle(() => resolve(result));
       } else if (type === 'error') {
         log(`task failed id=${id} workload=${workload} error=${error}`);
