@@ -14,6 +14,13 @@ export interface LightPreloaderOptions {
   /** Full list of models to keep warm; wins over `model`/`task`/`dtype`. */
   targets?: LightPreloaderTarget[];
   onPreloaded?: () => void;
+  /**
+   * Whether the device has enough memory headroom for a multi-hundred-MB
+   * model. Preloading two translate models on a 4 GB phone commits ~1 GiB of
+   * wasm memory that the page then cannot reclaim, so the preloader must stay
+   * idle on constrained devices. Omitted = always allowed.
+   */
+  hasMemoryHeadroom?: () => boolean;
 }
 
 export type PreloadFn = (request: { task: string; model: string; dtype: string }) => Promise<void>;
@@ -70,6 +77,7 @@ export class LightPreloader {
     if (this.stopped) return;
     if (this.getConsentState() !== 'granted') return;
     if (this.isUnconstrained() === false) return;
+    if (!this.hasMemoryHeadroom()) return;
     if (!this.targets.some((target) => !this.isPreloaded(target))) return;
     if (this.preloading) return;
 
@@ -116,10 +124,21 @@ export class LightPreloader {
     }
   }
 
+  private hasMemoryHeadroom(): boolean {
+    try {
+      return this.options.hasMemoryHeadroom?.() !== false;
+    } catch {
+      // A throwing memory probe must never crash the client; treat it as
+      // "no headroom" so the device stays safe.
+      return false;
+    }
+  }
+
   private async preloadNow(): Promise<void> {
     if (this.stopped || this.preloading) return;
     if (this.getConsentState() !== 'granted') return;
     if (this.isUnconstrained() === false) return;
+    if (!this.hasMemoryHeadroom()) return;
     this.preloading = true;
     try {
       for (const target of this.targets) {

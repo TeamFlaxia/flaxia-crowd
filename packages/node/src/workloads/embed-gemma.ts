@@ -24,7 +24,15 @@ interface LoadedModel {
 let loaded: LoadedModel | null = null;
 
 export const releaseCache = (): void => {
+  const current = loaded;
   loaded = null;
+  if (!current) return;
+  // Dispose the wasm/webgpu model and processor explicitly; dropping the
+  // references only leaves the buffers to GC and keeps the wasm heap pinned.
+  void (async () => {
+    try { current.model?.dispose?.(); } catch {}
+    try { current.processor?.dispose?.(); } catch {}
+  })();
 };
 
 let downloadGuardInstalled = false;

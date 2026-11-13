@@ -200,3 +200,59 @@ describe('decision worked-example flow (mocked model)', () => {
     }
   });
 });
+
+describe('decision releaseCache', () => {
+  it('disposes the loaded d1-omni model instead of pinning its wasm buffers', async () => {
+    const dispose = vi.fn();
+    const fakeModel = {
+      system_one: vi.fn().mockReturnValue({ answers: {} }),
+      dispose,
+    };
+    const { AutoModel } = (await import('@huggingface/transformers')) as unknown as {
+      AutoModel: { from_pretrained: ReturnType<typeof vi.fn> };
+    };
+    AutoModel.from_pretrained.mockResolvedValue(fakeModel);
+
+    const decisionModule = await import('../decision');
+    decisionModule.releaseCache();
+    AutoModel.from_pretrained.mockResolvedValue(fakeModel);
+    await decisionModule.handleDecision({
+      task: 'decision',
+      model: 'LiquidAI/d1-omni-600M',
+      decision: {
+        state: 'x',
+        questions: { trend: { type: 'choice', instructions: 'x', criteria: { a: 'A', b: 'B' } } },
+      },
+    });
+
+    decisionModule.releaseCache();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('vector-embed releaseCache', () => {
+  it('disposes the loaded model and processor instead of leaving them to GC', async () => {
+    const disposeModel = vi.fn();
+    const disposeProcessor = vi.fn();
+    const transformers = (await import('@huggingface/transformers')) as unknown as {
+      AutoModel: { from_pretrained: ReturnType<typeof vi.fn> };
+      AutoProcessor: { from_pretrained: ReturnType<typeof vi.fn> };
+    };
+    const model = Object.assign(
+      async () => ({ sentence_embedding: { data: new Float32Array(768) } }),
+      { dispose: disposeModel },
+    );
+    const processor = Object.assign(async () => ({}), { dispose: disposeProcessor });
+    transformers.AutoModel.from_pretrained.mockResolvedValue(model);
+    transformers.AutoProcessor.from_pretrained.mockResolvedValue(processor);
+
+    const { handleVectorEmbed, releaseCache } = await import('../vector-embed');
+    await handleVectorEmbed({ text: 'hello' });
+    expect(disposeModel).not.toHaveBeenCalled();
+
+    releaseCache();
+
+    expect(disposeModel).toHaveBeenCalledTimes(1);
+    expect(disposeProcessor).toHaveBeenCalledTimes(1);
+  });
+});
