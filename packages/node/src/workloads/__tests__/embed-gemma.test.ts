@@ -4,6 +4,7 @@ import { handleEmbedGemma, releaseCache } from '../embed-gemma';
 const state = vi.hoisted(() => ({
   modelCalls: [] as number[],
   loadOptions: [] as Array<Record<string, unknown>>,
+  disposeCalls: [] as string[],
 }));
 
 vi.mock('@huggingface/transformers', () => ({
@@ -11,12 +12,18 @@ vi.mock('@huggingface/transformers', () => ({
     from_pretrained: async () => ({ vision_config: {}, audio_config: {} }),
   },
   AutoProcessor: {
-    from_pretrained: async () => async (texts: string[]) => ({ texts }),
+    from_pretrained: async () => {
+      const processor = async (texts: string[]) => ({ texts });
+      (processor as unknown as { dispose: () => void }).dispose = () => {
+        state.disposeCalls.push('processor');
+      };
+      return processor;
+    },
   },
   AutoModel: {
     from_pretrained: async (_id: string, options: Record<string, unknown>) => {
       state.loadOptions.push(options);
-      return async (processed: { texts: string[] }) => {
+      const model = async (processed: { texts: string[] }) => {
         state.modelCalls.push(processed.texts.length);
         const data = new Float32Array(processed.texts.length * 768);
         for (let item = 0; item < processed.texts.length; item += 1) {
@@ -26,6 +33,10 @@ vi.mock('@huggingface/transformers', () => ({
         }
         return { sentence_embedding: { data } };
       };
+      (model as unknown as { dispose: () => void }).dispose = () => {
+        state.disposeCalls.push('model');
+      };
+      return model;
     },
   },
   env: { backends: { onnx: { wasm: {} } } },
@@ -39,6 +50,7 @@ describe('embed-gemma workload', () => {
   beforeEach(() => {
     state.modelCalls.length = 0;
     state.loadOptions.length = 0;
+    state.disposeCalls.length = 0;
     releaseCache();
   });
 
@@ -84,5 +96,15 @@ describe('embed-gemma workload', () => {
     await expect(handleEmbedGemma({ texts: [''] })).rejects.toThrow(/non-empty/);
     await expect(handleEmbedGemma({ texts: ['x'.repeat(4001)] })).rejects.toThrow(/4000/);
     await expect(handleEmbedGemma({ texts: ['ok'], dimensions: 100 as any })).rejects.toThrow(/dimensions/);
+  });
+
+  it('disposes the model and processor on releaseCache instead of pinning the wasm heap', async () => {
+    await handleEmbedGemma({ texts: ['hello'], dimensions: 768 });
+    expect(state.disposeCalls).toHaveLength(0);
+
+    releaseCache();
+
+    expect(state.disposeCalls).toContain('model');
+    expect(state.disposeCalls).toContain('processor');
   });
 });

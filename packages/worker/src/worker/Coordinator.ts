@@ -43,7 +43,7 @@ import {
   type NodeReservation,
   type PlacementCandidate,
 } from "./scheduler";
-import { orderPendingTasks, parseTenantSchedulingWeights, TASK_PRIORITY_DEFAULT } from "./queue-scheduler";
+import { orderPendingTasks, parseTenantSchedulingWeights, TASK_PRIORITY_DEFAULT, type PendingTaskSummary } from "./queue-scheduler";
 import { mergePeerLinkHistory, type PeerLinkHistory } from "./peer-link-history";
 import { planSparseSwarmMesh } from "./mesh-planner";
 import {
@@ -252,6 +252,15 @@ export class Coordinator extends DurableObject<Env> {
         return new Response("Rate limit exceeded", { status: 429 });
       }
       return this.handleSubscribe(request, url);
+    }
+
+    // Storage-backed rate limit for the unauthenticated `/nodes/register`
+    // route, which lives in the Worker but shares the coordinator's limiter.
+    if (url.pathname === "/register-rate") {
+      if (!(await this.checkIpRateLimit(request, "register"))) {
+        return new Response("Rate limit exceeded", { status: 429 });
+      }
+      return new Response("OK");
     }
 
     if (url.pathname === "/enqueue") {
@@ -1628,10 +1637,24 @@ export class Coordinator extends DurableObject<Env> {
       if (node) nodes.set(id, node);
     }
     let remainingIdle = idleNodes.filter(id => nodes.has(id));
-    const taskRecords = await Promise.all(pendingIds.map((id) => this.getTask(id)));
+    // Load only the fields needed to order the queue. Materializing every full
+    // task record (payloads up to MAX_PAYLOAD_SIZE) on each scheduling pass
+    // could exhaust the DO's memory when the queue is full; full records are
+    // loaded one at a time only for the tasks that are actually assigned.
+    const summaries: PendingTaskSummary[] = [];
+    for (const id of pendingIds) {
+      const task = await this.getTask(id);
+      if (task?.status === "pending") {
+        summaries.push({
+          id: task.id,
+          tenantId: task.tenantId,
+          createdAt: task.queuedAt ?? task.createdAt,
+          priority: task.priority,
+        });
+      }
+    }
     const queueOrder = orderPendingTasks(
-      taskRecords.filter((task): task is TaskRecord => task?.status === "pending")
-        .map((task) => ({ id: task.id, tenantId: task.tenantId, createdAt: task.queuedAt ?? task.createdAt, priority: task.priority })),
+      summaries,
       Date.now(),
       parseTenantSchedulingWeights(this.env.TENANT_SCHEDULING_WEIGHTS),
       await this.ctx.storage.get<string>("queue:tenantCursor") ?? null,

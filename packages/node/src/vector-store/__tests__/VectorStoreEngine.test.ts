@@ -138,4 +138,17 @@ describe('VectorStoreEngine gates before touching IndexedDB (#18)', () => {
       engine.store({ ...basePayload, vector: [0.1, 0.2, 0.3, 0.4] }),
     ).rejects.toThrow(/storage quota reached/);
   });
+
+  it('close() drops the in-memory graph and closes the IndexedDB connection', () => {
+    const engine = engineWithShard(4);
+    const db = { close: vi.fn() };
+    (engine as any).db = db;
+
+    engine.close();
+
+    expect(db.close).toHaveBeenCalledTimes(1);
+    expect((engine as any).hnsw).toBeNull();
+    expect((engine as any).db).toBeNull();
+    expect((engine as any).shardInfo).toBeNull();
+  });
 });

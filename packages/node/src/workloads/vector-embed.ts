@@ -28,6 +28,12 @@ const EMBEDDING_AUDIO_SAMPLE_RATE = 16_000;
 export const MAX_VECTOR_EMBED_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_VECTOR_EMBED_AUDIO_BYTES = 25 * 1024 * 1024;
 export const MAX_VECTOR_EMBED_VIDEO_BYTES = 50 * 1024 * 1024;
+/** Bound decoded pixels per image (RGBA ~4 bytes/pixel). */
+export const MAX_VECTOR_EMBED_IMAGE_PIXELS = 16 * 1024 * 1024;
+/** Bound decoded audio samples (30 s at 16 kHz). */
+export const MAX_VECTOR_EMBED_AUDIO_SAMPLES = 30 * EMBEDDING_AUDIO_SAMPLE_RATE;
+/** Maximum frames sampled from a video, so the decoder never materializes a long clip. */
+export const MAX_VECTOR_EMBED_VIDEO_FRAMES = 16;
 /** Media fetch timeout. */
 const VECTOR_EMBED_FETCH_TIMEOUT_MS = 30_000;
 /** Text length cap (mirrors ai-inference MAX_AI_INPUT_CHARS). */
@@ -42,8 +48,16 @@ let embeddingModel: LoadedEmbeddingModel | null = null;
 let embeddingLoadPromise: Promise<LoadedEmbeddingModel> | null = null;
 
 export const releaseCache = (): void => {
+  const loaded = embeddingModel;
   embeddingModel = null;
   embeddingLoadPromise = null;
+  if (!loaded) return;
+  // Dispose the wasm model/processor explicitly; dropping the references only
+  // leaves the buffers to GC and keeps the wasm heap pinned until then.
+  void (async () => {
+    try { loaded.model?.dispose?.(); } catch {}
+    try { loaded.processor?.dispose?.(); } catch {}
+  })();
 };
 
 let downloadGuardInstalled = false;
@@ -168,7 +182,19 @@ async function fetchImageForEmbed(url: string): Promise<unknown> {
   const blobUrl = URL.createObjectURL(blob);
   try {
     const { loadImage } = (await import('@huggingface/transformers')) as any;
-    return await loadImage(blobUrl);
+    const image = await loadImage(blobUrl);
+    if (
+      !Number.isSafeInteger(image.width) ||
+      !Number.isSafeInteger(image.height) ||
+      image.width < 1 ||
+      image.height < 1 ||
+      image.width * image.height > MAX_VECTOR_EMBED_IMAGE_PIXELS
+    ) {
+      throw new Error(
+        `vector-embed: image ${url} decodes to ${image.width}x${image.height}, above the ${MAX_VECTOR_EMBED_IMAGE_PIXELS} pixel limit`,
+      );
+    }
+    return image;
   } finally {
     URL.revokeObjectURL(blobUrl);
   }
@@ -186,7 +212,13 @@ async function fetchAudioForEmbed(url: string): Promise<unknown> {
   const blobUrl = URL.createObjectURL(blob);
   try {
     const { loadAudio } = (await import('@huggingface/transformers')) as any;
-    return await loadAudio(blobUrl, EMBEDDING_AUDIO_SAMPLE_RATE);
+    const samples = await loadAudio(blobUrl, EMBEDDING_AUDIO_SAMPLE_RATE);
+    if (!samples || samples.length > MAX_VECTOR_EMBED_AUDIO_SAMPLES) {
+      throw new Error(
+        `vector-embed: audio ${url} decodes to ${samples?.length ?? 0} samples, above the ${MAX_VECTOR_EMBED_AUDIO_SAMPLES} sample limit`,
+      );
+    }
+    return samples;
   } finally {
     URL.revokeObjectURL(blobUrl);
   }
@@ -204,7 +236,9 @@ async function fetchVideoForEmbed(url: string): Promise<unknown> {
   const blobUrl = URL.createObjectURL(blob);
   try {
     const { loadVideo } = (await import('@huggingface/transformers')) as any;
-    return await loadVideo(blobUrl, { fps: 1 });
+    // `num_frames` bounds the decode itself: a long video at 1 fps would
+    // otherwise materialize hundreds of full-resolution frames.
+    return await loadVideo(blobUrl, { fps: 1, num_frames: MAX_VECTOR_EMBED_VIDEO_FRAMES });
   } finally {
     URL.revokeObjectURL(blobUrl);
   }
