@@ -48,7 +48,12 @@ function installDownloadGuard(env: any, maxBytes: number): void {
   const inner = typeof env.fetch === 'function' ? env.fetch.bind(env) : globalThis.fetch.bind(globalThis);
   env.fetch = async (input: string | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input));
-    if (!/(^|\.)huggingface\.co$/.test(url.hostname) && !/(^|\.)hf\.co$/.test(url.hostname)) {
+    const allowed =
+      /(^|\.)huggingface\.co$/.test(url.hostname) ||
+      /(^|\.)hf\.co$/.test(url.hostname) ||
+      url.hostname === 'cdn.jsdelivr.net' ||
+      url.hostname === 'unpkg.com';
+    if (!allowed) {
       throw new Error(`embed-gemma: model download blocked from ${url.hostname}`);
     }
     const response = await inner(url, init);

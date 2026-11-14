@@ -199,7 +199,12 @@ function installModelFetchGuard(): void {
   const nativeFetch = globalThis.fetch.bind(globalThis);
   env.fetch = async (input: string | URL, init?: any): Promise<Response> => {
     const url = new URL(String(input));
-    if (!/(^|\.)huggingface\.co$/.test(url.hostname) && !/(^|\.)hf\.co$/.test(url.hostname)) {
+    const allowed =
+      /(^|\.)huggingface\.co$/.test(url.hostname) ||
+      /(^|\.)hf\.co$/.test(url.hostname) ||
+      url.hostname === 'cdn.jsdelivr.net' ||
+      url.hostname === 'unpkg.com';
+    if (!allowed) {
       throw new Error(`ai-inference: model download blocked from ${url.hostname}`);
     }
     const response = await nativeFetch(url, init);

@@ -42,6 +42,8 @@ const MAX_VECTOR_EMBED_TEXT_CHARS = 100_000;
 interface LoadedEmbeddingModel {
   processor: any;
   model: any;
+  device: 'webgpu' | 'wasm';
+  dtype: 'q8';
 }
 
 let embeddingModel: LoadedEmbeddingModel | null = null;
@@ -60,6 +62,10 @@ export const releaseCache = (): void => {
   })();
 };
 
+function hasWebGpu(): boolean {
+  return typeof navigator !== 'undefined' && Boolean((navigator as Navigator & { gpu?: unknown }).gpu);
+};
+
 let downloadGuardInstalled = false;
 
 /**
@@ -74,7 +80,12 @@ function installDownloadGuard(env: any, maxBytes: number): void {
   const inner = typeof env.fetch === 'function' ? env.fetch.bind(env) : globalThis.fetch.bind(globalThis);
   env.fetch = async (input: string | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input));
-    if (!/(^|\.)huggingface\.co$/.test(url.hostname) && !/(^|\.)hf\.co$/.test(url.hostname)) {
+    const allowed =
+      /(^|\.)huggingface\.co$/.test(url.hostname) ||
+      /(^|\.)hf\.co$/.test(url.hostname) ||
+      url.hostname === 'cdn.jsdelivr.net' ||
+      url.hostname === 'unpkg.com';
+    if (!allowed) {
       throw new Error(`vector-embed: model download blocked from ${url.hostname}`);
     }
     const response = await inner(url, init);
@@ -86,33 +97,52 @@ function installDownloadGuard(env: any, maxBytes: number): void {
   };
 }
 
-async function loadEmbeddingModel(): Promise<LoadedEmbeddingModel> {
+async function loadModel(device: 'webgpu' | 'wasm'): Promise<LoadedEmbeddingModel> {
+  const loadStartedAt = performance.now();
+  const dtype: 'q8' = 'q8';
+  const definition = resolveAiModel(EMBEDDING_MODEL);
+  console.log(
+    `[flaxia-node] vector-embed: loading model=${definition.repo} revision=${definition.revision} device=${device} dtype=${dtype}`,
+  );
+  const { AutoModel, AutoProcessor, env } = await import('@huggingface/transformers');
+  if (env?.backends?.onnx?.wasm) {
+    env.backends.onnx.wasm.numThreads = 1;
+    env.backends.onnx.wasm.proxy = false;
+  }
+  installDownloadGuard(env, definition.maxBytes);
+  const [processor, model] = await Promise.all([
+    AutoProcessor.from_pretrained(definition.repo, { revision: definition.revision }),
+    AutoModel.from_pretrained(definition.repo, {
+      device,
+      dtype,
+      revision: definition.revision,
+    } as any),
+  ]);
+  const loaded: LoadedEmbeddingModel = { processor, model, device, dtype };
+  console.log(
+    `[flaxia-node] vector-embed: model ready device=${device} dtype=${dtype} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
+  );
+  return loaded;
+}
+
+async function getModel(): Promise<LoadedEmbeddingModel> {
   if (embeddingModel) return embeddingModel;
   if (embeddingLoadPromise) return embeddingLoadPromise;
 
-  const loadStartedAt = performance.now();
   embeddingLoadPromise = (async () => {
-    const definition = resolveAiModel(EMBEDDING_MODEL);
-    console.log(`[flaxia-node] vector-embed: loading model=${definition.repo} revision=${definition.revision} device=wasm dtype=fp16`);
-    const { AutoModel, AutoProcessor, env } = await import('@huggingface/transformers');
-    if (env?.backends?.onnx?.wasm) {
-      env.backends.onnx.wasm.numThreads = 1;
-      env.backends.onnx.wasm.proxy = false;
+    if (hasWebGpu()) {
+      try {
+        const loaded = await loadModel('webgpu');
+        embeddingModel = loaded;
+        return loaded;
+      } catch (error) {
+        console.warn(
+          `[flaxia-node] vector-embed: WebGPU load failed, falling back to WASM q8: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
-    installDownloadGuard(env, definition.maxBytes);
-    const [processor, model] = await Promise.all([
-      AutoProcessor.from_pretrained(definition.repo, { revision: definition.revision }),
-      AutoModel.from_pretrained(definition.repo, {
-        device: 'wasm',
-        dtype: 'fp16',
-        revision: definition.revision,
-      } as any),
-    ]);
-    const loaded: LoadedEmbeddingModel = { processor, model };
+    const loaded = await loadModel('wasm');
     embeddingModel = loaded;
-    console.log(
-      `[flaxia-node] vector-embed: model ready loadMs=${Math.round(performance.now() - loadStartedAt)}`,
-    );
     return loaded;
   })().catch((err) => {
     embeddingLoadPromise = null;
@@ -247,7 +277,7 @@ async function fetchVideoForEmbed(url: string): Promise<unknown> {
 export async function handleVectorEmbed(payload: VectorEmbedPayload): Promise<VectorEmbedResult> {
   const startTime = performance.now();
   const { text, imageUrls, audioUrl, videoUrl } = assertMultimodalPayload(payload);
-  const loaded = await loadEmbeddingModel();
+  const loaded = await getModel();
 
   const modelStartedAt = performance.now();
   const multimodal = imageUrls.length > 0 || audioUrl || videoUrl;
