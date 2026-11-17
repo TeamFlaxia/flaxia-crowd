@@ -237,9 +237,9 @@ export const handleAiInference = async (
 ): Promise<AiInferenceResult> => {
   const { task, model, input, options = {} } = payload;
 
-  // d1 decision models (`trust_remote_code` AutoModel) bypass the generic
-  // pipeline path entirely: they emit calibrated probabilities via
-  // `system_one`, not generated text.
+  // d1 decision models bypass the generic pipeline path entirely: they score
+  // typed options through the split ONNX graphs in workloads/d1-omni and emit
+  // calibrated probabilities, not generated text.
   if (payload.decision) {
     const { handleDecision } = await import('./decision');
     return await handleDecision(payload);

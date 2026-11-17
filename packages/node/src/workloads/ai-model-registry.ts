@@ -45,17 +45,16 @@ const DEFAULT_AI_MODELS: Record<string, AiModelDefinition> = {
     revision: 'main',
     maxBytes: DEFAULT_AI_MODEL_MAX_BYTES,
   },
-  // Decision model (LFM2.5-Encoder-350M based, 587M params). Runs via the
-  // custom `decision` driver in workloads/decision.ts (trust_remote_code),
-  // not the generic transformers.js pipeline path. `trust_remote_code`
-  // executes Python code from the repo on the volunteer node, so the
-  // revision is pinned to an immutable commit (not mutable `main`) to
-  // prevent silent code changes from being loaded. Weights are ~2.4GB in
-  // fp32, so the per-file cap is raised to 3GiB (hard ceiling 4GiB).
+  // Decision model (LFM2.5-Encoder-350M based, 587M params). The public id is
+  // kept for wire compatibility, but the node loads the ONNX conversion from
+  // `onnx-community/d1-omni-600M-ONNX`: the upstream repo only ships PyTorch
+  // weights plus Python remote code, which Transformers.js cannot execute in
+  // the browser. Pinned to an immutable commit; the largest split graph is
+  // `decision_quantized` (q8, ~0.36 GiB), so 1 GiB per-file covers every file.
   'LiquidAI/d1-omni-600M': {
-    repo: 'LiquidAI/d1-omni-600M',
-    revision: '02b55d7076f15129e59ab3f94783f32c4b088674',
-    maxBytes: 3 * 1024 ** 3,
+    repo: 'onnx-community/d1-omni-600M-ONNX',
+    revision: '4ebc1b97bf1477485371c79d1cf8d5e4e8eebfa0',
+    maxBytes: 1024 * 1024 * 1024,
   },
   // Multimodal embedding (740M params, 768 dims, Apache-2.0). The ONNX variant
   // is loaded by workloads/vector-embed.ts (multimodal) and
