@@ -39,11 +39,30 @@ const VECTOR_EMBED_FETCH_TIMEOUT_MS = 30_000;
 /** Text length cap (mirrors ai-inference MAX_AI_INPUT_CHARS). */
 const MAX_VECTOR_EMBED_TEXT_CHARS = 100_000;
 
+type EmbeddingDevice = 'webgpu' | 'wasm';
+
+/**
+ * Quantization per execution provider.
+ *
+ * The `q8` files (`*_quantized.onnx`) keep the embedding tables in a
+ * block-quantized layout, which needs the `com.microsoft::GatherBlockQuantized`
+ * op (node `node_embedding_Quant` in the vision encoder). onnxruntime-web only
+ * implements that op for the WebGPU/WebNN EPs — the CPU EP inside the
+ * asyncify/JSEP wasm builds (the ones transformers.js loads by default) has no
+ * kernel for it, so a WASM session dies with ORT error code 9:
+ * "Could not find an implementation for GatherBlockQuantized(1) node".
+ * The fp16 files contain no block-quantized op and therefore run on every EP,
+ * so WASM uses fp16 while WebGPU keeps the smaller q8 weights.
+ */
+export function dtypeForEmbeddingDevice(device: EmbeddingDevice): 'q8' | 'fp16' {
+  return device === 'webgpu' ? 'q8' : 'fp16';
+}
+
 interface LoadedEmbeddingModel {
   processor: any;
   model: any;
-  device: 'webgpu' | 'wasm';
-  dtype: 'q8';
+  device: EmbeddingDevice;
+  dtype: 'q8' | 'fp16';
 }
 
 let embeddingModel: LoadedEmbeddingModel | null = null;
@@ -97,9 +116,9 @@ function installDownloadGuard(env: any, maxBytes: number): void {
   };
 }
 
-async function loadModel(device: 'webgpu' | 'wasm'): Promise<LoadedEmbeddingModel> {
+async function loadModel(device: EmbeddingDevice): Promise<LoadedEmbeddingModel> {
   const loadStartedAt = performance.now();
-  const dtype: 'q8' = 'q8';
+  const dtype = dtypeForEmbeddingDevice(device);
   const definition = resolveAiModel(EMBEDDING_MODEL);
   console.log(
     `[flaxia-node] vector-embed: loading model=${definition.repo} revision=${definition.revision} device=${device} dtype=${dtype}`,
@@ -137,7 +156,7 @@ async function getModel(): Promise<LoadedEmbeddingModel> {
         return loaded;
       } catch (error) {
         console.warn(
-          `[flaxia-node] vector-embed: WebGPU load failed, falling back to WASM q8: ${error instanceof Error ? error.message : String(error)}`,
+          `[flaxia-node] vector-embed: WebGPU load failed, falling back to WASM ${dtypeForEmbeddingDevice('wasm')}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
