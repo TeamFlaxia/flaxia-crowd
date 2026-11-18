@@ -46,6 +46,16 @@ export const FRIEDFLAXIA_D1 = {
   maxBytes: 450 * 1024 * 1024,
 } as const;
 
+export const FRIEDFLAXIA_D1_MMPROJ = {
+  modelId: 'LiquidAI/d1-omni-600M',
+  repo: 'LiquidAI/d1-omni-600M-GGUF',
+  revision: '8eb2d2a1c5404bba8a34a88bd8e159c242197d51',
+  file: 'mmproj-d1-omni-600M-Q8_0.gguf',
+  url: 'https://huggingface.co/LiquidAI/d1-omni-600M-GGUF/resolve/8eb2d2a1c5404bba8a34a88bd8e159c242197d51/mmproj-d1-omni-600M-Q8_0.gguf',
+  sha256: 'df887978550cdbb45f0f57d7b436a0f844689f9f561395a144ced500606c3a89',
+  maxBytes: 320 * 1024 * 1024,
+} as const;
+
 export const FRIEDFLAXIA_NUDENET = {
   modelId: 'deepghs/nudenet_onnx',
   repo: 'RemydreScarlet/nudenet-gguf',

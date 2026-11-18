@@ -1,6 +1,22 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/**
+ * d1-omni text model plus the SigLIP2/FastConformer mmproj.
+ */
+export class D1MultimodalModel {
+    free(): void;
+    [Symbol.dispose](): void;
+    bos_token_id(): number | undefined;
+    decision(token_ids: Uint32Array | number[], marker_positions: Uint32Array | number[], qtype: number, prefix: Float32Array | number[], prefix_rows: number): Float32Array;
+    encode(text: string, add_special_tokens: boolean): Uint32Array;
+    encode_audio(samples: Float32Array | number[]): Float32Array;
+    encode_image(patches: Float32Array | number[], grid_h: number, grid_w: number): Float32Array;
+    metadata_f32(key: string): number | undefined;
+    constructor(text_bytes: Uint8Array | number[], mmproj_bytes: Uint8Array | number[]);
+    token_id(token: string): number | undefined;
+}
+
 export class Model {
     free(): void;
     [Symbol.dispose](): void;
@@ -41,8 +57,17 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_d1multimodalmodel_free: (a: number, b: number) => void;
     readonly __wbg_model_free: (a: number, b: number) => void;
     readonly __wbg_multimodalmodel_free: (a: number, b: number) => void;
+    readonly d1multimodalmodel_bos_token_id: (a: number) => number;
+    readonly d1multimodalmodel_decision: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly d1multimodalmodel_encode: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly d1multimodalmodel_encode_audio: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly d1multimodalmodel_encode_image: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly d1multimodalmodel_metadata_f32: (a: number, b: number, c: number) => number;
+    readonly d1multimodalmodel_new: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly d1multimodalmodel_token_id: (a: number, b: number, c: number) => number;
     readonly model_architecture: (a: number) => [number, number];
     readonly model_bos_token_id: (a: number) => number;
     readonly model_decision: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
@@ -67,8 +92,8 @@ export interface InitOutput {
     readonly multimodalmodel_eos_token_id: (a: number) => number;
     readonly multimodalmodel_new: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;

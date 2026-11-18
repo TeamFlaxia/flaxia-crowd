@@ -1,5 +1,157 @@
 /* @ts-self-types="./friedflaxia_wasm.d.ts" */
 
+/**
+ * d1-omni text model plus the SigLIP2/FastConformer mmproj.
+ */
+export class D1MultimodalModel {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        D1MultimodalModelFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_d1multimodalmodel_free(ptr, 0);
+    }
+    /**
+     * @returns {number | undefined}
+     */
+    bos_token_id() {
+        const ret = wasm.d1multimodalmodel_bos_token_id(this.__wbg_ptr);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
+     * @param {Uint32Array | number[]} token_ids
+     * @param {Uint32Array | number[]} marker_positions
+     * @param {number} qtype
+     * @param {Float32Array | number[]} prefix
+     * @param {number} prefix_rows
+     * @returns {Float32Array}
+     */
+    decision(token_ids, marker_positions, qtype, prefix, prefix_rows) {
+        const val4 = +qtype;
+        const val5 = +prefix_rows;
+        let ptr0, len0, ptr1, len1, ptr2, len2;
+        try {
+            ptr0 = passArray32ToWasm0(token_ids, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passArray32ToWasm0(marker_positions, wasm.__wbindgen_malloc);
+            len1 = WASM_VECTOR_LEN;
+            ptr2 = passArrayF32ToWasm0(prefix, wasm.__wbindgen_malloc);
+            len2 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr2) { wasm.__wbindgen_free(ptr2, len2 * 4, 4); }
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 4, 4); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 4, 4); }
+            throw e;
+        }
+        const ret = wasm.d1multimodalmodel_decision(this.__wbg_ptr, ptr0, len0, ptr1, len1, val4, ptr2, len2, val5);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v6 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v6;
+    }
+    /**
+     * @param {string} text
+     * @param {boolean} add_special_tokens
+     * @returns {Uint32Array}
+     */
+    encode(text, add_special_tokens) {
+        const val2 = +add_special_tokens;
+        const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.d1multimodalmodel_encode(this.__wbg_ptr, ptr0, len0, val2);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v3 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v3;
+    }
+    /**
+     * @param {Float32Array | number[]} samples
+     * @returns {Float32Array}
+     */
+    encode_audio(samples) {
+        const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.d1multimodalmodel_encode_audio(this.__wbg_ptr, ptr0, len0);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v2;
+    }
+    /**
+     * @param {Float32Array | number[]} patches
+     * @param {number} grid_h
+     * @param {number} grid_w
+     * @returns {Float32Array}
+     */
+    encode_image(patches, grid_h, grid_w) {
+        const val2 = +grid_h;
+        const val3 = +grid_w;
+        const ptr0 = passArrayF32ToWasm0(patches, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.d1multimodalmodel_encode_image(this.__wbg_ptr, ptr0, len0, val2, val3);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v4 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v4;
+    }
+    /**
+     * @param {string} key
+     * @returns {number | undefined}
+     */
+    metadata_f32(key) {
+        const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.d1multimodalmodel_metadata_f32(this.__wbg_ptr, ptr0, len0);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
+     * @param {Uint8Array | number[]} text_bytes
+     * @param {Uint8Array | number[]} mmproj_bytes
+     */
+    constructor(text_bytes, mmproj_bytes) {
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passArray8ToWasm0(text_bytes, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passArray8ToWasm0(mmproj_bytes, wasm.__wbindgen_malloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+            throw e;
+        }
+        const ret = wasm.d1multimodalmodel_new(ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        D1MultimodalModelFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @param {string} token
+     * @returns {number | undefined}
+     */
+    token_id(token) {
+        const ptr0 = passStringToWasm0(token, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.d1multimodalmodel_token_id(this.__wbg_ptr, ptr0, len0);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+}
+if (Symbol.dispose) D1MultimodalModel.prototype[Symbol.dispose] = D1MultimodalModel.prototype.free;
+
 export class Model {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -409,6 +561,9 @@ function __wbg_get_imports() {
     };
 }
 
+const D1MultimodalModelFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_d1multimodalmodel_free(ptr, 1));
 const ModelFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_model_free(ptr, 1));

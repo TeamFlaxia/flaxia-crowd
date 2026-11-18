@@ -11,7 +11,9 @@ import {
   type D1PromptTokenizer,
 } from '../d1-omni/prompt';
 import { assertDecisionModelId, assertDecisionPayload } from '../decision';
-import { FRIEDFLAXIA_D1, downloadPinnedModel } from './model-registry';
+import { FRIEDFLAXIA_D1, FRIEDFLAXIA_D1_MMPROJ, downloadPinnedModel } from './model-registry';
+import { D1_YES_NO } from '../d1-omni/prompt';
+import { fetchD1Audio, fetchD1Image } from './d1-preprocess';
 
 /** Minimal surface of the vendored wasm d1-omni model. */
 export interface D1Model {
@@ -23,7 +25,27 @@ export interface D1Model {
   free(): void;
 }
 
+export interface D1MultimodalWasmModel {
+  encode(text: string, addSpecialTokens: boolean): Uint32Array;
+  token_id(token: string): number | undefined;
+  bos_token_id(): number | undefined;
+  metadata_f32(key: string): number | undefined;
+  encode_image(patches: Float32Array, grid: number, grid2: number): Float32Array;
+  encode_audio(samples: Float32Array): Float32Array;
+  decision(
+    tokenIds: Uint32Array,
+    markerPositions: Uint32Array,
+    qtype: number,
+    prefix: Float32Array,
+    prefixRows: number,
+  ): Float32Array;
+  free(): void;
+}
+
 const DEFAULT_MAX_LENGTH = 16_384;
+const DEFAULT_IMAGE_TEXT_LENGTH = 896;
+const DEFAULT_AUDIO_TEXT_LENGTH = 15_360;
+const MEDIA_WIDTH = 1024;
 
 let wasmReady: Promise<void> | null = null;
 let model: D1Model | null = null;
@@ -61,12 +83,41 @@ export async function loadFriedFlaxiaD1(): Promise<D1Model> {
 
 export const releaseCache = (): void => {
   const current = model;
+  const currentMultimodal = multimodal;
   model = null;
   modelLoad = null;
+  multimodal = null;
+  multimodalLoad = null;
   try {
     current?.free();
   } catch {}
+  try {
+    currentMultimodal?.free();
+  } catch {}
 };
+
+let multimodal: D1MultimodalWasmModel | null = null;
+let multimodalLoad: Promise<D1MultimodalWasmModel> | null = null;
+
+export async function loadFriedFlaxiaD1Multimodal(): Promise<D1MultimodalWasmModel> {
+  if (multimodal) return multimodal;
+  if (multimodalLoad) return multimodalLoad;
+  multimodalLoad = (async () => {
+    await initWasm();
+    const [textBytes, mmprojBytes] = await Promise.all([
+      downloadPinnedModel(FRIEDFLAXIA_D1),
+      downloadPinnedModel(FRIEDFLAXIA_D1_MMPROJ),
+    ]);
+    const { D1MultimodalModel } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
+    const loaded = new D1MultimodalModel(textBytes, mmprojBytes) as unknown as D1MultimodalWasmModel;
+    multimodal = loaded;
+    return loaded;
+  })().catch((error) => {
+    multimodalLoad = null;
+    throw error;
+  });
+  return multimodalLoad;
+}
 
 class WasmPromptTokenizer implements D1PromptTokenizer {
   constructor(private readonly d1: D1Model) {}
@@ -139,6 +190,87 @@ export async function decideWithModel(
   };
 }
 
+export async function decideWithMedia(
+  d1: D1MultimodalWasmModel,
+  payload: AiInferencePayload,
+): Promise<AiInferenceResult> {
+  const decision = assertDecisionPayload(payload);
+  const startedAt = performance.now();
+  const parts: Float32Array[] = [];
+  let prefixRows = 0;
+  let audioMode = false;
+  if (decision.audioUrl) {
+    audioMode = true;
+    const features = d1.encode_audio(await fetchD1Audio(decision.audioUrl));
+    if (features.length % MEDIA_WIDTH !== 0) {
+      throw new Error('friedflaxia: d1 audio encoder returned a malformed prefix');
+    }
+    prefixRows += features.length / MEDIA_WIDTH;
+    parts.push(features);
+  } else {
+    for (const url of decision.imageUrls) {
+      const { image, rows } = await fetchD1Image(url);
+      const features = d1.encode_image(image.patches, image.grid, image.grid);
+      prefixRows += rows;
+      parts.push(features);
+    }
+  }
+  if (prefixRows < 1) {
+    throw new Error('friedflaxia: d1 media prefix is empty');
+  }
+  const budget = audioMode ? DEFAULT_AUDIO_TEXT_LENGTH : DEFAULT_IMAGE_TEXT_LENGTH;
+  const maxLength = Math.min(budget, DEFAULT_MAX_LENGTH - prefixRows);
+  if (maxLength < 64) {
+    throw new Error(`decision: media occupy ${prefixRows} positions; send fewer images`);
+  }
+  const prefix = concatFloats(parts);
+  const tokenizer = new WasmPromptTokenizer(d1 as unknown as D1Model);
+  const tokens = resolvePromptTokens(tokenizer);
+  const state = decision.state ?? '';
+  const answers: NonNullable<AiInferenceResult['answers']> = {};
+  let inputTokens = 0;
+  for (const [name, question] of questionEntries(decision.questions)) {
+    const { ids, markers } = encodePrompt(
+      tokenizer,
+      tokens,
+      state,
+      question,
+      maxLength,
+      D1_YES_NO,
+      audioMode,
+    );
+    const logits = d1.decision(
+      Uint32Array.from(ids),
+      Uint32Array.from(markers),
+      questionTypes(question),
+      prefix,
+      prefixRows,
+    );
+    answers[name] = answerQuestion(question, logits, 1, false);
+    inputTokens += prefixRows + ids.length;
+  }
+  return {
+    output: {
+      answers,
+      usage: { input_tokens: inputTokens, output_tokens: 0 },
+    },
+    answers,
+    inputTokens,
+    durationMs: Math.round(performance.now() - startedAt),
+  };
+}
+
+function concatFloats(parts: Float32Array[]): Float32Array {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
 export async function handleFriedFlaxiaDecision(
   payload: AiInferencePayload,
 ): Promise<AiInferenceResult> {
@@ -147,6 +279,10 @@ export async function handleFriedFlaxiaDecision(
       'ondeviceOnly: the d1-omni FriedFlaxia model is not preloaded on this device',
       'preloading',
     );
+  }
+  if (payload.decision && (payload.decision.imageUrls?.length || payload.decision.audioUrl)) {
+    const d1 = await loadFriedFlaxiaD1Multimodal();
+    return decideWithMedia(d1, payload);
   }
   const d1 = await loadFriedFlaxiaD1();
   return decideWithModel(d1, payload);
