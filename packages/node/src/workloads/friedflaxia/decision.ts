@@ -276,13 +276,16 @@ function concatFloats(parts: Float32Array[]): Float32Array {
 export async function handleFriedFlaxiaDecision(
   payload: AiInferencePayload,
 ): Promise<AiInferenceResult> {
-  if (payload.options?.ondeviceOnly && !model) {
+  const media = Boolean(
+    payload.decision && (payload.decision.imageUrls?.length || payload.decision.audioUrl),
+  );
+  if (payload.options?.ondeviceOnly && (media ? !multimodal : !model)) {
     throw new OndeviceUnavailableError(
       'ondeviceOnly: the d1-omni FriedFlaxia model is not preloaded on this device',
       'preloading',
     );
   }
-  if (payload.decision && (payload.decision.imageUrls?.length || payload.decision.audioUrl)) {
+  if (media) {
     const d1 = await loadFriedFlaxiaD1Multimodal();
     return decideWithMedia(d1, payload);
   }
