@@ -13,6 +13,8 @@ export class Model {
     encode(text: string, add_special_tokens: boolean): Uint32Array;
     eos_token_id(): number | undefined;
     generate(prompt_ids: Uint32Array | number[], max_tokens: number): Uint32Array;
+    metadata_f32(key: string): number | undefined;
+    metadata_u32(key: string): number | undefined;
     constructor(bytes: Uint8Array | number[]);
     next_token(token_ids: Uint32Array | number[]): number;
     tensor_count(): number;
@@ -33,6 +35,8 @@ export interface InitOutput {
     readonly model_encode: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly model_eos_token_id: (a: number) => number;
     readonly model_generate: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly model_metadata_f32: (a: number, b: number, c: number) => number;
+    readonly model_metadata_u32: (a: number, b: number, c: number) => number;
     readonly model_new: (a: number, b: number) => [number, number, number];
     readonly model_next_token: (a: number, b: number, c: number) => [number, number, number];
     readonly model_tensor_count: (a: number) => number;

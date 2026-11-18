@@ -156,6 +156,26 @@ export class Model {
         return v3;
     }
     /**
+     * @param {string} key
+     * @returns {number | undefined}
+     */
+    metadata_f32(key) {
+        const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.model_metadata_f32(this.__wbg_ptr, ptr0, len0);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
+     * @param {string} key
+     * @returns {number | undefined}
+     */
+    metadata_u32(key) {
+        const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.model_metadata_u32(this.__wbg_ptr, ptr0, len0);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
      * @param {Uint8Array | number[]} bytes
      */
     constructor(bytes) {
