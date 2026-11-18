@@ -16,6 +16,16 @@ export const FRIEDFLAXIA_EMBED_GEMMA = {
   dimensions: 768,
 } as const;
 
+export const FRIEDFLAXIA_EMBED_GEMMA_MMPROJ = {
+  modelId: 'google/embeddinggemma-2',
+  repo: 'ggml-org/embeddinggemma-2-GGUF',
+  revision: '6ea3e3a309d12a4779cfda98b8c19800d2d5da71',
+  file: 'mmproj-embeddinggemma-2-Q8_0.gguf',
+  url: 'https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/6ea3e3a309d12a4779cfda98b8c19800d2d5da71/mmproj-embeddinggemma-2-Q8_0.gguf',
+  sha256: '0531309472a6bc6f4b146c3736eee7795ec9db1903c25490d3c937490cef6dd8',
+  maxBytes: 700 * 1024 * 1024,
+} as const;
+
 export const FRIEDFLAXIA_PLAMO = {
   modelId: 'TeamFlaxia/plamo-3-translate-0.8b-onnx',
   repo: 'pfnet/plamo-3-translate-0.8b-GGUF',

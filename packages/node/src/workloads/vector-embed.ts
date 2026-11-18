@@ -5,6 +5,10 @@ import {
   handleFriedFlaxiaEmbedGemma,
   releaseCache as releaseFriedFlaxiaCache,
 } from './friedflaxia/embed-gemma';
+import {
+  handleFriedFlaxiaVectorEmbed,
+  releaseCache as releaseFriedFlaxiaMultimodalCache,
+} from './friedflaxia/multimodal-embed';
 
 /**
  * Multimodal vector-embed workload (EmbeddingGemma 2).
@@ -74,6 +78,7 @@ let embeddingLoadPromise: Promise<LoadedEmbeddingModel> | null = null;
 
 export const releaseCache = (): void => {
   releaseFriedFlaxiaCache();
+  releaseFriedFlaxiaMultimodalCache();
   const loaded = embeddingModel;
   embeddingModel = null;
   embeddingLoadPromise = null;
@@ -303,16 +308,21 @@ export async function handleVectorEmbed(payload: VectorEmbedPayload): Promise<Ve
   const { text, imageUrls, audioUrl, videoUrl } = assertMultimodalPayload(payload);
 
   if (payload.engine === 'friedflaxia') {
-    if (imageUrls.length > 0 || audioUrl || videoUrl) {
-      throw new Error('vector-embed: friedflaxia currently supports text-only payloads');
-    }
-    const result = await handleFriedFlaxiaEmbedGemma({
-      texts: [text],
-      dimensions: EMBEDDING_DIMENSIONS,
+    const interleaved = buildInterleavedText(text || ' ', {
+      images: imageUrls.length,
+      videos: videoUrl ? 1 : 0,
+      audio: audioUrl ? 1 : 0,
     });
+    const effectiveEngine = imageUrls.length > 0 || audioUrl || videoUrl;
+    const result = effectiveEngine
+      ? await handleFriedFlaxiaVectorEmbed(payload, interleaved, imageUrls, audioUrl, videoUrl)
+      : await handleFriedFlaxiaEmbedGemma({
+          texts: [text],
+          dimensions: EMBEDDING_DIMENSIONS,
+        });
     const durationMs = Math.round(performance.now() - startTime);
     return {
-      vector: result.vectors[0],
+      vector: 'vector' in result ? result.vector : result.vectors[0],
       model: EMBEDDING_MODEL,
       dimensions: EMBEDDING_DIMENSIONS,
       durationMs,
