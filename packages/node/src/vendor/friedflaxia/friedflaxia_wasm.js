@@ -27,6 +27,13 @@ export class Model {
         }
     }
     /**
+     * @returns {number | undefined}
+     */
+    bos_token_id() {
+        const ret = wasm.model_bos_token_id(this.__wbg_ptr);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
      * @param {Uint32Array | number[]} token_ids
      * @param {Uint32Array | number[]} marker_positions
      * @param {number} qtype
@@ -125,6 +132,30 @@ export class Model {
         return v3;
     }
     /**
+     * @returns {number | undefined}
+     */
+    eos_token_id() {
+        const ret = wasm.model_eos_token_id(this.__wbg_ptr);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
+     * @param {Uint32Array | number[]} prompt_ids
+     * @param {number} max_tokens
+     * @returns {Uint32Array}
+     */
+    generate(prompt_ids, max_tokens) {
+        const val2 = +max_tokens;
+        const ptr0 = passArray32ToWasm0(prompt_ids, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.model_generate(this.__wbg_ptr, ptr0, len0, val2);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v3 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v3;
+    }
+    /**
      * @param {Uint8Array | number[]} bytes
      */
     constructor(bytes) {
@@ -157,6 +188,16 @@ export class Model {
     tensor_count() {
         const ret = wasm.model_tensor_count(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * @param {string} token
+     * @returns {number | undefined}
+     */
+    token_id(token) {
+        const ptr0 = passStringToWasm0(token, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.model_token_id(this.__wbg_ptr, ptr0, len0);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
     }
 }
 if (Symbol.dispose) Model.prototype[Symbol.dispose] = Model.prototype.free;
