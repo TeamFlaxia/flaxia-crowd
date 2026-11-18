@@ -57,13 +57,10 @@ describe('NudeNet FriedFlaxia selection', () => {
     expect(result).toBe(expected);
   });
 
-  it('rejects unsupported FriedFlaxia models and unknown engines', async () => {
+  it('rejects unsupported models', async () => {
     await expect(
-      handleNudeNet({ imageBase64: 'AA==', engine: 'friedflaxia', model: '640m' }),
+      handleNudeNet({ imageBase64: 'AA==', model: '640m' }),
     ).rejects.toThrow(/320n/);
-    await expect(
-      handleNudeNet({ imageBase64: 'AA==', engine: 'onnx' as any }),
-    ).rejects.toThrow(/engine/);
   });
 
   it('releases the FriedFlaxia cache', () => {

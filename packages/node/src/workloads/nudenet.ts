@@ -1,87 +1,20 @@
 import type { NudeNetDetection, NudeNetPayload, NudeNetResult } from '@flaxia/sdk';
-import * as ort from 'onnxruntime-web';
 import { fetchGuarded } from '../executor/egress-guard';
-import { NUDENET_LABELS } from './nudenet-labels';
 import {
   handleFriedFlaxiaNudeNet,
   releaseCache as releaseFriedFlaxiaNudeNet,
 } from './friedflaxia/nudenet';
 
 const IMG_SIZE = 320;
-const ORT_WASM_VERSION = '1.26.0';
-
-const MODEL_URL = 'https://huggingface.co/deepghs/nudenet_onnx/resolve/main/320n.onnx';
-const NMS_MODEL_URL = 'https://huggingface.co/deepghs/nudenet_onnx/resolve/main/nms-yolov8.onnx';
 
 /** Hard caps for the inputs this workload accepts. */
 export const MAX_NUDENET_IMAGE_BYTES = 16 * 1024 * 1024;
 /** Bound decoded pixels before allocating preprocessing canvases (RGBA ~4 bytes/pixel). */
 export const MAX_NUDENET_IMAGE_PIXELS = 32 * 1024 * 1024;
 export const MAX_NUDENET_IMAGE_SIDE = 8192;
-export const MAX_NUDENET_MODEL_BYTES = 512 * 1024 * 1024;
 /** Content types accepted for a customer-supplied image URL. */
 export const NUDENET_IMAGE_CONTENT_TYPES = ['image/*', 'application/octet-stream'] as const;
-/** Content types the fixed model registry is served with. */
-const MODEL_CONTENT_TYPES = ['application/octet-stream', 'application/wasm'] as const;
 
-/**
- * NudeNet class labels, in the exact order used by the 320n YOLOv8 export
- * (deepghs/nudenet_onnx / official NudeNet v3.4.2).
- */
-
-
-let ortConfigured = false;
-
-export function configureOrt(): void {
-  if (ortConfigured) return;
-  ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_WASM_VERSION}/dist/`;
-  // Force single-threaded wasm. Multithreaded mode (only active when the page
-  // is crossOriginIsolated, via SharedArrayBuffer) spawns one internal Web
-  // Worker per CPU core. On low-memory mobile devices this both OOMs / crashes
-  // the renderer and balloons the Web Worker count. Single-threaded is safe.
-  ort.env.wasm.numThreads = 1;
-  ort.env.wasm.proxy = false;
-  ortConfigured = true;
-}
-
-const sessionCache = new Map<string, Promise<ort.InferenceSession>>();
-
-function getSession(url: string): Promise<ort.InferenceSession> {
-  let cached = sessionCache.get(url);
-  if (!cached) {
-    cached = (async () => {
-      const modelName = url.split('/').pop() ?? url;
-      const startedAt = performance.now();
-      console.log(`[flaxia-node] nudenet: downloading model ${modelName}`);
-      // The model URLs are fixed constants, but they are still fetched through
-      // the egress guard so protocol/host/redirect/type/size stay enforced.
-      const res = await fetchGuarded({
-        url,
-        allowContentTypes: MODEL_CONTENT_TYPES,
-        maxBytes: MAX_NUDENET_MODEL_BYTES,
-      });
-      if (!res.ok) throw new Error(`Failed to download ONNX model: ${url} (HTTP ${res.status})`);
-      const buffer = res.bytes;
-      console.log(
-        `[flaxia-node] nudenet: model loaded ${modelName} bytes=${buffer.byteLength} downloadMs=${Math.round(performance.now() - startedAt)}`,
-      );
-      const sessionStartedAt = performance.now();
-      const session = await ort.InferenceSession.create(buffer, { executionProviders: ['wasm'] });
-      console.log(
-        `[flaxia-node] nudenet: session ready ${modelName} sessionMs=${Math.round(performance.now() - sessionStartedAt)}`,
-      );
-      return session;
-    })();
-    // A failed load must not poison the cache: the rejected promise captures
-    // the downloaded buffer (up to 512 MB) and would otherwise be returned
-    // forever, leaking both the buffer and the failed session.
-    cached.catch(() => {
-      if (sessionCache.get(url) === cached) sessionCache.delete(url);
-    });
-    sessionCache.set(url, cached);
-  }
-  return cached;
-}
 
 async function loadImage(payload: NudeNetPayload): Promise<ImageBitmap> {
   let blob: Blob;
@@ -185,55 +118,10 @@ function preprocess(bitmap: ImageBitmap): { data: Float32Array; ratio: number } 
   };
 }
 
-/**
- * Mirrors `_nn_postprocess`: for each NMS row, box is xywh normalized to the
- * 320px grid (scaled by ratio), score is the max across classes, label the argmax.
- */
-function decode(selected: ort.Tensor, ratio: number): NudeNetDetection[] {
-  const dims = selected.dims;
-  if (dims.length < 2) return [];
-  const numBoxes = dims[1];
-  const rowSize = dims.length >= 3 ? dims[2] : 22;
-  const data = selected.data as Float32Array;
-
-  const detections: NudeNetDetection[] = [];
-  for (let i = 0; i < numBoxes; i++) {
-    const offset = i * rowSize;
-    if (offset + 22 > data.length) continue;
-
-    let label = 0;
-    let score = -Infinity;
-    for (let c = 0; c < NUDENET_LABELS.length; c++) {
-      const s = data[offset + 4 + c];
-      if (s > score) {
-        score = s;
-        label = c;
-      }
-    }
-    if (score <= 0 || !isFinite(score)) continue;
-
-    const cx = data[offset] * ratio;
-    const cy = data[offset + 1] * ratio;
-    const w = data[offset + 2] * ratio;
-    const h = data[offset + 3] * ratio;
-
-    detections.push({
-      label: NUDENET_LABELS[label],
-      score,
-      box: [Math.round(cx - 0.5 * w), Math.round(cy - 0.5 * h), Math.round(cx + 0.5 * w), Math.round(cy + 0.5 * h)],
-    });
-  }
-  return detections;
-}
-
 export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetResult> => {
   const startedAt = Date.now();
-
-  if (payload.engine !== undefined && payload.engine !== 'transformers' && payload.engine !== 'friedflaxia') {
-    throw new Error('NudeNet engine must be transformers or friedflaxia');
-  }
-  if (payload.engine === 'friedflaxia' && payload.model !== undefined && payload.model !== '320n') {
-    throw new Error('NudeNet friedflaxia currently supports the 320n model only');
+  if (payload.model !== undefined && payload.model !== '320n') {
+    throw new Error('NudeNet supports the 320n model only');
   }
 
   const topK = payload.topK ?? 100;
@@ -252,32 +140,12 @@ export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetRes
   const bitmap = await loadImage(payload);
   try {
     const { data, ratio } = preprocess(bitmap);
-
-    if (payload.engine === 'friedflaxia') {
-      return await handleFriedFlaxiaNudeNet(data, ratio, {
-        ...payload,
-        topK,
-        iouThreshold,
-        scoreThreshold,
-      });
-    }
-
-    configureOrt();
-    const tensor = new ort.Tensor('float32', data, [1, 3, IMG_SIZE, IMG_SIZE]);
-    const startedAtMs = performance.now();
-    const [yoloSession, nmsSession] = await Promise.all([getSession(MODEL_URL), getSession(NMS_MODEL_URL)]);
-    console.log(`[flaxia-node] nudenet: sessions ready loadMs=${Math.round(performance.now() - startedAtMs)}`);
-
-    const runStartedAt = performance.now();
-    const { output0 } = await yoloSession.run({ images: tensor });
-    const config = new ort.Tensor('float32', new Float32Array([topK, iouThreshold, scoreThreshold]), [3]);
-    const { selected } = await nmsSession.run({ detection: output0, config });
-
-    const detections = decode(selected as ort.Tensor, ratio);
-    console.log(
-      `[flaxia-node] nudenet: done detections=${detections.length} inferMs=${Math.round(performance.now() - runStartedAt)} totalMs=${Math.round(performance.now() - startedAt)}`,
-    );
-    return { detections, durationMs: Date.now() - startedAt };
+    return await handleFriedFlaxiaNudeNet(data, ratio, {
+      ...payload,
+      topK,
+      iouThreshold,
+      scoreThreshold,
+    });
   } finally {
     bitmap.close();
   }
@@ -285,15 +153,4 @@ export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetRes
 
 export function releaseCache(): void {
   releaseFriedFlaxiaNudeNet();
-  // `ort.InferenceSession.release()` frees the wasm heap and model buffers;
-  // clearing the map alone only drops our reference and leaves the session
-  // alive until GC. A rejected entry is dropped by the catch installed in
-  // getSession, so it is safe to release here too.
-  for (const session of sessionCache.values()) {
-    void session.then(
-      (loaded) => loaded.release?.(),
-      () => {},
-    );
-  }
-  sessionCache.clear();
 }

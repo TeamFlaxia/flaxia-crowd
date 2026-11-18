@@ -1,33 +1,12 @@
-import type {
-  AiInferencePayload,
-  AiInferenceResult,
-  DecisionAnswer,
-  DecisionQuestions,
-} from '@flaxia/sdk';
-import { resolveAiModel } from './ai-model-registry';
-import { DECISION_ONNX_REPO, releaseCache as releaseEngine, runDecisionModel } from './d1-omni/engine';
-import { fetchGuarded } from '../executor/egress-guard';
+import type { DecisionQuestions } from '@flaxia/sdk';
 
-/**
- * Decision-model driver for d1-omni-600M (LiquidAI).
- *
- * The model runs through the split ONNX graphs from
- * `onnx-community/d1-omni-600M-ONNX` (see d1-omni/engine.ts): d1-omni is not a
- * Transformers.js pipeline task, so this module owns payload validation, media
- * fetching/decoding and the question batching, while the engine owns sessions,
- * prompt encoding and answer extraction.
- *
- * Multimodal fetch contract mirrors NSFW `imageUrl`: media travels as
- * publicly fetchable URLs, the node fetches bytes itself via the egress
- * guard (https only, public hosts only, bounded size/timeout).
- */
+/** Decision-model validation shared by the FriedFlaxia d1 backend. */
 
-const DECISION_MODEL_ID = 'LiquidAI/d1-omni-600M';
+export const DECISION_MODEL_ID = 'LiquidAI/d1-omni-600M';
 
 /** d1-omni audio contract: 16kHz mono, one clip per call. */
 export const DECISION_AUDIO_SAMPLE_RATE = 16_000;
 export const DECISION_AUDIO_MAX_SECONDS = 30;
-const DECISION_AUDIO_MAX_SAMPLES = DECISION_AUDIO_SAMPLE_RATE * DECISION_AUDIO_MAX_SECONDS;
 
 /** Question/option bounds: keep one forward pass cheap and answers stable. */
 export const DECISION_MAX_QUESTIONS = 8;
@@ -40,12 +19,6 @@ export const MAX_DECISION_IMAGE_BYTES = 8 * 1024 * 1024;
 export const MAX_DECISION_AUDIO_BYTES = 8 * 1024 * 1024;
 /** Bound decoded pixels per image before the model sees it (RGBA ~4 bytes/pixel). */
 export const MAX_DECISION_IMAGE_PIXELS = 16 * 1024 * 1024;
-/** Media fetch timeout. */
-const DECISION_FETCH_TIMEOUT_MS = 20_000;
-
-export const releaseCache = (): void => {
-  releaseEngine();
-};
 
 export function assertDecisionPayload(payload: {
   decision?: {
@@ -135,97 +108,4 @@ export function assertDecisionModelId(modelId: string): void {
   if (modelId !== DECISION_MODEL_ID) {
     throw new Error(`decision: model must be ${DECISION_MODEL_ID} for decision payloads, got ${JSON.stringify(modelId)}`);
   }
-}
-
-function assertDecisionModel(modelId: string): void {
-  assertDecisionModelId(modelId);
-  // Fail-closed gate: the registry must still point at the ONNX conversion.
-  const definition = resolveAiModel(modelId);
-  if (definition.repo !== DECISION_ONNX_REPO) {
-    throw new Error(`decision: model ${modelId} is not a ${DECISION_ONNX_REPO} entry`);
-  }
-}
-
-async function fetchImages(imageUrls: string[]): Promise<unknown[] | undefined> {
-  if (imageUrls.length === 0) return undefined;
-  const { loadImage } = (await import('@huggingface/transformers')) as any;
-  const images: unknown[] = [];
-  for (const url of imageUrls) {
-    const res = await fetchGuarded({
-      url,
-      allowContentTypes: ['image/*', 'application/octet-stream'],
-      maxBytes: MAX_DECISION_IMAGE_BYTES,
-      timeoutMs: DECISION_FETCH_TIMEOUT_MS,
-    });
-    if (!res.ok) throw new Error(`decision: image fetch failed (${res.status}): ${url}`);
-    const blob = new Blob([res.bytes], { type: res.contentType || 'application/octet-stream' });
-    const blobUrl = URL.createObjectURL(blob);
-    try {
-      const image = await loadImage(blobUrl);
-      if (
-        !Number.isSafeInteger(image.width) ||
-        !Number.isSafeInteger(image.height) ||
-        image.width < 1 ||
-        image.height < 1 ||
-        image.width * image.height > MAX_DECISION_IMAGE_PIXELS
-      ) {
-        throw new Error(
-          `decision: image ${url} decodes to ${image.width}x${image.height}, above the ${MAX_DECISION_IMAGE_PIXELS} pixel limit`,
-        );
-      }
-      images.push(image);
-    } finally {
-      URL.revokeObjectURL(blobUrl);
-    }
-  }
-  return images;
-}
-
-async function fetchAudio(audioUrl?: string): Promise<Float32Array | Int16Array | undefined> {
-  if (!audioUrl) return undefined;
-  const res = await fetchGuarded({
-    url: audioUrl,
-    allowContentTypes: ['audio/*', 'application/octet-stream'],
-    maxBytes: MAX_DECISION_AUDIO_BYTES,
-    timeoutMs: DECISION_FETCH_TIMEOUT_MS,
-  });
-  if (!res.ok) throw new Error(`decision: audio fetch failed (${res.status}): ${audioUrl}`);
-  // Decode to mono 16kHz in the browser: prefer OfflineAudioContext,
-  // fall back to a raw PCM passthrough when the container lacks it.
-  const arrayBuffer = res.bytes.buffer.slice(res.bytes.byteOffset, res.bytes.byteOffset + res.bytes.byteLength) as ArrayBuffer;
-  const AudioContextImpl =
-    (globalThis as any).OfflineAudioContext ?? (globalThis as any).webkitOfflineAudioContext;
-  if (AudioContextImpl) {
-    const ctx = new AudioContextImpl(1, DECISION_AUDIO_SAMPLE_RATE * DECISION_AUDIO_MAX_SECONDS, DECISION_AUDIO_SAMPLE_RATE);
-    const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
-    const ch0 = decoded.getChannelData(0);
-    const n = Math.min(ch0.length, DECISION_AUDIO_MAX_SAMPLES);
-    const samples = new Float32Array(n);
-    samples.set(ch0.subarray(0, n));
-    return samples;
-  }
-  // No WebAudio in this runtime: interpret the payload as raw 16-bit PCM
-  // and truncate to the model's 30s window.
-  const view = new Int16Array(arrayBuffer.slice(0));
-  return view.subarray(0, Math.min(view.length, DECISION_AUDIO_MAX_SAMPLES));
-}
-
-export async function handleDecision(payload: AiInferencePayload): Promise<AiInferenceResult> {
-  const startTime = performance.now();
-  assertDecisionModel(payload.model);
-  const { state, questions, imageUrls, audioUrl } = assertDecisionPayload(payload);
-  const [images, audio] = await Promise.all([fetchImages(imageUrls), fetchAudio(audioUrl)]);
-
-  const { answers, inputTokens } = await runDecisionModel({ state, questions, images, audio });
-  const durationMs = Math.round(performance.now() - startTime);
-
-  const result = {
-    answers: answers as Record<string, DecisionAnswer>,
-    usage: { input_tokens: inputTokens, output_tokens: 0 },
-  };
-
-  console.log(
-    `[flaxia-node] decision: done questions=${Object.keys(answers).length} durationMs=${durationMs}`,
-  );
-  return { output: result, answers, inputTokens, durationMs };
 }

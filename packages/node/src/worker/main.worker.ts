@@ -170,12 +170,6 @@ async function runWorkload(
       const ai = await import('../workloads/ai-inference');
       cacheReleasers.set(workload, ai.releaseCache);
       cacheSnapshotters.set(workload, ai.getModelCacheSnapshot);
-      // Only pay for the decision module when the payload actually needs it:
-      // `trust_remote_code` d1-omni pulls in a separate model registry.
-      if (payload && typeof payload === 'object' && (payload as { decision?: unknown }).decision) {
-        const decision = await import('../workloads/decision');
-        cacheReleasers.set('decision', decision.releaseCache);
-      }
       return await ai.handleAiInference(payload as any, emitToken);
     }
     case 'ai-preload' as WorkloadType: {

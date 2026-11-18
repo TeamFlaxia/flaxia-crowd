@@ -70,7 +70,7 @@ describe('vector-embed engine selection', () => {
     expect(handleFriedFlaxiaEmbedGemma).not.toHaveBeenCalled();
   });
 
-  it('releases both engine caches', () => {
+  it('releases both FriedFlaxia caches', () => {
     releaseCache();
     expect(releaseFriedFlaxiaCache).toHaveBeenCalledTimes(1);
     expect(releaseFriedFlaxiaMultimodalCache).toHaveBeenCalledTimes(1);
