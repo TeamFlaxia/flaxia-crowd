@@ -149,7 +149,10 @@ async function decodeAudio(bytes: Uint8Array, contentType: string): Promise<Floa
     throw new Error('vector-embed: cannot decode audio without WebAudio');
   }
   const view = new Int16Array(arrayBuffer);
-  return new Float32Array(view.subarray(0, Math.min(view.length, MAX_AUDIO_SAMPLES)));
+  const length = Math.min(view.length, MAX_AUDIO_SAMPLES);
+  const samples = new Float32Array(length);
+  for (let index = 0; index < length; index += 1) samples[index] = view[index] / 32768;
+  return samples;
 }
 
 async function fetchAudioFeatures(
