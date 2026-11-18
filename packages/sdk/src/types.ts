@@ -110,9 +110,8 @@ export interface AiInferencePayload {
   /** pipeline() and generation options */
   options?: AiInferenceOptions;
   /**
-   * Execution engine. `transformers` is the existing Transformers.js/ONNX
-   * path. `friedflaxia` currently supports `text-generation` only and keeps
-   * the model id / output shape compatible with the PLaMO translation path.
+   * Retained for wire compatibility. Inference always runs through the
+   * FriedFlaxia GGUF runtime; the value is ignored.
    */
   engine?: 'transformers' | 'friedflaxia';
   /**
@@ -404,8 +403,8 @@ export interface VectorEmbedPayload {
   audioUrl?: string;
   videoUrl?: string;
   /**
-   * Execution engine. `transformers` is the existing Transformers.js/ONNX
-   * path; `friedflaxia` currently supports text-only payloads.
+   * Retained for wire compatibility. Inference always runs through the
+   * FriedFlaxia GGUF runtime (text, image and audio); the value is ignored.
    */
   engine?: 'transformers' | 'friedflaxia';
 }
@@ -467,7 +466,7 @@ export interface NudeNetPayload {
   imageBase64?: string;
   /** MIME type of the image, required when using imageBase64. */
   mimeType?: string;
-  /** ONNX model to use. '320n' (default) or '640m'. */
+  /** NudeNet model. Only `320n` is supported. */
   model?: '320n' | '640m';
   /** NMS score threshold (default: 0.25). */
   scoreThreshold?: number;
@@ -476,8 +475,8 @@ export interface NudeNetPayload {
   /** Maximum number of detections to keep (default: 100). */
   topK?: number;
   /**
-   * Execution engine. `transformers` is the existing ONNX Runtime path;
-   * `friedflaxia` currently supports the 320n model.
+   * Retained for wire compatibility. Inference always runs through the
+   * FriedFlaxia YOLOv8n runtime; the value is ignored.
    */
   engine?: 'transformers' | 'friedflaxia';
 }
@@ -577,8 +576,8 @@ export interface EmbedGemmaPayload {
   /** Matryoshka truncation target. Defaults to the native 768. */
   dimensions?: EmbedGemmaDimensions;
   /**
-   * Execution engine. `transformers` is the existing Transformers.js/ONNX
-   * path; `friedflaxia` uses the pinned GGUF runner. Defaults to `transformers`.
+   * Retained for wire compatibility. Inference always runs through the pinned
+   * FriedFlaxia GGUF runner; the value is ignored.
    */
   engine?: 'transformers' | 'friedflaxia';
 }
