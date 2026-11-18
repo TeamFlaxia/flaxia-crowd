@@ -26,6 +26,16 @@ export const FRIEDFLAXIA_PLAMO = {
   maxBytes: 560 * 1024 * 1024,
 } as const;
 
+export const FRIEDFLAXIA_D1 = {
+  modelId: 'LiquidAI/d1-omni-600M',
+  repo: 'LiquidAI/d1-omni-600M-GGUF',
+  revision: '8eb2d2a1c5404bba8a34a88bd8e159c242197d51',
+  file: 'd1-omni-600M-Q8_0.gguf',
+  url: 'https://huggingface.co/LiquidAI/d1-omni-600M-GGUF/resolve/8eb2d2a1c5404bba8a34a88bd8e159c242197d51/d1-omni-600M-Q8_0.gguf',
+  sha256: 'cd94463f4cac9c700ec6750df8df005bb6846de410e159d1f5e985e1171693d3',
+  maxBytes: 450 * 1024 * 1024,
+} as const;
+
 export interface PinnedModel {
   url: string;
   sha256: string;

@@ -47,7 +47,7 @@ export const releaseCache = (): void => {
   releaseEngine();
 };
 
-function assertDecisionPayload(payload: {
+export function assertDecisionPayload(payload: {
   decision?: {
     state?: string | null;
     questions?: DecisionQuestions;
@@ -131,10 +131,14 @@ function assertDecisionPayload(payload: {
   return { state, questions, imageUrls: [...imageUrls], audioUrl };
 }
 
-function assertDecisionModel(modelId: string): void {
+export function assertDecisionModelId(modelId: string): void {
   if (modelId !== DECISION_MODEL_ID) {
     throw new Error(`decision: model must be ${DECISION_MODEL_ID} for decision payloads, got ${JSON.stringify(modelId)}`);
   }
+}
+
+function assertDecisionModel(modelId: string): void {
+  assertDecisionModelId(modelId);
   // Fail-closed gate: the registry must still point at the ONNX conversion.
   const definition = resolveAiModel(modelId);
   if (definition.repo !== DECISION_ONNX_REPO) {

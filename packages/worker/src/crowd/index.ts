@@ -212,8 +212,8 @@ export function validateAiInferencePayload(payload: unknown): string | null {
   if (body.engine !== undefined && body.engine !== 'transformers' && body.engine !== 'friedflaxia') {
     return 'payload.engine must be transformers or friedflaxia'
   }
-  if (body.engine === 'friedflaxia' && body.task !== 'text-generation') {
-    return 'payload.engine=friedflaxia currently supports text-generation only'
+  if (body.engine === 'friedflaxia' && body.task !== 'text-generation' && body.task !== 'decision') {
+    return 'payload.engine=friedflaxia currently supports text-generation or decision only'
   }
   const options = body.options
   if (options !== undefined && options !== null) {

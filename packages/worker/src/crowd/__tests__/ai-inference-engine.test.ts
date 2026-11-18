@@ -13,6 +13,20 @@ describe('validateAiInferencePayload engine option', () => {
     ).toBeNull();
   });
 
+  it('accepts friedflaxia decision', () => {
+    expect(
+      validateAiInferencePayload({
+        task: 'decision',
+        model: 'LiquidAI/d1-omni-600M',
+        engine: 'friedflaxia',
+        decision: {
+          state: 'hello',
+          questions: { q: { type: 'noul', instructions: 'is it true?' } },
+        },
+      }),
+    ).toBeNull();
+  });
+
   it('rejects friedflaxia for other tasks and unknown engines', () => {
     expect(
       validateAiInferencePayload({
@@ -21,7 +35,7 @@ describe('validateAiInferencePayload engine option', () => {
         input: 'hello',
         engine: 'friedflaxia',
       }),
-    ).toMatch(/text-generation only/);
+    ).toMatch(/text-generation or decision/);
     expect(
       validateAiInferencePayload({
         task: 'text-generation',

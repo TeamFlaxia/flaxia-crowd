@@ -14,6 +14,10 @@ import {
 } from './ai-model-registry';
 import { ModelPipelineCache, modelPipelineKey } from './model-pipeline-cache';
 import {
+  handleFriedFlaxiaDecision,
+  releaseCache as releaseFriedFlaxiaDecision,
+} from './friedflaxia/decision';
+import {
   handleFriedFlaxiaTextGeneration,
   releaseCache as releaseFriedFlaxiaTextGeneration,
 } from './friedflaxia/text-generation';
@@ -112,6 +116,7 @@ export const LIGHT_INFERENCE_TRANSLATE_DTYPE = LIGHT_INFERENCE_PLAMO_TRANSLATE_D
  * worker after an idle period so a node does not pin every model it ever saw.
  */
 export const releaseCache = (): void => {
+  releaseFriedFlaxiaDecision();
   releaseFriedFlaxiaTextGeneration();
   void pipelineCache.releaseAll();
 };
@@ -243,6 +248,7 @@ export const handleAiInference = async (
   const { task, model, input, options = {} } = payload;
 
   if (payload.engine === 'friedflaxia') {
+    if (payload.decision) return await handleFriedFlaxiaDecision(payload);
     return await handleFriedFlaxiaTextGeneration(payload);
   }
 
