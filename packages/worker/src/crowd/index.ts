@@ -209,6 +209,12 @@ export function validateAiInferencePayload(payload: unknown): string | null {
     return 'payload must be an object'
   }
   const body = payload as Record<string, unknown>
+  if (body.engine !== undefined && body.engine !== 'transformers' && body.engine !== 'friedflaxia') {
+    return 'payload.engine must be transformers or friedflaxia'
+  }
+  if (body.engine === 'friedflaxia' && body.task !== 'text-generation') {
+    return 'payload.engine=friedflaxia currently supports text-generation only'
+  }
   const options = body.options
   if (options !== undefined && options !== null) {
     if (typeof options !== 'object' || Array.isArray(options)) {

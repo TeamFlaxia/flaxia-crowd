@@ -110,6 +110,12 @@ export interface AiInferencePayload {
   /** pipeline() and generation options */
   options?: AiInferenceOptions;
   /**
+   * Execution engine. `transformers` is the existing Transformers.js/ONNX
+   * path. `friedflaxia` currently supports `text-generation` only and keeps
+   * the model id / output shape compatible with the PLaMO translation path.
+   */
+  engine?: 'transformers' | 'friedflaxia';
+  /**
    * Decision-model mode (d1-omni-600M). When set, the node runs
    * `system_one(state, questions, images?, audio?)` and returns calibrated
    * probabilities instead of generated text.
