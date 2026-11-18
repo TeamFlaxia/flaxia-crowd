@@ -16,14 +16,33 @@ export const FRIEDFLAXIA_EMBED_GEMMA = {
   dimensions: 768,
 } as const;
 
+export const FRIEDFLAXIA_PLAMO = {
+  modelId: 'TeamFlaxia/plamo-3-translate-0.8b-onnx',
+  repo: 'pfnet/plamo-3-translate-0.8b-GGUF',
+  revision: '1cf96ae02133958a20074bfdfab76517bb737d00',
+  file: 'plamo-3-translate-0.8b-Q4_0.gguf',
+  url: 'https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF/resolve/1cf96ae02133958a20074bfdfab76517bb737d00/plamo-3-translate-0.8b-Q4_0.gguf',
+  sha256: '33deed2822f799de4d15bb03bea1ac40efa7d663d9239ee54cc7f65f5ab92917',
+  maxBytes: 560 * 1024 * 1024,
+} as const;
+
+export interface PinnedModel {
+  url: string;
+  sha256: string;
+  maxBytes: number;
+}
+
 /** Reject an oversized response before materializing its body. */
-export function assertModelSize(byteLength: number): void {
+export function assertModelSize(
+  byteLength: number,
+  maxBytes: number = FRIEDFLAXIA_EMBED_GEMMA.maxBytes,
+): void {
   if (!Number.isFinite(byteLength) || byteLength <= 0) {
     throw new Error('friedflaxia: model response has no usable Content-Length');
   }
-  if (byteLength > FRIEDFLAXIA_EMBED_GEMMA.maxBytes) {
+  if (byteLength > maxBytes) {
     throw new Error(
-      `friedflaxia: model file too large (${byteLength} > ${FRIEDFLAXIA_EMBED_GEMMA.maxBytes})`,
+      `friedflaxia: model file too large (${byteLength} > ${maxBytes})`,
     );
   }
 }
@@ -32,4 +51,27 @@ export function assertModelSize(byteLength: number): void {
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes.buffer as ArrayBuffer);
   return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+/** Download and verify one pinned model file. */
+export async function downloadPinnedModel(model: PinnedModel): Promise<Uint8Array> {
+  const response = await fetch(model.url, {
+    credentials: 'omit',
+    redirect: 'follow',
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok) {
+    throw new Error(`friedflaxia: model download failed (HTTP ${response.status})`);
+  }
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > 0) {
+    assertModelSize(declared, model.maxBytes);
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  assertModelSize(bytes.byteLength, model.maxBytes);
+  const digest = await sha256Hex(bytes);
+  if (digest !== model.sha256) {
+    throw new Error(`friedflaxia: model SHA-256 mismatch (${digest})`);
+  }
+  return bytes;
 }

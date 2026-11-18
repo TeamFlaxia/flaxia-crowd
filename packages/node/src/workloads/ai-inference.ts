@@ -13,6 +13,10 @@ import {
   type AiModelDefinition,
 } from './ai-model-registry';
 import { ModelPipelineCache, modelPipelineKey } from './model-pipeline-cache';
+import {
+  handleFriedFlaxiaTextGeneration,
+  releaseCache as releaseFriedFlaxiaTextGeneration,
+} from './friedflaxia/text-generation';
 
 // Re-exported so hosts configure the allowlist through the workload module they
 // already import (`@flaxia/node`'s public entry point stays untouched).
@@ -108,6 +112,7 @@ export const LIGHT_INFERENCE_TRANSLATE_DTYPE = LIGHT_INFERENCE_PLAMO_TRANSLATE_D
  * worker after an idle period so a node does not pin every model it ever saw.
  */
 export const releaseCache = (): void => {
+  releaseFriedFlaxiaTextGeneration();
   void pipelineCache.releaseAll();
 };
 
@@ -236,6 +241,10 @@ export const handleAiInference = async (
   onToken?: (token: string) => void | Promise<void>,
 ): Promise<AiInferenceResult> => {
   const { task, model, input, options = {} } = payload;
+
+  if (payload.engine === 'friedflaxia') {
+    return await handleFriedFlaxiaTextGeneration(payload);
+  }
 
   // d1 decision models bypass the generic pipeline path entirely: they score
   // typed options through the split ONNX graphs in workloads/d1-omni and emit
