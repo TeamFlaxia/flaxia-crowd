@@ -328,6 +328,15 @@ export function validateVectorEmbedPayload(payload: unknown): string | null {
   }
   const hasText = typeof text === 'string' && text.length > 0
   const hasMedia = (Array.isArray(imageUrls) && imageUrls.length > 0) || audioUrl !== undefined || videoUrl !== undefined
+  if (body.engine !== undefined && body.engine !== 'transformers' && body.engine !== 'friedflaxia') {
+    return 'payload.engine must be transformers or friedflaxia'
+  }
+  if (body.engine === 'friedflaxia' && !hasText) {
+    return 'payload.text is required for the friedflaxia engine'
+  }
+  if (body.engine === 'friedflaxia' && hasMedia) {
+    return 'payload.engine=friedflaxia supports text-only vector-embed'
+  }
   if (!hasText && !hasMedia) {
     return 'payload needs at least text or one media URL'
   }

@@ -397,6 +397,11 @@ export interface VectorEmbedPayload {
   imageUrls?: string[];
   audioUrl?: string;
   videoUrl?: string;
+  /**
+   * Execution engine. `transformers` is the existing Transformers.js/ONNX
+   * path; `friedflaxia` currently supports text-only payloads.
+   */
+  engine?: 'transformers' | 'friedflaxia';
 }
 
 export interface VectorEmbedResult {
