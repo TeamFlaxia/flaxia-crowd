@@ -6,10 +6,15 @@ import {
   MAX_EMBED_GEMMA_TEXTS,
   MAX_EMBED_GEMMA_TOTAL_CHARS,
   isEmbedGemmaDimensions,
+  type EmbedGemmaDimensions,
   type EmbedGemmaPayload,
   type EmbedGemmaResult,
 } from '@flaxia/sdk';
 import { resolveAiModel } from './ai-model-registry';
+import {
+  handleFriedFlaxiaEmbedGemma,
+  releaseCache as releaseFriedFlaxiaCache,
+} from './friedflaxia/embed-gemma';
 
 /** Texts passed to one model call. Four ~500-token texts stay under the 2,700-token WebGPU dispatch limit. */
 export const EMBED_GEMMA_BATCH_SIZE = 4;
@@ -24,6 +29,7 @@ interface LoadedModel {
 let loaded: LoadedModel | null = null;
 
 export const releaseCache = (): void => {
+  releaseFriedFlaxiaCache();
   const current = loaded;
   loaded = null;
   if (!current) return;
@@ -69,7 +75,7 @@ function fail(message: string): never {
   throw new Error(`embed-gemma: ${message}`);
 }
 
-function validatePayload(payload: EmbedGemmaPayload): { texts: string[]; dimensions: number } {
+function validatePayload(payload: EmbedGemmaPayload): { texts: string[]; dimensions: EmbedGemmaDimensions } {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) fail('payload must be an object');
   const texts = payload.texts;
   if (!Array.isArray(texts) || texts.length === 0 || texts.length > MAX_EMBED_GEMMA_TEXTS) {
@@ -183,6 +189,9 @@ export async function handleEmbedGemma(
 ): Promise<EmbedGemmaResult> {
   const startedAt = performance.now();
   const { texts, dimensions } = validatePayload(payload);
+  if (payload.engine === 'friedflaxia') {
+    return handleFriedFlaxiaEmbedGemma({ texts, dimensions }, onBatch);
+  }
   const model = await getModel();
 
   const vectors: number[][] = [];
