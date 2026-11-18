@@ -1,8 +1,7 @@
 import type { EmbedGemmaDimensions, EmbedGemmaResult } from '@flaxia/sdk';
 import {
   FRIEDFLAXIA_EMBED_GEMMA,
-  assertModelSize,
-  sha256Hex,
+  downloadPinnedModel,
 } from './model-registry';
 
 /** Minimal surface of the vendored wasm `Model` used by this workload. */
@@ -29,31 +28,12 @@ async function initWasm(): Promise<void> {
   return wasmReady;
 }
 
-async function downloadModel(): Promise<Uint8Array> {
-  const response = await fetch(FRIEDFLAXIA_EMBED_GEMMA.url, {
-    credentials: 'omit',
-    redirect: 'follow',
-  });
-  if (!response.ok) {
-    throw new Error(`friedflaxia: model download failed (HTTP ${response.status})`);
-  }
-  const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > 0) assertModelSize(declared);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  assertModelSize(bytes.byteLength);
-  const digest = await sha256Hex(bytes);
-  if (digest !== FRIEDFLAXIA_EMBED_GEMMA.sha256) {
-    throw new Error(`friedflaxia: model SHA-256 mismatch (${digest})`);
-  }
-  return bytes;
-}
-
 export async function loadFriedFlaxiaModel(): Promise<FriedFlaxiaModel> {
   if (model) return model;
   if (modelLoad) return modelLoad;
   modelLoad = (async () => {
     await initWasm();
-    const bytes = await downloadModel();
+    const bytes = await downloadPinnedModel(FRIEDFLAXIA_EMBED_GEMMA);
     const { Model } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
     const loaded = new Model(bytes) as unknown as FriedFlaxiaModel;
     model = loaded;

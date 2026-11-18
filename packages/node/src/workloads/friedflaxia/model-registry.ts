@@ -36,6 +36,16 @@ export const FRIEDFLAXIA_D1 = {
   maxBytes: 450 * 1024 * 1024,
 } as const;
 
+export const FRIEDFLAXIA_NUDENET = {
+  modelId: 'deepghs/nudenet_onnx',
+  repo: 'RemydreScarlet/nudenet-gguf',
+  revision: 'd83e0d9f17edfb32fe3c62874620ccc21f12c68d',
+  file: 'nudenet-320n-f32.gguf',
+  url: 'https://huggingface.co/RemydreScarlet/nudenet-gguf/resolve/d83e0d9f17edfb32fe3c62874620ccc21f12c68d/nudenet-320n-f32.gguf',
+  sha256: 'f1d215fde4a0c17d763e39901f176632f898630939e0be7e1420fcadb553ca60',
+  maxBytes: 16 * 1024 * 1024,
+} as const;
+
 export interface PinnedModel {
   url: string;
   sha256: string;
