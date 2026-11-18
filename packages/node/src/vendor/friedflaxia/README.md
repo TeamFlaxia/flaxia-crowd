@@ -3,7 +3,7 @@
 Generated from the `friedflaxia-wasm` crate.
 
 - Source: `https://github.com/TeamFlaxia/friedflaxia`
-- Commit: `74e2603`
+- Commit: `4d9d4a4`
 - wasm-bindgen: `0.2.130`
 - Target: `web` (`./scripts/build-wasm.sh web <out>`)
 - License: MIT

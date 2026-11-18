@@ -6,6 +6,7 @@ export const model_architecture: (a: number) => [number, number];
 export const model_bos_token_id: (a: number) => number;
 export const model_decision: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const model_decode: (a: number, b: number, c: number) => [number, number, number, number];
+export const model_detect: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const model_embed: (a: number, b: number, c: number) => [number, number, number, number];
 export const model_embed_text: (a: number, b: number, c: number) => [number, number, number, number];
 export const model_encode: (a: number, b: number, c: number, d: number) => [number, number, number, number];

@@ -85,6 +85,27 @@ export class Model {
         }
     }
     /**
+     * @param {Float32Array | number[]} input
+     * @param {number} top_k
+     * @param {number} iou_threshold
+     * @param {number} score_threshold
+     * @returns {Float32Array}
+     */
+    detect(input, top_k, iou_threshold, score_threshold) {
+        const val2 = +top_k;
+        const val3 = +iou_threshold;
+        const val4 = +score_threshold;
+        const ptr0 = passArrayF32ToWasm0(input, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.model_detect(this.__wbg_ptr, ptr0, len0, val2, val3, val4);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v5 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v5;
+    }
+    /**
      * @param {Uint32Array | number[]} token_ids
      * @returns {Float32Array}
      */
@@ -300,6 +321,13 @@ function passArray32ToWasm0(arg, malloc) {
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }

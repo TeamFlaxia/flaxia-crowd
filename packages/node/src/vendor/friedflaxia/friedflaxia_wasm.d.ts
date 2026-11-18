@@ -8,6 +8,7 @@ export class Model {
     bos_token_id(): number | undefined;
     decision(token_ids: Uint32Array | number[], marker_positions: Uint32Array | number[], qtype: number): Float32Array;
     decode(ids: Uint32Array | number[]): string;
+    detect(input: Float32Array | number[], top_k: number, iou_threshold: number, score_threshold: number): Float32Array;
     embed(token_ids: Uint32Array | number[]): Float32Array;
     embed_text(text: string): Float32Array;
     encode(text: string, add_special_tokens: boolean): Uint32Array;
@@ -30,6 +31,7 @@ export interface InitOutput {
     readonly model_bos_token_id: (a: number) => number;
     readonly model_decision: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly model_decode: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly model_detect: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly model_embed: (a: number, b: number, c: number) => [number, number, number, number];
     readonly model_embed_text: (a: number, b: number, c: number) => [number, number, number, number];
     readonly model_encode: (a: number, b: number, c: number, d: number) => [number, number, number, number];
