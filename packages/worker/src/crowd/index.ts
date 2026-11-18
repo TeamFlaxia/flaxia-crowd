@@ -455,6 +455,9 @@ export function validateEmbedGemmaPayload(payload: unknown): string | null {
   if (body.dimensions !== undefined && !isEmbedGemmaDimensions(body.dimensions)) {
     return 'payload.dimensions must be one of 768, 512, 256, 128'
   }
+  if (body.engine !== undefined && body.engine !== 'transformers' && body.engine !== 'friedflaxia') {
+    return 'payload.engine must be transformers or friedflaxia'
+  }
   return null
 }
 

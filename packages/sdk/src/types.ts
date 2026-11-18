@@ -560,6 +560,11 @@ export interface EmbedGemmaPayload {
   texts: string[];
   /** Matryoshka truncation target. Defaults to the native 768. */
   dimensions?: EmbedGemmaDimensions;
+  /**
+   * Execution engine. `transformers` is the existing Transformers.js/ONNX
+   * path; `friedflaxia` uses the pinned GGUF runner. Defaults to `transformers`.
+   */
+  engine?: 'transformers' | 'friedflaxia';
 }
 
 export interface EmbedGemmaResult {

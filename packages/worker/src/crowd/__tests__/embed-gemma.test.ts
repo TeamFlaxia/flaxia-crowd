@@ -26,4 +26,10 @@ describe('validateEmbedGemmaPayload', () => {
     expect(validateEmbedGemmaPayload({ texts: ['x'], dimensions: 100 })).toMatch(/dimensions/);
     expect(validateEmbedGemmaPayload({ texts: ['x'], dimensions: 512 })).toBeNull();
   });
+
+  it('validates the optional engine', () => {
+    expect(validateEmbedGemmaPayload({ texts: ['x'], engine: 'friedflaxia' })).toBeNull();
+    expect(validateEmbedGemmaPayload({ texts: ['x'], engine: 'transformers' })).toBeNull();
+    expect(validateEmbedGemmaPayload({ texts: ['x'], engine: 'onnx' })).toMatch(/engine/);
+  });
 });
