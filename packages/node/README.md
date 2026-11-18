@@ -173,6 +173,12 @@ initFlaxiaNode({ /* ... */ })
 | `cc-extract` | `workloads/cc-extract.ts` | Common Crawl WARC の range 取得 + parse5 本文抽出 |
 | `embed-gemma` | `workloads/embed-gemma.ts` | EmbeddingGemma 2（text-only, MRL） |
 
+`embed-gemma` は payload の `engine: 'friedflaxia'` で Rust/GGUF/wasm の
+FriedFlaxia バックエンドを選択できます。既定は従来の Transformers.js/ONNX で、
+FriedFlaxia は固定 URL（immutable revision）と SHA-256 を pin した
+`embeddinggemma-2-Q8_0.gguf` だけを読みます。wasm 成果物は
+`src/vendor/friedflaxia/README.md` の provenance に従って更新してください。
+
 ## フロー
 
 1. `initFlaxiaNode()` が呼ばれると、HMAC署名付きの同意レコードを確認
