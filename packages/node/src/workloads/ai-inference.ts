@@ -1,21 +1,22 @@
-import { env, pipeline, TextStreamer } from '@huggingface/transformers';
-import type { AiInferencePayload, AiInferenceResult, AiInferenceOptions } from '@flaxia/sdk';
-import type { ModelCacheBackend, NodeModelCacheSnapshot } from '@flaxia/sdk';
-import { OndeviceUnavailableError } from '@flaxia/sdk';
+import type {
+  AiInferencePayload,
+  AiInferenceResult,
+  ModelCacheBackend,
+  NodeModelCacheSnapshot,
+} from '@flaxia/sdk';
 import {
-  MAX_AI_MODEL_MAX_BYTES,
-  applyGenerationOptions,
-  assertAiInput,
-  resolveAiDevice,
-  resolveAiDtype,
-  resolveAiModel,
-  resolveOndeviceOnly,
-  type AiModelDefinition,
-} from './ai-model-registry';
-import { ModelPipelineCache, modelPipelineKey } from './model-pipeline-cache';
+  handleFriedFlaxiaDecision,
+  isD1Loaded,
+  loadFriedFlaxiaD1,
+  releaseCache as releaseFriedFlaxiaDecision,
+} from './friedflaxia/decision';
+import {
+  handleFriedFlaxiaTextGeneration,
+  isPlamoLoaded,
+  loadFriedFlaxiaPlamo,
+  releaseCache as releaseFriedFlaxiaTextGeneration,
+} from './friedflaxia/text-generation';
 
-// Re-exported so hosts configure the allowlist through the workload module they
-// already import (`@flaxia/node`'s public entry point stays untouched).
 export {
   DEFAULT_AI_MODEL_MAX_BYTES,
   MAX_AI_MODEL_MAX_BYTES,
@@ -29,29 +30,13 @@ export {
   type AiModelDefinition,
 } from './ai-model-registry';
 
-const SUPPORTED_TASKS = [
-  'text-classification', 'token-classification', 'question-answering', 'fill-mask',
-  'summarization', 'translation', 'text2text-generation', 'text-generation',
-  'zero-shot-classification', 'audio-classification', 'zero-shot-audio-classification',
-  'automatic-speech-recognition', 'text-to-audio', 'image-to-text', 'image-classification',
-  'image-segmentation', 'background-removal', 'zero-shot-image-classification',
-  'object-detection', 'zero-shot-object-detection', 'document-question-answering',
-  'image-to-image', 'depth-estimation', 'feature-extraction', 'image-feature-extraction'
-] as const;
+/** Supported tasks after moving inference to FriedFlaxia. */
+export const SUPPORTED_TASKS = ['text-generation', 'decision'] as const;
 
-const pipelineCache = new ModelPipelineCache<any>();
-/** Bound work queued behind TextStreamer's synchronous callback API. */
+/** Bound work queued behind the token sink. */
 export const MAX_PENDING_TOKEN_CALLBACKS = 64;
 export const MAX_PENDING_TOKEN_CHARS = 256 * 1024;
 
-/**
- * Full cache identity for one model pipeline. The executable cache is keyed
- * by `task/modelId/revision/dtype/backend` (see `modelPipelineKey`), but the
- * snapshot descriptor carries everything except `task`. Checking only
- * `modelId` lets an `ondeviceOnly` task for the same repo with a different
- * `dtype`/`backend` pass the gate and then miss the cache, downloading a
- * second quantization despite the caller forbidding downloads.
- */
 export interface AiModelCacheIdentity {
   modelId: string;
   revision: string;
@@ -60,357 +45,63 @@ export interface AiModelCacheIdentity {
 }
 
 /**
- * Whether the model already has a `ready` executable pipeline in memory.
- * Guards `ondeviceOnly` tasks: they must fail before any download when the
- * model is absent, so the check runs on the snapshot (no side effects).
- *
- * The string form is a model-only check kept for the public
- * `FlaxiaNodeController.isAiModelPreloaded(model)` API and the Light
- * Preloader dedup. The `ondeviceOnly` gate must use the identity form so a
- * different `dtype`/`backend`/`revision` does not pass.
+ * FriedFlaxia models are downloaded lazily and stay resident until the idle
+ * eviction pass. There is no separate executable pipeline cache anymore.
  */
 export const isAiModelPreloaded = (model: string | AiModelCacheIdentity): boolean => {
-  const snapshot = getModelCacheSnapshot();
-  if (typeof model === 'string') {
-    return snapshot.entries.some(
-      (entry) => entry.modelId === model && entry.state === 'ready',
-    );
-  }
-  return snapshot.entries.some(
-    (entry) =>
-      entry.modelId === model.modelId &&
-      entry.revision === model.revision &&
-      entry.dtype === model.dtype &&
-      entry.backend === model.backend &&
-      entry.state === 'ready',
-  );
+  const modelId = typeof model === 'string' ? model : model.modelId;
+  if (modelId === LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL) return isPlamoLoaded();
+  if (modelId === 'LiquidAI/d1-omni-600M') return isD1Loaded();
+  return false;
 };
 
-/**
- * Flaxia's translate model. PLaMO 3 Translate 0.8B is a decoder-only
- * text-generation model, so its Light Inference task is `text-generation`,
- * not `translation`.
- */
+export const getModelCacheSnapshot = (): NodeModelCacheSnapshot => {
+  const sampledAt = Date.now();
+  return {
+    version: 1,
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+    entries: [],
+  };
+};
+
 export const LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL = 'TeamFlaxia/plamo-3-translate-0.8b-onnx';
 export const LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK = 'text-generation';
 export const LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE = 'q4f16';
-
-/** @deprecated Use the PLaMO constants. Kept as aliases for host compatibility. */
 export const LIGHT_INFERENCE_TRANSLATE_MODEL = LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL;
-/** @deprecated Use the PLaMO constants. */
 export const LIGHT_INFERENCE_TRANSLATE_TASK = LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK;
-/** @deprecated Use the PLaMO constants. */
 export const LIGHT_INFERENCE_TRANSLATE_DTYPE = LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE;
 
-/**
- * Drops all cached model pipelines so the (potentially hundreds of MB of)
- * transformers/onnxruntime memory can be garbage-collected. Called by the
- * worker after an idle period so a node does not pin every model it ever saw.
- */
 export const releaseCache = (): void => {
-  void pipelineCache.releaseAll();
+  releaseFriedFlaxiaDecision();
+  releaseFriedFlaxiaTextGeneration();
 };
-
-/** Current executable pipelines; weight files in the Transformers cache are a separate disk-cache layer. */
-export const getModelCacheSnapshot = (): NodeModelCacheSnapshot => pipelineCache.getSnapshot();
-
-const createBufferedTokenCallback = (
-  onToken: (token: string) => void | Promise<void>,
-  options: AiInferenceOptions,
-): { callback: (text: string) => void; finish: () => Promise<void>; cancel: () => Promise<void> } => {
-  let buffer = '';
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let pending: Promise<void> = Promise.resolve();
-  let pendingCount = 0;
-  let pendingChars = 0;
-  let failure: unknown;
-  let failed = false;
-  let closed = false;
-
-  const dispatch = (text: string): void => {
-    if (pendingCount >= MAX_PENDING_TOKEN_CALLBACKS || pendingChars + text.length > MAX_PENDING_TOKEN_CHARS) {
-      failed = true;
-      failure = new Error('ai-inference token consumer is too slow; generation stopped at the bounded stream buffer');
-      throw failure;
-    }
-    pendingCount++;
-    pendingChars += text.length;
-    // TextStreamer invokes callbacks synchronously. Queue each async sink call
-    // in order, retaining failures for the inference promise instead of leaving
-    // a rejected promise behind in a timer callback.
-    pending = pending.then(() => {
-      if (!failed) return onToken(text);
-    }).then(
-      () => undefined,
-      (error: unknown) => { failed = true; failure = error; },
-    ).finally(() => {
-      pendingCount--;
-      pendingChars -= text.length;
-    });
-  };
-  const flush = (): void => {
-    if (timer !== null) clearTimeout(timer);
-    timer = null;
-    const text = buffer;
-    buffer = '';
-    if (text && !failed) dispatch(text);
-  };
-  const callback = (text: string): void => {
-    if (closed) return;
-    if (failed) throw failure;
-    if (!options.tokenBuffer) {
-      dispatch(text);
-      return;
-    }
-    if (buffer.length + text.length > MAX_PENDING_TOKEN_CHARS) {
-      failed = true;
-      failure = new Error('ai-inference token consumer is too slow; generation stopped at the bounded stream buffer');
-      throw failure;
-    }
-    buffer += text;
-    if (timer === null) timer = setTimeout(() => {
-      try { flush(); } catch (error) {
-        // Timer exceptions cannot be caught by the generation promise. Retain
-        // the failure so its next callback or final drain rejects normally.
-        failed = true;
-        failure = error;
-      }
-    }, options.tokenBufferIntervalMs ?? 50);
-  };
-  const settle = async (emitTail: boolean): Promise<void> => {
-    closed = true;
-    if (timer !== null) clearTimeout(timer);
-    timer = null;
-    if (emitTail && !failed) flush();
-    else buffer = '';
-    await pending;
-    if (failed) throw failure;
-  };
-  return { callback, finish: () => settle(true), cancel: () => settle(false) };
-};
-
-/**
- * Hosts on the download path of a registered model are the only ones the node
- * will talk to, and a single file may never exceed the registry's `maxBytes`.
- * transformers.js honours `env.fetch`, so this wrapper bounds what a load can
- * pull even if a repository grows after it was allowlisted.
- */
-function installModelFetchGuard(): void {
-  const nativeFetch = globalThis.fetch.bind(globalThis);
-  env.fetch = async (input: string | URL, init?: any): Promise<Response> => {
-    const url = new URL(String(input));
-    const allowed =
-      /(^|\.)huggingface\.co$/.test(url.hostname) ||
-      /(^|\.)hf\.co$/.test(url.hostname) ||
-      url.hostname === 'cdn.jsdelivr.net' ||
-      url.hostname === 'unpkg.com';
-    if (!allowed) {
-      throw new Error(`ai-inference: model download blocked from ${url.hostname}`);
-    }
-    const response = await nativeFetch(url, init);
-    const declared = Number(response.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > MAX_AI_MODEL_MAX_BYTES) {
-      throw new Error(
-        `ai-inference: model file too large (${declared} bytes > ${MAX_AI_MODEL_MAX_BYTES})`,
-      );
-    }
-    return response;
-  };
-}
-
-installModelFetchGuard();
-
-// Always run single-threaded. Multithreaded wasm (only active when the page is
-// crossOriginIsolated, via SharedArrayBuffer) spawns one internal Web Worker
-// per CPU core, which OOMs / crashes low-memory mobile devices and balloons the
-// worker count. Heavy workloads are still executed — just on a single thread —
-// to stay safe on phones. Applied once at module load so the config is always
-// in effect regardless of which entry point runs first.
-if (env.backends?.onnx?.wasm) {
-  env.backends.onnx.wasm.numThreads = 1;
-  env.backends.onnx.wasm.proxy = false;
-}
 
 export const handleAiInference = async (
   payload: AiInferencePayload,
-  onToken?: (token: string) => void | Promise<void>,
+  _onToken?: (token: string) => void | Promise<void>,
 ): Promise<AiInferenceResult> => {
-  const { task, model, input, options = {} } = payload;
-
-  // d1 decision models bypass the generic pipeline path entirely: they score
-  // typed options through the split ONNX graphs in workloads/d1-omni and emit
-  // calibrated probabilities, not generated text.
-  if (payload.decision) {
-    const { handleDecision } = await import('./decision');
-    return await handleDecision(payload);
-  }
-
-  if (!SUPPORTED_TASKS.includes(task as any)) {
-    throw new Error(`Invalid or unsupported task: ${task}. Supported tasks are: ${SUPPORTED_TASKS.join(', ')}`);
-  }
-
-  // Fail closed before any download: the payload's model id must resolve to a
-  // node-side registry entry, and its options must be safe combinations.
-  const definition: AiModelDefinition = resolveAiModel(model);
-  const device = resolveAiDevice(options.device);
-  const dtype = resolveAiDtype(options.dtype);
-  const ondeviceOnly = resolveOndeviceOnly(options.ondeviceOnly);
-  const safeInput = assertAiInput(input);
-  const generationOptions: Record<string, unknown> = {};
-  applyGenerationOptions(generationOptions, options as Record<string, unknown>);
-
-  const resolvedDtype = dtype ?? 'q4f16';
-  const requestedBackend = (device ?? 'wasm') as ModelCacheBackend;
-
-  // Light Inference gate: ondeviceOnly means the caller forbids download and
-  // delegation. Fail immediately with a typed 500 instead of loading anything.
-  // The check uses the full cache identity so a preloaded q4f16/wasm pipeline
-  // does not satisfy an ondeviceOnly request for int8/webgpu on the same repo.
-  if (
-    ondeviceOnly &&
-    !isAiModelPreloaded({
-      modelId: model,
-      revision: definition.revision,
-      dtype: resolvedDtype,
-      backend: requestedBackend,
-    })
-  ) {
-    throw new OndeviceUnavailableError(
-      `ondeviceOnly: model ${model} is not preloaded on this device`,
-      'preloading',
-    );
-  }
-  const cacheKey = modelPipelineKey({
-    task,
-    modelId: model,
-    revision: definition.revision,
-    dtype: resolvedDtype,
-    backend: requestedBackend,
-  });
-  const loadStartedAt = performance.now();
-  const lease = await pipelineCache.acquire(
-    cacheKey,
-    {
-      modelId: model,
-      revision: definition.revision,
-      dtype: resolvedDtype,
-      backend: requestedBackend,
-    },
-    async () => {
-      const pipelineOpts: Record<string, unknown> = {
-        dtype: resolvedDtype,
-        device,
-        revision: definition.revision,
-      };
-      console.log(`[flaxia-node] ai-inference: loading pipeline task=${task} model=${definition.repo} revision=${definition.revision} dtype=${pipelineOpts.dtype} device=${device ?? 'wasm'}`);
-      let loaded: any;
-      try {
-        loaded = await pipeline(task as any, definition.repo, pipelineOpts);
-      } catch (err) {
-        if (device && device !== 'wasm') {
-          console.warn(`[AiInference] ${device} failed, falling back to wasm:`, err);
-          pipelineOpts.device = 'wasm';
-          loaded = await pipeline(task as any, definition.repo, pipelineOpts);
-        } else {
-          console.error(
-            `[flaxia-node] ai-inference: pipeline load FAILED task=${task} model=${definition.repo} error=${err instanceof Error ? err.message : String(err)}`,
-          );
-          throw err;
-        }
-      }
-      console.log(
-        `[flaxia-node] ai-inference: pipeline ready task=${task} model=${definition.repo} loadMs=${Math.round(performance.now() - loadStartedAt)}`,
-      );
-      return {
-        value: loaded,
-        descriptor: { backend: (pipelineOpts.device ?? 'wasm') as ModelCacheBackend },
-      };
-    },
-    (loaded) => loaded.dispose?.(),
+  if (payload.decision) return handleFriedFlaxiaDecision(payload);
+  if (payload.task === 'text-generation') return handleFriedFlaxiaTextGeneration(payload);
+  throw new Error(
+    `Invalid or unsupported task: ${payload.task}. Supported tasks are: ${SUPPORTED_TASKS.join(', ')}`,
   );
-  const generator = lease.value;
-
-  try {
-    const genOptions: Record<string, unknown> = {
-      max_new_tokens: (generationOptions.max_new_tokens as number | undefined) ?? 128,
-      do_sample: (generationOptions.do_sample as boolean | undefined) ?? false,
-    };
-    for (const [key, value] of Object.entries(generationOptions)) {
-      if (key === 'max_new_tokens' || key === 'do_sample') continue;
-      genOptions[key] = value;
-    }
-
-    const tokens = onToken && generator.tokenizer
-      ? createBufferedTokenCallback(onToken, options)
-      : null;
-    if (tokens) {
-      genOptions.streamer = new TextStreamer(generator.tokenizer, {
-        skip_prompt: true,
-        skip_special_tokens: true,
-        callback_function: tokens.callback,
-      });
-    }
-
-    const inputStart = performance.now();
-    let output: any;
-    try {
-      output = await generator(safeInput, genOptions);
-    } catch (error) {
-      if (/out of memory|oom|allocation failed|could not allocate/i.test(error instanceof Error ? error.message : String(error))) {
-        lease.invalidate();
-      }
-      // Drain in-flight sink calls, but do not emit a partial tail after a failed
-      // generation. A sink failure takes precedence over a generator failure.
-      if (tokens) await tokens.cancel();
-      throw error;
-    }
-    await tokens?.finish();
-    console.log(
-      `[flaxia-node] ai-inference: done task=${task} model=${definition.repo} execMs=${Math.round(performance.now() - inputStart)} inputLen=${String(safeInput).length}`,
-    );
-    return { output };
-  } finally {
-    await lease.release();
-  }
 };
 
-/**
- * Download + warm a model pipeline for later ondeviceOnly serving. Runs the
- * same registry-fail-closed load as a real task but without generating.
- * Idempotent: callers deduplicate via `isAiModelPreloaded()`.
- */
+/** Preload one of the FriedFlaxia models used by a supported task. */
 export const preloadAiModel = async (request: {
   task: string;
   model: string;
   dtype?: string;
   device?: string;
 }): Promise<void> => {
-  const { task, model } = request;
-  const definition = resolveAiModel(model);
-  const device = resolveAiDevice(request.device);
-  const dtype = resolveAiDtype(request.dtype);
-  const resolvedDtype = dtype ?? LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE;
-  const requestedBackend = (device ?? 'wasm') as ModelCacheBackend;
-  const cacheKey = modelPipelineKey({
-    task,
-    modelId: model,
-    revision: definition.revision,
-    dtype: resolvedDtype,
-    backend: requestedBackend,
-  });
-  const lease = await pipelineCache.acquire(
-    cacheKey,
-    { modelId: model, revision: definition.revision, dtype: resolvedDtype, backend: requestedBackend },
-    async () => {
-      console.log(`[flaxia-node] ai-inference: preloading task=${task} model=${definition.repo}`);
-      const loaded = await pipeline(task as any, definition.repo, {
-        dtype: resolvedDtype,
-        device,
-        revision: definition.revision,
-      });
-      return { value: loaded, descriptor: { backend: requestedBackend } };
-    },
-    (loaded) => loaded.dispose?.(),
-  );
-  await lease.release();
+  if (request.task === 'text-generation') {
+    await loadFriedFlaxiaPlamo();
+    return;
+  }
+  if (request.task === 'decision') {
+    await loadFriedFlaxiaD1();
+    return;
+  }
+  throw new Error(`ai-preload: unsupported task ${request.task}`);
 };

@@ -141,7 +141,7 @@ initFlaxiaNode({ /* ... */ })
 │  │ main.worker.ts (ディスパッチャ)    │    │
 │  │  ┌──────────┐ ┌──────────┐       │    │
 │  │  │ AI推論   │ │ 画像処理 │       │    │
-│  │  │ (ONNX)   │ │(Offscreen│       │    │
+│  │  │FriedFlaxia│ │(Offscreen│       │    │
 │  │  │          │ │ Canvas)  │       │    │
 │  │  └──────────┘ └──────────┘       │    │
 │  │  ┌──────────┐                    │    │
@@ -166,12 +166,19 @@ initFlaxiaNode({ /* ... */ })
 
 | workload | ファイル | 技術 |
 |----------|---------|------|
-| `ai-inference` | `workloads/ai-inference.ts` | 🤗 Transformers.js (ONNX Runtime) |
+| `ai-inference` | `workloads/ai-inference.ts` | FriedFlaxia（PLaMO text-generation / d1 decision） |
 | `image-process` | `workloads/image-process.ts` | OffscreenCanvas API |
 | `container` | `workloads/container.ts` | container2wasm + WASI |
-| `nudenet` | `workloads/nudenet.ts` | NSFW（成人向け）画像判定 |
+| `nudenet` | `workloads/nudenet.ts` | NudeNet 320n（FriedFlaxia YOLOv8n） |
 | `cc-extract` | `workloads/cc-extract.ts` | Common Crawl WARC の range 取得 + parse5 本文抽出 |
-| `embed-gemma` | `workloads/embed-gemma.ts` | EmbeddingGemma 2（text-only, MRL） |
+| `embed-gemma` | `workloads/embed-gemma.ts` | EmbeddingGemma 2（text-only, MRL, FriedFlaxia） |
+| `vector-embed` | `workloads/vector-embed.ts` | EmbeddingGemma 2（text + image + audio, FriedFlaxia） |
+
+すべての推論 workload は Rust/GGUF/wasm の FriedFlaxia で実行します。
+モデルは固定 URL（immutable revision）と SHA-256 を pin した GGUF だけを読み、
+ONNX Runtime / Transformers.js への依存はありません。wasm 成果物は
+`src/vendor/friedflaxia/README.md` の provenance に従って更新してください。
+`vector-embed` の動画と NudeNet 640m は未対応で、明示的にエラーになります。
 
 ## フロー
 

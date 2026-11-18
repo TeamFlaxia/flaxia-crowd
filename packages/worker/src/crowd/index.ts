@@ -209,6 +209,12 @@ export function validateAiInferencePayload(payload: unknown): string | null {
     return 'payload must be an object'
   }
   const body = payload as Record<string, unknown>
+  if (body.engine !== undefined && body.engine !== 'transformers' && body.engine !== 'friedflaxia') {
+    return 'payload.engine must be transformers or friedflaxia'
+  }
+  if (body.engine === 'friedflaxia' && body.task !== 'text-generation' && body.task !== 'decision') {
+    return 'payload.engine=friedflaxia currently supports text-generation or decision only'
+  }
   const options = body.options
   if (options !== undefined && options !== null) {
     if (typeof options !== 'object' || Array.isArray(options)) {
@@ -328,6 +334,9 @@ export function validateVectorEmbedPayload(payload: unknown): string | null {
   }
   const hasText = typeof text === 'string' && text.length > 0
   const hasMedia = (Array.isArray(imageUrls) && imageUrls.length > 0) || audioUrl !== undefined || videoUrl !== undefined
+  if (body.engine !== undefined && body.engine !== 'transformers' && body.engine !== 'friedflaxia') {
+    return 'payload.engine must be transformers or friedflaxia'
+  }
   if (!hasText && !hasMedia) {
     return 'payload needs at least text or one media URL'
   }
@@ -454,6 +463,9 @@ export function validateEmbedGemmaPayload(payload: unknown): string | null {
   }
   if (body.dimensions !== undefined && !isEmbedGemmaDimensions(body.dimensions)) {
     return 'payload.dimensions must be one of 768, 512, 256, 128'
+  }
+  if (body.engine !== undefined && body.engine !== 'transformers' && body.engine !== 'friedflaxia') {
+    return 'payload.engine must be transformers or friedflaxia'
   }
   return null
 }

@@ -110,6 +110,12 @@ export interface AiInferencePayload {
   /** pipeline() and generation options */
   options?: AiInferenceOptions;
   /**
+   * Execution engine. `transformers` is the existing Transformers.js/ONNX
+   * path. `friedflaxia` currently supports `text-generation` only and keeps
+   * the model id / output shape compatible with the PLaMO translation path.
+   */
+  engine?: 'transformers' | 'friedflaxia';
+  /**
    * Decision-model mode (d1-omni-600M). When set, the node runs
    * `system_one(state, questions, images?, audio?)` and returns calibrated
    * probabilities instead of generated text.
@@ -397,6 +403,11 @@ export interface VectorEmbedPayload {
   imageUrls?: string[];
   audioUrl?: string;
   videoUrl?: string;
+  /**
+   * Execution engine. `transformers` is the existing Transformers.js/ONNX
+   * path; `friedflaxia` currently supports text-only payloads.
+   */
+  engine?: 'transformers' | 'friedflaxia';
 }
 
 export interface VectorEmbedResult {
@@ -464,6 +475,11 @@ export interface NudeNetPayload {
   iouThreshold?: number;
   /** Maximum number of detections to keep (default: 100). */
   topK?: number;
+  /**
+   * Execution engine. `transformers` is the existing ONNX Runtime path;
+   * `friedflaxia` currently supports the 320n model.
+   */
+  engine?: 'transformers' | 'friedflaxia';
 }
 
 export interface NudeNetDetection {
@@ -560,6 +576,11 @@ export interface EmbedGemmaPayload {
   texts: string[];
   /** Matryoshka truncation target. Defaults to the native 768. */
   dimensions?: EmbedGemmaDimensions;
+  /**
+   * Execution engine. `transformers` is the existing Transformers.js/ONNX
+   * path; `friedflaxia` uses the pinned GGUF runner. Defaults to `transformers`.
+   */
+  engine?: 'transformers' | 'friedflaxia';
 }
 
 export interface EmbedGemmaResult {

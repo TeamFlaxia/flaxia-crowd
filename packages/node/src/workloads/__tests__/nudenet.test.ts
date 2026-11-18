@@ -1,4 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../friedflaxia/nudenet', () => ({
+  handleFriedFlaxiaNudeNet: vi.fn(async () => ({ detections: [], durationMs: 0 })),
+  releaseCache: vi.fn(),
+}));
 import {
   handleNudeNet,
   MAX_NUDENET_IMAGE_BYTES,
@@ -95,9 +100,8 @@ describe('NudeNet decoded image limits', () => {
       close: bitmapClose,
     }) as any;
 
-    // The session load fails (onnxruntime is not mocked here), but
-    // preprocessing runs first and its canvas allocations are what we assert.
-    await expect(handleNudeNet(payload())).rejects.toThrow();
+    await handleNudeNet(payload());
     expect(canvasSizes).toEqual([{ width: 320, height: 320 }]);
+    expect(bitmapClose).toHaveBeenCalledTimes(1);
   });
 });
