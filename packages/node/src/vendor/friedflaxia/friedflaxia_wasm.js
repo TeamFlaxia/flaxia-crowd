@@ -242,6 +242,147 @@ export class Model {
     }
 }
 if (Symbol.dispose) Model.prototype[Symbol.dispose] = Model.prototype.free;
+
+/**
+ * Multimodal EmbeddingGemma 2 model: text GGUF plus the vision/audio mmproj.
+ */
+export class MultimodalModel {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        MultimodalModelFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_multimodalmodel_free(ptr, 0);
+    }
+    /**
+     * @returns {number | undefined}
+     */
+    bos_token_id() {
+        const ret = wasm.multimodalmodel_bos_token_id(this.__wbg_ptr);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
+     * @param {Uint32Array | number[]} token_ids
+     * @param {Float32Array | number[]} image_features
+     * @param {Float32Array | number[]} video_features
+     * @param {Float32Array | number[]} audio_features
+     * @returns {Float32Array}
+     */
+    embed(token_ids, image_features, video_features, audio_features) {
+        let ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3;
+        try {
+            ptr0 = passArray32ToWasm0(token_ids, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passArrayF32ToWasm0(image_features, wasm.__wbindgen_malloc);
+            len1 = WASM_VECTOR_LEN;
+            ptr2 = passArrayF32ToWasm0(video_features, wasm.__wbindgen_malloc);
+            len2 = WASM_VECTOR_LEN;
+            ptr3 = passArrayF32ToWasm0(audio_features, wasm.__wbindgen_malloc);
+            len3 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr3) { wasm.__wbindgen_free(ptr3, len3 * 4, 4); }
+            if (ptr2) { wasm.__wbindgen_free(ptr2, len2 * 4, 4); }
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 4, 4); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 4, 4); }
+            throw e;
+        }
+        const ret = wasm.multimodalmodel_embed(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v5 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v5;
+    }
+    /**
+     * @param {string} text
+     * @param {boolean} add_special_tokens
+     * @returns {Uint32Array}
+     */
+    encode(text, add_special_tokens) {
+        const val2 = +add_special_tokens;
+        const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.multimodalmodel_encode(this.__wbg_ptr, ptr0, len0, val2);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v3 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v3;
+    }
+    /**
+     * @param {Float32Array | number[]} mel
+     * @param {number} frames
+     * @returns {Float32Array}
+     */
+    encode_audio(mel, frames) {
+        const val2 = +frames;
+        const ptr0 = passArrayF32ToWasm0(mel, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.multimodalmodel_encode_audio(this.__wbg_ptr, ptr0, len0, val2);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v3 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v3;
+    }
+    /**
+     * @param {Float32Array | number[]} patches
+     * @param {number} grid_h
+     * @param {number} grid_w
+     * @returns {Float32Array}
+     */
+    encode_image(patches, grid_h, grid_w) {
+        const val2 = +grid_h;
+        const val3 = +grid_w;
+        const ptr0 = passArrayF32ToWasm0(patches, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.multimodalmodel_encode_image(this.__wbg_ptr, ptr0, len0, val2, val3);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v4 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v4;
+    }
+    /**
+     * @returns {number | undefined}
+     */
+    eos_token_id() {
+        const ret = wasm.multimodalmodel_eos_token_id(this.__wbg_ptr);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
+     * @param {Uint8Array | number[]} text_bytes
+     * @param {Uint8Array | number[]} mmproj_bytes
+     */
+    constructor(text_bytes, mmproj_bytes) {
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passArray8ToWasm0(text_bytes, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passArray8ToWasm0(mmproj_bytes, wasm.__wbindgen_malloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+            throw e;
+        }
+        const ret = wasm.multimodalmodel_new(ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        MultimodalModelFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+}
+if (Symbol.dispose) MultimodalModel.prototype[Symbol.dispose] = MultimodalModel.prototype.free;
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -271,6 +412,9 @@ function __wbg_get_imports() {
 const ModelFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_model_free(ptr, 1));
+const MultimodalModelFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_multimodalmodel_free(ptr, 1));
 
 function getArrayF32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;

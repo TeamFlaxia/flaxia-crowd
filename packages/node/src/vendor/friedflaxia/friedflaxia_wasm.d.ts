@@ -22,11 +22,27 @@ export class Model {
     token_id(token: string): number | undefined;
 }
 
+/**
+ * Multimodal EmbeddingGemma 2 model: text GGUF plus the vision/audio mmproj.
+ */
+export class MultimodalModel {
+    free(): void;
+    [Symbol.dispose](): void;
+    bos_token_id(): number | undefined;
+    embed(token_ids: Uint32Array | number[], image_features: Float32Array | number[], video_features: Float32Array | number[], audio_features: Float32Array | number[]): Float32Array;
+    encode(text: string, add_special_tokens: boolean): Uint32Array;
+    encode_audio(mel: Float32Array | number[], frames: number): Float32Array;
+    encode_image(patches: Float32Array | number[], grid_h: number, grid_w: number): Float32Array;
+    eos_token_id(): number | undefined;
+    constructor(text_bytes: Uint8Array | number[], mmproj_bytes: Uint8Array | number[]);
+}
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_model_free: (a: number, b: number) => void;
+    readonly __wbg_multimodalmodel_free: (a: number, b: number) => void;
     readonly model_architecture: (a: number) => [number, number];
     readonly model_bos_token_id: (a: number) => number;
     readonly model_decision: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
@@ -43,6 +59,13 @@ export interface InitOutput {
     readonly model_next_token: (a: number, b: number, c: number) => [number, number, number];
     readonly model_tensor_count: (a: number) => number;
     readonly model_token_id: (a: number, b: number, c: number) => number;
+    readonly multimodalmodel_bos_token_id: (a: number) => number;
+    readonly multimodalmodel_embed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly multimodalmodel_encode: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly multimodalmodel_encode_audio: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly multimodalmodel_encode_image: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly multimodalmodel_eos_token_id: (a: number) => number;
+    readonly multimodalmodel_new: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
