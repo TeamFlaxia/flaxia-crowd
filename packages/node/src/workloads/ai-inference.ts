@@ -6,11 +6,13 @@ import type {
 } from '@flaxia/sdk';
 import {
   handleFriedFlaxiaDecision,
+  isD1Loaded,
   loadFriedFlaxiaD1,
   releaseCache as releaseFriedFlaxiaDecision,
 } from './friedflaxia/decision';
 import {
   handleFriedFlaxiaTextGeneration,
+  isPlamoLoaded,
   loadFriedFlaxiaPlamo,
   releaseCache as releaseFriedFlaxiaTextGeneration,
 } from './friedflaxia/text-generation';
@@ -46,7 +48,12 @@ export interface AiModelCacheIdentity {
  * FriedFlaxia models are downloaded lazily and stay resident until the idle
  * eviction pass. There is no separate executable pipeline cache anymore.
  */
-export const isAiModelPreloaded = (_model: string | AiModelCacheIdentity): boolean => false;
+export const isAiModelPreloaded = (model: string | AiModelCacheIdentity): boolean => {
+  const modelId = typeof model === 'string' ? model : model.modelId;
+  if (modelId === LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL) return isPlamoLoaded();
+  if (modelId === 'LiquidAI/d1-omni-600M') return isD1Loaded();
+  return false;
+};
 
 export const getModelCacheSnapshot = (): NodeModelCacheSnapshot => {
   const sampledAt = Date.now();

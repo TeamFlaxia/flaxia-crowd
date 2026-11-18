@@ -99,6 +99,8 @@ export const releaseCache = (): void => {
 let multimodal: D1MultimodalWasmModel | null = null;
 let multimodalLoad: Promise<D1MultimodalWasmModel> | null = null;
 
+export const isD1Loaded = (): boolean => model !== null || multimodal !== null;
+
 export async function loadFriedFlaxiaD1Multimodal(): Promise<D1MultimodalWasmModel> {
   if (multimodal) return multimodal;
   if (multimodalLoad) return multimodalLoad;

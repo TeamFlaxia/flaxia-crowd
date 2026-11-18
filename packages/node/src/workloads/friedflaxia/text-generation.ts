@@ -20,6 +20,8 @@ let wasmReady: Promise<void> | null = null;
 let model: PlamoModel | null = null;
 let modelLoad: Promise<PlamoModel> | null = null;
 
+export const isPlamoLoaded = (): boolean => model !== null;
+
 async function initWasm(): Promise<void> {
   if (!wasmReady) {
     wasmReady = (async () => {
