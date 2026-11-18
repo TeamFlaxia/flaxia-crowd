@@ -1,6 +1,11 @@
 import type { NudeNetDetection, NudeNetPayload, NudeNetResult } from '@flaxia/sdk';
 import * as ort from 'onnxruntime-web';
 import { fetchGuarded } from '../executor/egress-guard';
+import { NUDENET_LABELS } from './nudenet-labels';
+import {
+  handleFriedFlaxiaNudeNet,
+  releaseCache as releaseFriedFlaxiaNudeNet,
+} from './friedflaxia/nudenet';
 
 const IMG_SIZE = 320;
 const ORT_WASM_VERSION = '1.26.0';
@@ -23,26 +28,7 @@ const MODEL_CONTENT_TYPES = ['application/octet-stream', 'application/wasm'] as 
  * NudeNet class labels, in the exact order used by the 320n YOLOv8 export
  * (deepghs/nudenet_onnx / official NudeNet v3.4.2).
  */
-const LABELS = [
-  'FEMALE_GENITALIA_COVERED',
-  'FACE_FEMALE',
-  'BUTTOCKS_EXPOSED',
-  'FEMALE_BREAST_EXPOSED',
-  'FEMALE_GENITALIA_EXPOSED',
-  'MALE_BREAST_EXPOSED',
-  'ANUS_EXPOSED',
-  'FEET_EXPOSED',
-  'BELLY_COVERED',
-  'FEET_COVERED',
-  'ARMPITS_COVERED',
-  'ARMPITS_EXPOSED',
-  'FACE_MALE',
-  'BELLY_EXPOSED',
-  'MALE_GENITALIA_EXPOSED',
-  'ANUS_COVERED',
-  'FEMALE_BREAST_COVERED',
-  'BUTTOCKS_COVERED',
-] as const;
+
 
 let ortConfigured = false;
 
@@ -161,7 +147,7 @@ async function loadImage(payload: NudeNetPayload): Promise<ImageBitmap> {
  *
  * Returns the input tensor and the global scale ratio (max_size / 320).
  */
-function preprocess(bitmap: ImageBitmap): { tensor: ort.Tensor; ratio: number } {
+function preprocess(bitmap: ImageBitmap): { data: Float32Array; ratio: number } {
   const { width, height } = bitmap;
   const maxSize = Math.max(width, height);
   const scale = IMG_SIZE / maxSize;
@@ -194,7 +180,7 @@ function preprocess(bitmap: ImageBitmap): { tensor: ort.Tensor; ratio: number } 
   }
 
   return {
-    tensor: new ort.Tensor('float32', data, [1, 3, IMG_SIZE, IMG_SIZE]),
+    data,
     ratio: maxSize / IMG_SIZE,
   };
 }
@@ -217,7 +203,7 @@ function decode(selected: ort.Tensor, ratio: number): NudeNetDetection[] {
 
     let label = 0;
     let score = -Infinity;
-    for (let c = 0; c < LABELS.length; c++) {
+    for (let c = 0; c < NUDENET_LABELS.length; c++) {
       const s = data[offset + 4 + c];
       if (s > score) {
         score = s;
@@ -232,7 +218,7 @@ function decode(selected: ort.Tensor, ratio: number): NudeNetDetection[] {
     const h = data[offset + 3] * ratio;
 
     detections.push({
-      label: LABELS[label],
+      label: NUDENET_LABELS[label],
       score,
       box: [Math.round(cx - 0.5 * w), Math.round(cy - 0.5 * h), Math.round(cx + 0.5 * w), Math.round(cy + 0.5 * h)],
     });
@@ -242,7 +228,13 @@ function decode(selected: ort.Tensor, ratio: number): NudeNetDetection[] {
 
 export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetResult> => {
   const startedAt = Date.now();
-  configureOrt();
+
+  if (payload.engine !== undefined && payload.engine !== 'transformers' && payload.engine !== 'friedflaxia') {
+    throw new Error('NudeNet engine must be transformers or friedflaxia');
+  }
+  if (payload.engine === 'friedflaxia' && payload.model !== undefined && payload.model !== '320n') {
+    throw new Error('NudeNet friedflaxia currently supports the 320n model only');
+  }
 
   const topK = payload.topK ?? 100;
   const iouThreshold = payload.iouThreshold ?? 0.45;
@@ -259,8 +251,19 @@ export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetRes
 
   const bitmap = await loadImage(payload);
   try {
-    const { tensor, ratio } = preprocess(bitmap);
+    const { data, ratio } = preprocess(bitmap);
 
+    if (payload.engine === 'friedflaxia') {
+      return await handleFriedFlaxiaNudeNet(data, ratio, {
+        ...payload,
+        topK,
+        iouThreshold,
+        scoreThreshold,
+      });
+    }
+
+    configureOrt();
+    const tensor = new ort.Tensor('float32', data, [1, 3, IMG_SIZE, IMG_SIZE]);
     const startedAtMs = performance.now();
     const [yoloSession, nmsSession] = await Promise.all([getSession(MODEL_URL), getSession(NMS_MODEL_URL)]);
     console.log(`[flaxia-node] nudenet: sessions ready loadMs=${Math.round(performance.now() - startedAtMs)}`);
@@ -281,6 +284,7 @@ export const handleNudeNet = async (payload: NudeNetPayload): Promise<NudeNetRes
 };
 
 export function releaseCache(): void {
+  releaseFriedFlaxiaNudeNet();
   // `ort.InferenceSession.release()` frees the wasm heap and model buffers;
   // clearing the map alone only drops our reference and leaves the session
   // alive until GC. A rejected entry is dropped by the catch installed in

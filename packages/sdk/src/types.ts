@@ -475,6 +475,11 @@ export interface NudeNetPayload {
   iouThreshold?: number;
   /** Maximum number of detections to keep (default: 100). */
   topK?: number;
+  /**
+   * Execution engine. `transformers` is the existing ONNX Runtime path;
+   * `friedflaxia` currently supports the 320n model.
+   */
+  engine?: 'transformers' | 'friedflaxia';
 }
 
 export interface NudeNetDetection {
