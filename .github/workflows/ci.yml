@@ -58,3 +58,26 @@ jobs:
 
       - name: Shared Qwen3.5-2B generation baseline contracts
         run: node --test scripts/swarm-spike/generation-baseline.test.mjs scripts/swarm-spike/real-options.test.mjs scripts/swarm-spike/prepare-generation-model.test.mjs
+
+  video-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: 'npm'
+      - run: npm ci
+      - run: npm install --prefix "$RUNNER_TEMP/flaxia-browser-tools" --package-lock=false --ignore-scripts playwright@1.62.1
+      - name: Bundle the video decoder for the browser
+        run: |
+          mkdir -p dist-video
+          npx esbuild packages/node/src/workloads/friedflaxia/video-decoder.ts \
+            --bundle --format=esm --platform=browser --target=es2022 \
+            --outfile=dist-video/video.js
+      - name: Decode an MP4 with real WebCodecs
+        run: node scripts/video-smoke.mjs
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/flaxia-browser-tools/node_modules/playwright/index.mjs
+          CHROME: /usr/bin/google-chrome
