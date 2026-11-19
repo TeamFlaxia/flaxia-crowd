@@ -46,6 +46,20 @@ function codecDescription(file: ReturnType<typeof createFile>, trackId: number):
   return new Uint8Array(stream.buffer, 8);
 }
 
+async function videoFrameBitmap(frame: any): Promise<ImageBitmap> {
+  try {
+    return await createImageBitmap(frame);
+  } catch {
+    const width = frame.displayWidth || frame.codedWidth;
+    const height = frame.displayHeight || frame.codedHeight;
+    const canvas = new OffscreenCanvas(width, height);
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('vector-embed: no 2d canvas context for video frame');
+    context.drawImage(frame, 0, 0);
+    return canvas.transferToImageBitmap();
+  }
+}
+
 function sampleTimes(duration: number, count: number): number[] {
   if (duration <= 0 || count <= 1) return [0];
   const step = duration / (count - 1);
@@ -164,7 +178,7 @@ export async function decodeVideoFrames(bytes: Uint8Array): Promise<DecodedVideo
       }
       if (selected) {
         captured.push(
-          createImageBitmap(frame).finally(() => frame.close()),
+          videoFrameBitmap(frame).finally(() => frame.close()),
         );
       } else {
         frame.close();
