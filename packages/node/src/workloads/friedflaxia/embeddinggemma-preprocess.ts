@@ -12,7 +12,8 @@
 
 const PATCH_SIZE = 16;
 const POOLING = 3;
-const MAX_SOFT_TOKENS = 280;
+const DEFAULT_MAX_SOFT_TOKENS = 280;
+const VIDEO_MAX_SOFT_TOKENS = 140;
 const MEL_BINS = 128;
 const FRAME_LENGTH = 320;
 const HOP_LENGTH = 160;
@@ -32,8 +33,9 @@ export interface PreparedImage {
 export function aspectRatioPreservingSize(
   height: number,
   width: number,
+  maxSoftTokens = DEFAULT_MAX_SOFT_TOKENS,
 ): [number, number] {
-  const maxPatches = MAX_SOFT_TOKENS * POOLING * POOLING;
+  const maxPatches = maxSoftTokens * POOLING * POOLING;
   const targetPx = maxPatches * PATCH_SIZE ** 2;
   const factor = Math.sqrt(targetPx / (height * width));
   const side = POOLING * PATCH_SIZE;
@@ -86,8 +88,11 @@ export function patchifyRgba(
   };
 }
 
-export async function prepareImagePatches(bitmap: ImageBitmap): Promise<PreparedImage> {
-  const [height, width] = aspectRatioPreservingSize(bitmap.height, bitmap.width);
+export async function prepareImagePatches(
+  bitmap: ImageBitmap,
+  maxSoftTokens = DEFAULT_MAX_SOFT_TOKENS,
+): Promise<PreparedImage> {
+  const [height, width] = aspectRatioPreservingSize(bitmap.height, bitmap.width, maxSoftTokens);
   const canvas = new OffscreenCanvas(width, height);
   const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context) throw new Error('embeddinggemma: no 2d canvas context');
@@ -96,6 +101,11 @@ export async function prepareImagePatches(bitmap: ImageBitmap): Promise<Prepared
   context.drawImage(bitmap, 0, 0, width, height);
   const data = context.getImageData(0, 0, width, height).data;
   return patchifyRgba(data, width, height);
+}
+
+/** Video frames use the smaller per-frame soft-token budget. */
+export async function prepareVideoFramePatches(bitmap: ImageBitmap): Promise<PreparedImage> {
+  return prepareImagePatches(bitmap, VIDEO_MAX_SOFT_TOKENS);
 }
 
 /** Periodic Hann window of `FRAME_LENGTH` samples. */

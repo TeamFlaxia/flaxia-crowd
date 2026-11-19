@@ -70,6 +70,23 @@ describe('vector-embed engine selection', () => {
     expect(handleFriedFlaxiaEmbedGemma).not.toHaveBeenCalled();
   });
 
+  it('routes video payloads to the multimodal backend', async () => {
+    handleFriedFlaxiaVectorEmbed.mockResolvedValue({ vector: [0.7], durationMs: 3 });
+    const result = await handleVectorEmbed({
+      text: 'a clip',
+      videoUrl: 'https://example.com/a.mp4',
+      engine: 'friedflaxia',
+    });
+    expect(handleFriedFlaxiaVectorEmbed).toHaveBeenCalledWith(
+      expect.objectContaining({ videoUrl: 'https://example.com/a.mp4' }),
+      'a clip <|video|>',
+      [],
+      undefined,
+      'https://example.com/a.mp4',
+    );
+    expect(result.vector).toEqual([0.7]);
+  });
+
   it('releases both FriedFlaxia caches', () => {
     releaseCache();
     expect(releaseFriedFlaxiaCache).toHaveBeenCalledTimes(1);

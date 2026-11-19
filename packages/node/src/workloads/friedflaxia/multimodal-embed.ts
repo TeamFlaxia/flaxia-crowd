@@ -4,7 +4,9 @@ import {
   EMBEDDING_GEMMA_AUDIO_SAMPLE_RATE,
   melSpectrogram,
   prepareImagePatches,
+  prepareVideoFramePatches,
 } from './embeddinggemma-preprocess';
+import { decodeVideoFrames } from './video-decoder';
 import {
   FRIEDFLAXIA_EMBED_GEMMA,
   FRIEDFLAXIA_EMBED_GEMMA_MMPROJ,
@@ -40,6 +42,7 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGE_PIXELS = 16 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 const MAX_AUDIO_SAMPLES = 30 * EMBEDDING_GEMMA_AUDIO_SAMPLE_RATE;
+const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 30_000;
 
 let wasmReady: Promise<void> | null = null;
@@ -179,10 +182,15 @@ async function fetchAudioFeatures(
   };
 }
 
+interface VideoCount {
+  tokens: number;
+  frames: number;
+}
+
 interface MediaCounts {
   image: number[];
   audio: number[];
-  video: number[];
+  video: VideoCount[];
 }
 
 /** Expand media placeholders into the soft-token blocks used by the model. */
@@ -211,12 +219,18 @@ export function buildMultimodalTokenIds(
     indices[modality] += 1;
     if (modality === 'audio') {
       ids.push(BOA_TOKEN);
-      for (let index = 0; index < count; index += 1) ids.push(AUDIO_TOKEN);
+      for (let index = 0; index < (count as number); index += 1) ids.push(AUDIO_TOKEN);
       ids.push(EOA_TOKEN);
+    } else if (modality === 'video') {
+      const video = count as VideoCount;
+      for (let frame = 0; frame < video.frames; frame += 1) {
+        ids.push(BOI_TOKEN);
+        for (let index = 0; index < video.tokens; index += 1) ids.push(VIDEO_TOKEN);
+        ids.push(EOI_TOKEN);
+      }
     } else {
-      const token = modality === 'image' ? IMAGE_TOKEN : VIDEO_TOKEN;
       ids.push(BOI_TOKEN);
-      for (let index = 0; index < count; index += 1) ids.push(token);
+      for (let index = 0; index < (count as number); index += 1) ids.push(IMAGE_TOKEN);
       ids.push(EOI_TOKEN);
     }
     cursor = start + match[0].length;
@@ -243,25 +257,30 @@ export async function handleFriedFlaxiaVectorEmbed(
   audioUrl: string | undefined,
   videoUrl: string | undefined,
 ): Promise<FriedFlaxiaVectorEmbedResult> {
-  if (videoUrl) {
-    throw new Error('vector-embed: friedflaxia video encoding is not supported yet');
-  }
   const startedAt = performance.now();
   const loaded = await loadFriedFlaxiaMultimodalModel();
 
   const images: MediaFeatures[] = [];
   for (const url of imageUrls) images.push(await fetchImageFeatures(loaded, url));
   const audio = audioUrl ? await fetchAudioFeatures(loaded, audioUrl) : null;
+  const videos: MediaFeatures[] = [];
+  const videoCounts: VideoCount[] = [];
+  if (videoUrl) {
+    const videoFeatures = await fetchVideoFeatures(loaded, videoUrl);
+    videos.push(...videoFeatures.frames);
+    videoCounts.push({ tokens: videoFeatures.rows, frames: videoFeatures.frames.length });
+  }
 
   const counts = {
     image: images.map((image) => image.rows),
     audio: audio ? [audio.rows] : [],
-    video: [] as number[],
+    video: videoCounts,
   };
   const ids = buildMultimodalTokenIds(loaded, text, counts);
   const imageData = concatFeatures(images);
+  const videoData = concatFeatures(videos);
   const audioData = audio?.data ?? new Float32Array(0);
-  const embedding = loaded.embed(ids, imageData, new Float32Array(0), audioData);
+  const embedding = loaded.embed(ids, imageData, videoData, audioData);
   // Matryoshka truncation to the public dimension and L2 re-normalization.
   const vector = Array.from(embedding.slice(0, 768));
   let norm = 0;
@@ -269,6 +288,44 @@ export async function handleFriedFlaxiaVectorEmbed(
   norm = Math.sqrt(norm);
   if (norm > 0) for (let index = 0; index < vector.length; index += 1) vector[index] /= norm;
   return { vector, durationMs: Math.round(performance.now() - startedAt) };
+}
+
+async function fetchVideoFeatures(
+  loaded: MultimodalWasmModel,
+  url: string,
+): Promise<{ frames: MediaFeatures[]; rows: number }> {
+  const res = await fetchGuarded({
+    url,
+    allowContentTypes: ['video/*', 'application/octet-stream'],
+    maxBytes: MAX_VIDEO_BYTES,
+    timeoutMs: FETCH_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(`vector-embed: video fetch failed (${res.status}): ${url}`);
+  const decoded = await decodeVideoFrames(res.bytes);
+  const frames: MediaFeatures[] = [];
+  let rows = 0;
+  try {
+    for (const bitmap of decoded.frames) {
+      const prepared = await prepareVideoFramePatches(bitmap);
+      rows = prepared.softTokens;
+      frames.push({
+        rows: prepared.softTokens,
+        data: loaded.encode_image(prepared.patches, prepared.gridHeight, prepared.gridWidth),
+      });
+      bitmap.close();
+    }
+  } catch (error) {
+    for (const bitmap of decoded.frames) {
+      try {
+        bitmap.close();
+      } catch {}
+    }
+    throw error;
+  }
+  if (frames.length === 0 || rows === 0) {
+    throw new Error('vector-embed: video produced no soft tokens');
+  }
+  return { frames, rows };
 }
 
 function concatFeatures(features: MediaFeatures[]): Float32Array {

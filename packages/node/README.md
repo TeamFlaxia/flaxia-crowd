@@ -178,7 +178,7 @@ initFlaxiaNode({ /* ... */ })
 モデルは固定 URL（immutable revision）と SHA-256 を pin した GGUF だけを読み、
 ONNX Runtime / Transformers.js への依存はありません。wasm 成果物は
 `src/vendor/friedflaxia/README.md` の provenance に従って更新してください。
-`vector-embed` の動画と NudeNet 640m は未対応で、明示的にエラーになります。
+`vector-embed` の動画は MP4 + WebCodecs で対応します。WebM と NudeNet 640m は未対応で、明示的にエラーになります。
 
 ## フロー
 

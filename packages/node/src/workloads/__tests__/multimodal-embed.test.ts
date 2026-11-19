@@ -31,6 +31,23 @@ describe('multimodal token construction', () => {
     ]);
   });
 
+  it('expands a video placeholder once per sampled frame', () => {
+    const ids = buildMultimodalTokenIds(fakeModel(), 'a<|video|>b', {
+      image: [],
+      audio: [],
+      video: [{ tokens: 2, frames: 3 }],
+    });
+    expect(Array.from(ids)).toEqual([
+      2,
+      97,
+      255999, 258884, 258884, 258882,
+      255999, 258884, 258884, 258882,
+      255999, 258884, 258884, 258882,
+      98,
+      1,
+    ]);
+  });
+
   it('rejects placeholder/media mismatches', () => {
     expect(() =>
       buildMultimodalTokenIds(fakeModel(), 'x<|image|>', { image: [], audio: [], video: [] }),
