@@ -395,7 +395,7 @@ export interface VectorEmbedPayload {
    * `imageUrl`): the node fetches bytes itself.
    * - `imageUrls`: image(s) interleaved with text via placeholders.
    * - `audioUrl`: mono 16kHz clip (<=327s, model context limit).
-   * - `videoUrl`: sampled frames at 1fps (140 tokens/frame).
+   * - `videoUrl`: MP4 sampled at 1fps, up to 16 frames (140 tokens/frame).
    * All modalities share one 8192-token context; omit to embed text only
    * (backward compatible payload).
    */
@@ -404,7 +404,7 @@ export interface VectorEmbedPayload {
   videoUrl?: string;
   /**
    * Retained for wire compatibility. Inference always runs through the
-   * FriedFlaxia GGUF runtime (text, image and audio); the value is ignored.
+   * FriedFlaxia GGUF runtime (text, image, audio and MP4 video); the value is ignored.
    */
   engine?: 'transformers' | 'friedflaxia';
 }
