@@ -5,7 +5,8 @@
 // llama.cpp eval-callback dumps).
 import { WGSL } from "./wgsl/base.js";
 import { gemmWGSL, GEMM_S, GEMM_TILE } from "./wgsl/gemm.js";
-import { gemmSgmWGSL, pickSgmConfig, sgmPlan, SGM_FEATURES, SGM_FEATURES_OPT, SGM_SYNTAX, SGM_DEFAULT } from "./wgsl/gemm_sgm.js";
+import { gemmSgmWGSL, pickSgmConfig, sgmPlan, sgmatrixSupport, SGM_FEATURES, SGM_FEATURES_OPT, SGM_SYNTAX, SGM_DEFAULT } from "./wgsl/gemm_sgm.js";
+export { sgmatrixSupport };
 import { gemmWideWGSL, wideTileConfig } from "./wgsl/gemm_wide.js";
 import { coopWGSL, probeUnpack } from "./wgsl/coop.js";
 import { WGSL2 } from "./wgsl/qwen35.js";

@@ -41,6 +41,24 @@ export const SGM_FEATURES_OPT = ["subgroups"];
 //   subgroupMatrixStore(p, offset, v, colMajor, stride). The engine compiles "template" and falls back to "bool".
 export const SGM_SYNTAX = ["template", "bool"];
 
+/**
+ * Public capability probe for the tensor-core prefill path. The engine already
+ * probes and self-tests internally before using sgmatrix; this helper lets the
+ * swarm runtime log *why* a device fell back to the portable f32 GEMM instead
+ * of silently running a slower path. `subgroups` stays optional: coop.js keeps
+ * the Safari 26-compatible subgroup-free decode kernel, so this probe must not
+ * be used to gate decode.
+ */
+export function sgmatrixSupport(adapter, adapterInfo) {
+  const required = SGM_FEATURES.filter((feature) => !adapter?.features?.has?.(feature));
+  if (required.length) {
+    return { supported: false, reason: `missing WebGPU features: ${required.join(", ")}` };
+  }
+  const { cfg, why } = pickSgmConfig(adapterInfo);
+  if (!cfg) return { supported: false, reason: why };
+  return { supported: true, config: cfg };
+}
+
 // Pick a subgroup-matrix configuration usable for f16 x f16 -> f32 with N token columns.
 // info: GPUAdapterInfo (device.adapterInfo in Chrome), which lists subgroupMatrixConfigs and the
 // subgroup size range. Returns { M, Nm, Kc, SG } or null with a reason.

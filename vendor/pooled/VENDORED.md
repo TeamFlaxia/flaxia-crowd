@@ -97,6 +97,11 @@ errors. Deno's WebGPU backend on the same box reports a spurious out-of-memory
 for the 2B model, so use the Chrome harness for real weights.
 
 
+- `engine/wgsl/gemm_sgm.js` + `engine/qwen35.js`: added the read-only
+  `sgmatrixSupport(adapter, adapterInfo)` capability probe so hosts can log why
+  the tensor-core prefill path fell back to the portable GEMM. No kernel or
+  numeric changes; decode stays on the subgroup-free cooperative kernel (Safari 26).
+
 - `engine/qwen35.js`: split the LM head's weight bindings into 64-row-aligned
   views when they exceed `maxStorageBufferBindingSize`. Qwen3.5-2B Q4_0 stores
   its tied embedding as Q6_K, converted to Q8 by this engine; the resulting

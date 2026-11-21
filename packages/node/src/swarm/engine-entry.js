@@ -1,7 +1,7 @@
 // Vite entry: bundles the vendored Pooled engine into a lazy chunk that the
 // swarm runtime loads only when a swarm session starts. Kept as .js so the
 // TypeScript build (which only includes src/**/*.ts) ignores it.
-export { Qwen35Engine } from '../../../../vendor/pooled/engine/qwen35.js';
+export { Qwen35Engine, sgmatrixSupport } from '../../../../vendor/pooled/engine/qwen35.js';
 export {
   parseGGUFHeader,
   qwen35Weights,
