@@ -43,6 +43,28 @@ GitHub標準のUbuntu runnerでWeb / desktopを並列に実行します。Webは
 
 This harness gives single-engine and two-slice runs the same synthetic GGUF, prompt token IDs, output limit, device, warmup count, and measured repetition count. It is a deterministic engine/measurement baseline; its layer split passes hidden states inside one Deno process and does not measure browser WebRTC or Internet transport.
 
+## SIMD kernels
+
+FriedFlaxia の CPU/WASM カーネルは target 別の SIMD dot を持ちます（x86_64 AVX2 / aarch64 NEON / wasm32 `+simd128`）。scalar 経路は参照実装として残し、`friedflaxia_core::simd::set_enabled(false)` で切り替えられます。
+
+```sh
+cd ../../friedflaxia
+cargo run --release --example simd_bench       # scalar vs SIMD
+cargo test --release -p friedflaxia-core --test simd_parity
+./scripts/build-wasm.sh web /tmp/friedflaxia-pkg # wasm は +simd128 でビルド
+```
+
+ローカル環境（x86_64, AVX2, 1,048,576 elements x 200 iterations）での参考値:
+
+| kernel | time | per dot |
+| --- | --- | --- |
+| scalar | 144.30 ms | 721.52 µs |
+| AVX2 | 18.44 ms | 92.22 µs |
+
+約 7.8x。これは dot 単体のマイクロベンチであり、実モデル推論の速度向上を保証するものではありません。実モデルでの前後比較は、同じ GGUF / 同じ量子化 / 同じプロンプトで `prefillMs` と `tokensPerSecond` を記録して追加してください。誤差は `simd_parity` テスト（Q4_0/Q8_0 の scalar 比較、tolerance 1e-3）でガードしています。
+
+WebGPU 側は既に `vec4` ベースの dequant/dot と、Tensor Core を使う `prefillMath: "sgmatrix"` を備えています。`sgmatrixSupport(adapter, adapterInfo)` で対応理由を確認でき、未対応時は移植性の高い f32 GEMM へ自動フォールバックします。decode は Safari 26 互換性のため subgroup を使わない cooperative kernel のままです。
+
 ## Metrics
 
 | Field | Definition |
