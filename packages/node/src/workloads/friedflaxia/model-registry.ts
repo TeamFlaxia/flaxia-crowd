@@ -1,70 +1,21 @@
 /**
- * Pinned model download for the FriedFlaxia EmbeddingGemma backend.
+ * Pinned model download for the FriedFlaxia backends.
  *
  * Unlike `ai-inference` payloads, these URLs never come from a task. They are
- * compile-time constants, pinned to an immutable revision, and the node only
- * accepts the exact SHA-256 listed here.
+ * compile-time constants mirrored from the Rust crate's `model-manifest.json`
+ * by `scripts/sync-friedflaxia.mjs`, and the node only accepts the exact
+ * SHA-256 listed there.
  */
-export const FRIEDFLAXIA_EMBED_GEMMA = {
-  modelId: 'google/embeddinggemma-2',
-  repo: 'unsloth/embeddinggemma-2-GGUF',
-  revision: '031f0d4b35536f69ab3509d4893c923264fcf253',
-  file: 'embeddinggemma-2-Q8_0.gguf',
-  url: 'https://huggingface.co/unsloth/embeddinggemma-2-GGUF/resolve/031f0d4b35536f69ab3509d4893c923264fcf253/embeddinggemma-2-Q8_0.gguf',
-  sha256: '6f1bd4ac6c5df7444f9cca7ca36cafe6cfa34cd6f49fefb1e0b4be8143aed8bc',
-  maxBytes: 320 * 1024 * 1024,
-  dimensions: 768,
-} as const;
+import sharedManifest from '../../vendor/friedflaxia/model-manifest.json';
 
-export const FRIEDFLAXIA_EMBED_GEMMA_MMPROJ = {
-  modelId: 'google/embeddinggemma-2',
-  repo: 'ggml-org/embeddinggemma-2-GGUF',
-  revision: '6ea3e3a309d12a4779cfda98b8c19800d2d5da71',
-  file: 'mmproj-embeddinggemma-2-Q8_0.gguf',
-  url: 'https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/6ea3e3a309d12a4779cfda98b8c19800d2d5da71/mmproj-embeddinggemma-2-Q8_0.gguf',
-  sha256: '0531309472a6bc6f4b146c3736eee7795ec9db1903c25490d3c937490cef6dd8',
-  maxBytes: 700 * 1024 * 1024,
-} as const;
+const models = sharedManifest.models;
 
-export const FRIEDFLAXIA_PLAMO = {
-  modelId: 'TeamFlaxia/plamo-3-translate-0.8b-onnx',
-  repo: 'pfnet/plamo-3-translate-0.8b-GGUF',
-  revision: '1cf96ae02133958a20074bfdfab76517bb737d00',
-  file: 'plamo-3-translate-0.8b-Q4_0.gguf',
-  url: 'https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF/resolve/1cf96ae02133958a20074bfdfab76517bb737d00/plamo-3-translate-0.8b-Q4_0.gguf',
-  sha256: '33deed2822f799de4d15bb03bea1ac40efa7d663d9239ee54cc7f65f5ab92917',
-  maxBytes: 560 * 1024 * 1024,
-} as const;
-
-export const FRIEDFLAXIA_D1 = {
-  modelId: 'LiquidAI/d1-omni-600M',
-  repo: 'LiquidAI/d1-omni-600M-GGUF',
-  revision: '8eb2d2a1c5404bba8a34a88bd8e159c242197d51',
-  file: 'd1-omni-600M-Q8_0.gguf',
-  url: 'https://huggingface.co/LiquidAI/d1-omni-600M-GGUF/resolve/8eb2d2a1c5404bba8a34a88bd8e159c242197d51/d1-omni-600M-Q8_0.gguf',
-  sha256: 'cd94463f4cac9c700ec6750df8df005bb6846de410e159d1f5e985e1171693d3',
-  maxBytes: 450 * 1024 * 1024,
-} as const;
-
-export const FRIEDFLAXIA_D1_MMPROJ = {
-  modelId: 'LiquidAI/d1-omni-600M',
-  repo: 'LiquidAI/d1-omni-600M-GGUF',
-  revision: '8eb2d2a1c5404bba8a34a88bd8e159c242197d51',
-  file: 'mmproj-d1-omni-600M-Q8_0.gguf',
-  url: 'https://huggingface.co/LiquidAI/d1-omni-600M-GGUF/resolve/8eb2d2a1c5404bba8a34a88bd8e159c242197d51/mmproj-d1-omni-600M-Q8_0.gguf',
-  sha256: 'df887978550cdbb45f0f57d7b436a0f844689f9f561395a144ced500606c3a89',
-  maxBytes: 320 * 1024 * 1024,
-} as const;
-
-export const FRIEDFLAXIA_NUDENET = {
-  modelId: 'deepghs/nudenet_onnx',
-  repo: 'RemydreScarlet/nudenet-gguf',
-  revision: 'd83e0d9f17edfb32fe3c62874620ccc21f12c68d',
-  file: 'nudenet-320n-f32.gguf',
-  url: 'https://huggingface.co/RemydreScarlet/nudenet-gguf/resolve/d83e0d9f17edfb32fe3c62874620ccc21f12c68d/nudenet-320n-f32.gguf',
-  sha256: 'f1d215fde4a0c17d763e39901f176632f898630939e0be7e1420fcadb553ca60',
-  maxBytes: 16 * 1024 * 1024,
-} as const;
+export const FRIEDFLAXIA_EMBED_GEMMA = models.embeddingGemma;
+export const FRIEDFLAXIA_EMBED_GEMMA_MMPROJ = models.embeddingGemmaMmproj;
+export const FRIEDFLAXIA_PLAMO = models.plamo;
+export const FRIEDFLAXIA_D1 = models.d1;
+export const FRIEDFLAXIA_D1_MMPROJ = models.d1Mmproj;
+export const FRIEDFLAXIA_NUDENET = models.nudenet;
 
 export interface PinnedModel {
   url: string;

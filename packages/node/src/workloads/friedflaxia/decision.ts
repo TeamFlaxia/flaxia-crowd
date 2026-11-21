@@ -14,64 +14,27 @@ import { assertDecisionModelId, assertDecisionPayload } from '../decision';
 import { FRIEDFLAXIA_D1, FRIEDFLAXIA_D1_MMPROJ, downloadPinnedModel } from './model-registry';
 import { D1_YES_NO } from '../d1-omni/prompt';
 import { fetchD1Audio, fetchD1Image } from './d1-preprocess';
+import { initFriedFlaxiaWasm } from '../../vendor/friedflaxia/init';
+import type { D1Model, D1MultimodalWasmModel } from '../../vendor/friedflaxia/types';
 
-/** Minimal surface of the vendored wasm d1-omni model. */
-export interface D1Model {
-  encode(text: string, addSpecialTokens: boolean): Uint32Array;
-  decision(tokenIds: Uint32Array, markerPositions: Uint32Array, qtype: number): Float32Array;
-  token_id(token: string): number | undefined;
-  bos_token_id(): number | undefined;
-  metadata_f32(key: string): number | undefined;
-  free(): void;
-}
-
-export interface D1MultimodalWasmModel {
-  encode(text: string, addSpecialTokens: boolean): Uint32Array;
-  token_id(token: string): number | undefined;
-  bos_token_id(): number | undefined;
-  metadata_f32(key: string): number | undefined;
-  encode_image(patches: Float32Array, grid: number, grid2: number): Float32Array;
-  encode_audio(samples: Float32Array): Float32Array;
-  decision(
-    tokenIds: Uint32Array,
-    markerPositions: Uint32Array,
-    qtype: number,
-    prefix: Float32Array,
-    prefixRows: number,
-  ): Float32Array;
-  free(): void;
-}
+export type { D1Model, D1MultimodalWasmModel } from '../../vendor/friedflaxia/types';
 
 const DEFAULT_MAX_LENGTH = 16_384;
 const DEFAULT_IMAGE_TEXT_LENGTH = 896;
 const DEFAULT_AUDIO_TEXT_LENGTH = 15_360;
 const MEDIA_WIDTH = 1024;
 
-let wasmReady: Promise<void> | null = null;
 let model: D1Model | null = null;
 let modelLoad: Promise<D1Model> | null = null;
-
-async function initWasm(): Promise<void> {
-  if (!wasmReady) {
-    wasmReady = (async () => {
-      const [glue, wasmUrl] = await Promise.all([
-        import('../../vendor/friedflaxia/friedflaxia_wasm.js'),
-        import('../../vendor/friedflaxia/friedflaxia_wasm_bg.wasm?url'),
-      ]);
-      await glue.default(wasmUrl.default);
-    })();
-  }
-  return wasmReady;
-}
 
 export async function loadFriedFlaxiaD1(): Promise<D1Model> {
   if (model) return model;
   if (modelLoad) return modelLoad;
   modelLoad = (async () => {
-    await initWasm();
+    await initFriedFlaxiaWasm();
     const bytes = await downloadPinnedModel(FRIEDFLAXIA_D1);
     const { Model } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
-    const loaded = new Model(bytes) as unknown as D1Model;
+    const loaded: D1Model = new Model(bytes);
     model = loaded;
     return loaded;
   })().catch((error) => {
@@ -105,13 +68,13 @@ export async function loadFriedFlaxiaD1Multimodal(): Promise<D1MultimodalWasmMod
   if (multimodal) return multimodal;
   if (multimodalLoad) return multimodalLoad;
   multimodalLoad = (async () => {
-    await initWasm();
+    await initFriedFlaxiaWasm();
     const [textBytes, mmprojBytes] = await Promise.all([
       downloadPinnedModel(FRIEDFLAXIA_D1),
       downloadPinnedModel(FRIEDFLAXIA_D1_MMPROJ),
     ]);
     const { D1MultimodalModel } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
-    const loaded = new D1MultimodalModel(textBytes, mmprojBytes) as unknown as D1MultimodalWasmModel;
+    const loaded: D1MultimodalWasmModel = new D1MultimodalModel(textBytes, mmprojBytes);
     multimodal = loaded;
     return loaded;
   })().catch((error) => {
@@ -121,8 +84,15 @@ export async function loadFriedFlaxiaD1Multimodal(): Promise<D1MultimodalWasmMod
   return multimodalLoad;
 }
 
+/** The tokenizer-shaped subset shared by the text and multimodal wasm models. */
+interface PromptTokenizerSource {
+  bos_token_id(): number | undefined;
+  encode(text: string, addSpecialTokens: boolean): Uint32Array;
+  token_id(token: string): number | undefined;
+}
+
 class WasmPromptTokenizer implements D1PromptTokenizer {
-  constructor(private readonly d1: D1Model) {}
+  constructor(private readonly d1: PromptTokenizerSource) {}
 
   get bos_token_id(): number {
     return this.d1.bos_token_id() ?? 0;
@@ -226,7 +196,7 @@ export async function decideWithMedia(
     throw new Error(`decision: media occupy ${prefixRows} positions; send fewer images`);
   }
   const prefix = concatFloats(parts);
-  const tokenizer = new WasmPromptTokenizer(d1 as unknown as D1Model);
+  const tokenizer = new WasmPromptTokenizer(d1);
   const tokens = resolvePromptTokens(tokenizer);
   const state = decision.state ?? '';
   const answers: NonNullable<AiInferenceResult['answers']> = {};

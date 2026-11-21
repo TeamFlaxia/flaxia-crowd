@@ -2,47 +2,29 @@ import type { AiInferencePayload, AiInferenceResult } from '@flaxia/sdk';
 import { OndeviceUnavailableError } from '@flaxia/sdk';
 import { MAX_AI_INPUT_CHARS } from '../ai-model-registry';
 import { FRIEDFLAXIA_PLAMO, downloadPinnedModel } from './model-registry';
+import { initFriedFlaxiaWasm } from '../../vendor/friedflaxia/init';
+import type { PlamoModel } from '../../vendor/friedflaxia/types';
 
-/** Minimal surface of the vendored wasm PLaMO model. */
-export interface PlamoModel {
-  encode(text: string, addSpecialTokens: boolean): Uint32Array;
-  decode(ids: Uint32Array | number[]): string;
-  generate(promptIds: Uint32Array, maxTokens: number): Uint32Array;
-  free(): void;
-}
+export type { PlamoModel } from '../../vendor/friedflaxia/types';
 
 const ALLOWED_MODELS = new Set([
   FRIEDFLAXIA_PLAMO.modelId,
   'pfnet/plamo-3-translate-0.8b',
 ]);
 
-let wasmReady: Promise<void> | null = null;
 let model: PlamoModel | null = null;
 let modelLoad: Promise<PlamoModel> | null = null;
 
 export const isPlamoLoaded = (): boolean => model !== null;
 
-async function initWasm(): Promise<void> {
-  if (!wasmReady) {
-    wasmReady = (async () => {
-      const [glue, wasmUrl] = await Promise.all([
-        import('../../vendor/friedflaxia/friedflaxia_wasm.js'),
-        import('../../vendor/friedflaxia/friedflaxia_wasm_bg.wasm?url'),
-      ]);
-      await glue.default(wasmUrl.default);
-    })();
-  }
-  return wasmReady;
-}
-
 export async function loadFriedFlaxiaPlamo(): Promise<PlamoModel> {
   if (model) return model;
   if (modelLoad) return modelLoad;
   modelLoad = (async () => {
-    await initWasm();
+    await initFriedFlaxiaWasm();
     const bytes = await downloadPinnedModel(FRIEDFLAXIA_PLAMO);
     const { Model } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
-    const loaded = new Model(bytes) as unknown as PlamoModel;
+    const loaded: PlamoModel = new Model(bytes);
     model = loaded;
     return loaded;
   })().catch((error) => {

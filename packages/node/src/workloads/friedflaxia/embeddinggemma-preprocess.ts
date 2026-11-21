@@ -10,15 +10,19 @@
  * `log(mel + 0.001)`.
  */
 
-const PATCH_SIZE = 16;
-const POOLING = 3;
+import sharedManifest from '../../vendor/friedflaxia/model-manifest.json';
+
+const {
+  patchSize: PATCH_SIZE,
+  pooling: POOLING,
+  melBins: MEL_BINS,
+  frameLength: FRAME_LENGTH,
+  hopLength: HOP_LENGTH,
+  fftLength: FFT_LENGTH,
+  sampleRate: SAMPLE_RATE,
+} = sharedManifest.preprocess;
 const DEFAULT_MAX_SOFT_TOKENS = 280;
 const VIDEO_MAX_SOFT_TOKENS = 140;
-const MEL_BINS = 128;
-const FRAME_LENGTH = 320;
-const HOP_LENGTH = 160;
-const FFT_LENGTH = 512;
-const SAMPLE_RATE = 16_000;
 const MEL_FLOOR = 0.001;
 
 export const EMBEDDING_GEMMA_AUDIO_SAMPLE_RATE = SAMPLE_RATE;

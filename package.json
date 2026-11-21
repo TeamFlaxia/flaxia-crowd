@@ -9,6 +9,8 @@
     "test": "npm run build --workspace=@flaxia/sdk && npm test --workspaces --if-present",
     "test:benchmarks": "node --test scripts/benchmarks/metrics.test.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "sync:friedflaxia": "node scripts/sync-friedflaxia.mjs",
+    "check:friedflaxia": "node scripts/sync-friedflaxia.mjs --check",
     "deploy": "npm run deploy:worker --",
     "deploy:worker": "npm run deploy --workspace=packages/worker --",
     "dev:worker": "npm run dev --workspace=packages/worker",

@@ -1,37 +1,20 @@
 import type { NudeNetDetection, NudeNetPayload, NudeNetResult } from '@flaxia/sdk';
 import { FRIEDFLAXIA_NUDENET, downloadPinnedModel } from './model-registry';
 import { NUDENET_LABELS } from '../nudenet-labels';
+import { initFriedFlaxiaWasm } from '../../vendor/friedflaxia/init';
+import type { NudeNetModel } from '../../vendor/friedflaxia/types';
 
-interface NudeNetModel {
-  detect(input: Float32Array, topK: number, iouThreshold: number, scoreThreshold: number): Float32Array;
-  free(): void;
-}
-
-let wasmReady: Promise<void> | null = null;
 let model: NudeNetModel | null = null;
 let modelLoad: Promise<NudeNetModel> | null = null;
-
-async function initWasm(): Promise<void> {
-  if (!wasmReady) {
-    wasmReady = (async () => {
-      const [glue, wasmUrl] = await Promise.all([
-        import('../../vendor/friedflaxia/friedflaxia_wasm.js'),
-        import('../../vendor/friedflaxia/friedflaxia_wasm_bg.wasm?url'),
-      ]);
-      await glue.default(wasmUrl.default);
-    })();
-  }
-  return wasmReady;
-}
 
 export async function loadFriedFlaxiaNudeNet(): Promise<NudeNetModel> {
   if (model) return model;
   if (modelLoad) return modelLoad;
   modelLoad = (async () => {
-    await initWasm();
+    await initFriedFlaxiaWasm();
     const bytes = await downloadPinnedModel(FRIEDFLAXIA_NUDENET);
     const { Model } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
-    const loaded = new Model(bytes) as unknown as NudeNetModel;
+    const loaded: NudeNetModel = new Model(bytes);
     model = loaded;
     return loaded;
   })().catch((error) => {

@@ -48,6 +48,9 @@ jobs:
         # runtime values from @flaxia/sdk.
         run: npm run build
 
+      - name: Verify the wasm assets are not inlined
+        run: node --test scripts/dist-wasm.test.mjs
+
       - name: Type check
         # `npm test` only runs the suites, so without this step type errors in
         # packages that do not emit during their build (worker) are never seen.
@@ -58,6 +61,35 @@ jobs:
 
       - name: Shared Qwen3.5-2B generation baseline contracts
         run: node --test scripts/swarm-spike/generation-baseline.test.mjs scripts/swarm-spike/real-options.test.mjs scripts/swarm-spike/prepare-generation-model.test.mjs
+
+  friedflaxia-vendoring:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Read the pinned FriedFlaxia commit
+        id: pin
+        run: |
+          echo "commit=$(node -p "require('./packages/node/src/vendor/friedflaxia/manifest.json').sourceCommit")" >> "$GITHUB_OUTPUT"
+      - name: Checkout the pinned FriedFlaxia source
+        uses: actions/checkout@v4
+        with:
+          repository: TeamFlaxia/friedflaxia
+          ref: ${{ steps.pin.outputs.commit }}
+          path: friedflaxia
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - name: Verify the vendored wasm matches the pinned source
+        env:
+          FRIEDFLAXIA_DIR: ${{ github.workspace }}/friedflaxia
+        run: npm run check:friedflaxia
+      - name: Verify the manifest contract and instantiate the vendored wasm
+        run: node --test scripts/sync-friedflaxia.test.mjs scripts/friedflaxia-wasm-smoke.test.mjs
 
   video-browser:
     runs-on: ubuntu-latest

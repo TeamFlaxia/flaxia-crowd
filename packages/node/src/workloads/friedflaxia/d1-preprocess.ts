@@ -1,13 +1,14 @@
 /** Image/audio preprocessing for the d1-omni SigLIP2 + FastConformer towers. */
 
 import { fetchGuarded } from '../../executor/egress-guard';
+import sharedManifest from '../../vendor/friedflaxia/model-manifest.json';
 
-const TILE_SIZE = 512;
-const PATCH_SIZE = 16;
+const TILE_SIZE = sharedManifest.preprocess.tileSize;
+const PATCH_SIZE = sharedManifest.preprocess.patchSize;
 const PATCH_DIM = PATCH_SIZE * PATCH_SIZE * 3;
-const AUDIO_SAMPLE_RATE = 16_000;
+const AUDIO_SAMPLE_RATE = sharedManifest.preprocess.sampleRate;
 
-export const D1_IMAGE_TOKENS = 256;
+export const D1_IMAGE_TOKENS = sharedManifest.preprocess.d1ImageTokens;
 
 export const MAX_D1_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_D1_IMAGE_PIXELS = 16 * 1024 * 1024;

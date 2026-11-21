@@ -17,7 +17,37 @@ on:
       - 'sdk-v*'
 
 jobs:
+  verify-vendoring:
+    # Tag pushes do not trigger ci.yml, so re-check here that the vendored wasm
+    # is built from the exact FriedFlaxia commit recorded in the manifest.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Read the pinned FriedFlaxia commit
+        id: pin
+        run: |
+          echo "commit=$(node -p "require('./packages/node/src/vendor/friedflaxia/manifest.json').sourceCommit")" >> "$GITHUB_OUTPUT"
+      - name: Checkout the pinned FriedFlaxia source
+        uses: actions/checkout@v4
+        with:
+          repository: TeamFlaxia/friedflaxia
+          ref: ${{ steps.pin.outputs.commit }}
+          path: friedflaxia
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - name: Verify the vendored wasm matches the pinned source
+        env:
+          FRIEDFLAXIA_DIR: ${{ github.workspace }}/friedflaxia
+        run: npm run check:friedflaxia
+
   publish:
+    needs: verify-vendoring
     runs-on: ubuntu-latest
     permissions:
       contents: read

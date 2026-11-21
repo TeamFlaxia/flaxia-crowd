@@ -13,6 +13,11 @@ scripts/output/
 # HuggingFace cache
 .huggingface/
 
+# Temporary FriedFlaxia wasm build during vendoring
+.tmp-friedflaxia-wasm/
+.tmp-friedflaxia-wasm-scalar/
+.tmp-friedflaxia-target-scalar/
+
 .pnp
 .pnp.js
 

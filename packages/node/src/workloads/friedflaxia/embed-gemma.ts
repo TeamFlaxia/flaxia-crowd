@@ -3,39 +3,22 @@ import {
   FRIEDFLAXIA_EMBED_GEMMA,
   downloadPinnedModel,
 } from './model-registry';
+import { initFriedFlaxiaWasm } from '../../vendor/friedflaxia/init';
+import type { FriedFlaxiaModel } from '../../vendor/friedflaxia/types';
 
-/** Minimal surface of the vendored wasm `Model` used by this workload. */
-export interface FriedFlaxiaModel {
-  encode(text: string, addSpecialTokens: boolean): Uint32Array;
-  embed(tokenIds: Uint32Array): Float32Array;
-  free(): void;
-}
+export type { FriedFlaxiaModel } from '../../vendor/friedflaxia/types';
 
-let wasmReady: Promise<void> | null = null;
 let model: FriedFlaxiaModel | null = null;
 let modelLoad: Promise<FriedFlaxiaModel> | null = null;
-
-async function initWasm(): Promise<void> {
-  if (!wasmReady) {
-    wasmReady = (async () => {
-      const [glue, wasmUrl] = await Promise.all([
-        import('../../vendor/friedflaxia/friedflaxia_wasm.js'),
-        import('../../vendor/friedflaxia/friedflaxia_wasm_bg.wasm?url'),
-      ]);
-      await glue.default(wasmUrl.default);
-    })();
-  }
-  return wasmReady;
-}
 
 export async function loadFriedFlaxiaModel(): Promise<FriedFlaxiaModel> {
   if (model) return model;
   if (modelLoad) return modelLoad;
   modelLoad = (async () => {
-    await initWasm();
+    await initFriedFlaxiaWasm();
     const bytes = await downloadPinnedModel(FRIEDFLAXIA_EMBED_GEMMA);
     const { Model } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
-    const loaded = new Model(bytes) as unknown as FriedFlaxiaModel;
+    const loaded: FriedFlaxiaModel = new Model(bytes);
     model = loaded;
     return loaded;
   })().catch((error) => {

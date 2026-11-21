@@ -2,6 +2,9 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 
 export default defineConfig({
+  // The bundle is served from a versioned /api/crowd/v<version>-0/ proxy path,
+  // so wasm assets must resolve relative to the importing chunk.
+  base: './',
   build: {
     lib: {
       entry: {

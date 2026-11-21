@@ -30,6 +30,12 @@ export class Model {
     encode(text: string, add_special_tokens: boolean): Uint32Array;
     eos_token_id(): number | undefined;
     generate(prompt_ids: Uint32Array | number[], max_tokens: number): Uint32Array;
+    /**
+     * Stream greedy tokens to `on_token(token_id)`. The callback may return a
+     * Promise; generation waits for it before decoding the next token, so the
+     * host can pause, cancel or throttle the stream.
+     */
+    generate_stream(prompt_ids: Uint32Array | number[], max_tokens: number, on_token: Function): Promise<Uint32Array>;
     metadata_f32(key: string): number | undefined;
     metadata_u32(key: string): number | undefined;
     constructor(bytes: Uint8Array | number[]);
@@ -52,6 +58,12 @@ export class MultimodalModel {
     eos_token_id(): number | undefined;
     constructor(text_bytes: Uint8Array | number[], mmproj_bytes: Uint8Array | number[]);
 }
+
+/**
+ * Fall back to the scalar kernels when a device shows a parity regression.
+ * The vendored wasm is built with SIMD enabled by default.
+ */
+export function set_simd_enabled(enabled: boolean): void;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -78,6 +90,7 @@ export interface InitOutput {
     readonly model_encode: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly model_eos_token_id: (a: number) => number;
     readonly model_generate: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly model_generate_stream: (a: number, b: number, c: number, d: number, e: any) => any;
     readonly model_metadata_f32: (a: number, b: number, c: number) => number;
     readonly model_metadata_u32: (a: number, b: number, c: number) => number;
     readonly model_new: (a: number, b: number) => [number, number, number];
@@ -91,11 +104,17 @@ export interface InitOutput {
     readonly multimodalmodel_encode_image: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly multimodalmodel_eos_token_id: (a: number) => number;
     readonly multimodalmodel_new: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly set_simd_enabled: (a: number) => void;
+    readonly wasm_bindgen_fa09911287fee351___convert__closures_____invoke___js_sys_43b9a29608c8255b___Function_fn_wasm_bindgen_fa09911287fee351___JsValue_____wasm_bindgen_fa09911287fee351___sys__Undefined___js_sys_43b9a29608c8255b___Function_fn_wasm_bindgen_fa09911287fee351___JsValue_____wasm_bindgen_fa09911287fee351___sys__Undefined_______true_: (a: number, b: number, c: any, d: any) => void;
+    readonly wasm_bindgen_fa09911287fee351___convert__closures_____invoke___wasm_bindgen_fa09911287fee351___JsValue__core_608f92abc48d28da___result__Result_____wasm_bindgen_fa09911287fee351___JsError___true_: (a: number, b: number, c: any) => [number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
-    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __externref_table_alloc: () => number;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

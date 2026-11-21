@@ -12,31 +12,22 @@ import {
   FRIEDFLAXIA_EMBED_GEMMA_MMPROJ,
   downloadPinnedModel,
 } from './model-registry';
+import { initFriedFlaxiaWasm } from '../../vendor/friedflaxia/init';
+import type { MultimodalWasmModel } from '../../vendor/friedflaxia/types';
+import sharedManifest from '../../vendor/friedflaxia/model-manifest.json';
 
-/** Minimal surface of the vendored wasm `MultimodalModel`. */
-export interface MultimodalWasmModel {
-  encode(text: string, addSpecialTokens: boolean): Uint32Array;
-  encode_image(patches: Float32Array, gridHeight: number, gridWidth: number): Float32Array;
-  encode_audio(mel: Float32Array, frames: number): Float32Array;
-  embed(
-    tokenIds: Uint32Array,
-    imageFeatures: Float32Array,
-    videoFeatures: Float32Array,
-    audioFeatures: Float32Array,
-  ): Float32Array;
-  bos_token_id(): number | undefined;
-  eos_token_id(): number | undefined;
-  free(): void;
-}
+export type { MultimodalWasmModel } from '../../vendor/friedflaxia/types';
 
-const IMAGE_TOKEN = 258_880;
-const AUDIO_TOKEN = 258_881;
-const VIDEO_TOKEN = 258_884;
-const BOI_TOKEN = 255_999;
-const EOI_TOKEN = 258_882;
-const BOA_TOKEN = 256_000;
-const EOA_TOKEN = 258_883;
-const EMBEDDING_WIDTH = 512;
+const {
+  image: IMAGE_TOKEN,
+  audio: AUDIO_TOKEN,
+  video: VIDEO_TOKEN,
+  boi: BOI_TOKEN,
+  eoi: EOI_TOKEN,
+  boa: BOA_TOKEN,
+  eoa: EOA_TOKEN,
+} = sharedManifest.specialTokens;
+const EMBEDDING_WIDTH = sharedManifest.preprocess.embeddingWidth;
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGE_PIXELS = 16 * 1024 * 1024;
@@ -45,34 +36,20 @@ const MAX_AUDIO_SAMPLES = 30 * EMBEDDING_GEMMA_AUDIO_SAMPLE_RATE;
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 30_000;
 
-let wasmReady: Promise<void> | null = null;
 let model: MultimodalWasmModel | null = null;
 let modelLoad: Promise<MultimodalWasmModel> | null = null;
-
-async function initWasm(): Promise<void> {
-  if (!wasmReady) {
-    wasmReady = (async () => {
-      const [glue, wasmUrl] = await Promise.all([
-        import('../../vendor/friedflaxia/friedflaxia_wasm.js'),
-        import('../../vendor/friedflaxia/friedflaxia_wasm_bg.wasm?url'),
-      ]);
-      await glue.default(wasmUrl.default);
-    })();
-  }
-  return wasmReady;
-}
 
 export async function loadFriedFlaxiaMultimodalModel(): Promise<MultimodalWasmModel> {
   if (model) return model;
   if (modelLoad) return modelLoad;
   modelLoad = (async () => {
-    await initWasm();
+    await initFriedFlaxiaWasm();
     const [textBytes, mmprojBytes] = await Promise.all([
       downloadPinnedModel(FRIEDFLAXIA_EMBED_GEMMA),
       downloadPinnedModel(FRIEDFLAXIA_EMBED_GEMMA_MMPROJ),
     ]);
     const { MultimodalModel } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
-    const loaded = new MultimodalModel(textBytes, mmprojBytes) as unknown as MultimodalWasmModel;
+    const loaded: MultimodalWasmModel = new MultimodalModel(textBytes, mmprojBytes);
     model = loaded;
     return loaded;
   })().catch((error) => {
