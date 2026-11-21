@@ -70,16 +70,32 @@ export function assertPlamoPayload(payload: AiInferencePayload): { input: string
 export async function generateWithModel(
   plamo: PlamoModel,
   payload: AiInferencePayload,
+  onToken?: (token: string) => void | Promise<void>,
 ): Promise<AiInferenceResult> {
   const { input, maxNewTokens } = assertPlamoPayload(payload);
   const prompt = plamo.encode(input, true);
-  const generated = plamo.generate(prompt, maxNewTokens);
+  let generated: Uint32Array;
+  if (plamo.generateStream && onToken) {
+    generated = await plamo.generateStream(prompt, maxNewTokens, async (token) => {
+      const text = plamo.decode(Uint32Array.from([token]));
+      if (text) await onToken(text);
+    });
+  } else {
+    generated = plamo.generate(prompt, maxNewTokens);
+    // Older vendored wasm builds have no streaming entry point; still deliver
+    // the text once so subscribers are not left without any token event.
+    if (onToken) {
+      const text = plamo.decode(generated);
+      if (text) await onToken(text);
+    }
+  }
   const text = plamo.decode(generated);
   return { output: [{ generated_text: text }] };
 }
 
 export async function handleFriedFlaxiaTextGeneration(
   payload: AiInferencePayload,
+  onToken?: (token: string) => void | Promise<void>,
 ): Promise<AiInferenceResult> {
   const { input, maxNewTokens } = assertPlamoPayload(payload);
   if (payload.options?.ondeviceOnly && !model) {
@@ -90,11 +106,15 @@ export async function handleFriedFlaxiaTextGeneration(
   }
   const plamo = await loadFriedFlaxiaPlamo();
   const startedAt = performance.now();
-  const result = await generateWithModel(plamo, {
-    ...payload,
-    input,
-    options: { ...payload.options, max_new_tokens: maxNewTokens },
-  });
+  const result = await generateWithModel(
+    plamo,
+    {
+      ...payload,
+      input,
+      options: { ...payload.options, max_new_tokens: maxNewTokens },
+    },
+    onToken,
+  );
   console.log(
     `[flaxia-node] friedflaxia: PLaMO done execMs=${Math.round(performance.now() - startedAt)} maxNewTokens=${maxNewTokens}`,
   );

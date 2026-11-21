@@ -33,6 +33,38 @@ describe('friedflaxia PLaMO text generation', () => {
     expect(result).toEqual({ output: [{ generated_text: 'こんにちは' }] });
   });
 
+  it('streams decoded tokens through onToken when wasm exposes generateStream', async () => {
+    const model = fakeModel();
+    const seen: number[] = [];
+    model.generateStream = vi.fn(async (promptIds, maxTokens, onToken) => {
+      expect(promptIds).toEqual(Uint32Array.from([1, 16, 19]));
+      expect(maxTokens).toBe(8);
+      for (const token of [3, 4]) {
+        await onToken(token);
+        seen.push(token);
+      }
+      return Uint32Array.from([3, 4]);
+    });
+    const tokens: string[] = [];
+    const result = await generateWithModel(model, payload, (token) => {
+      tokens.push(token);
+    });
+
+    expect(seen).toEqual([3, 4]);
+    expect(tokens).toEqual(['こんにちは', 'こんにちは']);
+    expect(model.generate).not.toHaveBeenCalled();
+    expect(result).toEqual({ output: [{ generated_text: 'こんにちは' }] });
+  });
+
+  it('falls back to a single onToken event when wasm has no stream API', async () => {
+    const model = fakeModel();
+    const tokens: string[] = [];
+    await generateWithModel(model, payload, (token) => {
+      tokens.push(token);
+    });
+    expect(tokens).toEqual(['こんにちは']);
+  });
+
   it('rejects sampling and non-PLaMO models', () => {
     expect(() => assertPlamoPayload({ ...payload, options: { do_sample: true } })).toThrow(
       /greedy/,

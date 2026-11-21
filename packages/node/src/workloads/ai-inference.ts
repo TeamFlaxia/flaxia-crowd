@@ -79,10 +79,12 @@ export const releaseCache = (): void => {
 
 export const handleAiInference = async (
   payload: AiInferencePayload,
-  _onToken?: (token: string) => void | Promise<void>,
+  onToken?: (token: string) => void | Promise<void>,
 ): Promise<AiInferenceResult> => {
   if (payload.decision) return handleFriedFlaxiaDecision(payload);
-  if (payload.task === 'text-generation') return handleFriedFlaxiaTextGeneration(payload);
+  if (payload.task === 'text-generation') {
+    return handleFriedFlaxiaTextGeneration(payload, onToken);
+  }
   throw new Error(
     `Invalid or unsupported task: ${payload.task}. Supported tasks are: ${SUPPORTED_TASKS.join(', ')}`,
   );
