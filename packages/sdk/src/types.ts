@@ -16,7 +16,8 @@ export type WorkloadType =
   | 'nudenet'
   | 'swarm-inference'
   | 'cc-extract'
-  | 'embed-gemma';
+  | 'embed-gemma'
+  | 'theia-inference';
 
 // --- AI Inference ---
 
@@ -312,6 +313,67 @@ export interface SwarmSessionPlan {
   layers: number;
   /** Ordered chain; index 0 is the host and owns the generation loop. */
   chain: SwarmChainNode[];
+}
+
+// --- Theia distributed diffusion inference ---
+//
+// `theia-inference` is the Theia chat service's workload. It is declared here
+// so hosts and the coordinator can share one contract before the node executor
+// lands (the same staging as `moe-inference`). It is deliberately absent from
+// ROUTABLE_WORKLOADS until a node can execute a denoise step.
+
+export interface TheiaChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+export type TheiaMergeRule =
+  | 'confidence-count'
+  | 'logit-mean'
+  | 'probability-mean'
+  | 'poe';
+
+export interface TheiaInferencePayload {
+  /** Conversation handed to the dLLM denoiser. */
+  messages: TheiaChatMessage[];
+  /** Model id understood by the Theia dLLM runtime (e.g. 'qwen-dlm-4b'). */
+  model: string;
+  /** Maximum denoising steps per response (default: 128). */
+  maxSteps?: number;
+  /** Self-Repulsion strength λ (default: 64). */
+  strength?: number;
+  /** Softmax temperature (default: 0.6). */
+  temperature?: number;
+  /** Distribution merge rule applied by the host reducer. */
+  mergeRule?: TheiaMergeRule;
+  /** Optional room sizing / scheduling hints, mirroring swarm. */
+  theia?: {
+    minNodes?: number;
+    maxNodes?: number;
+    preferWarm?: boolean;
+  };
+}
+
+/** One node's contribution to a Theia denoise session. */
+export interface TheiaSwarmNodeInfo {
+  nodeId: string;
+  /** Mean prediction confidence observed for this node (0..1). */
+  confidence: number;
+  /** Denoising steps contributed by this node. */
+  steps: number;
+  /** Staleness in steps when this node's proposal was merged. */
+  ageSteps?: number;
+}
+
+export interface TheiaInferenceResult {
+  output: string;
+  tokens: string[];
+  model: string;
+  steps: number;
+  paths: number;
+  mergeRule: TheiaMergeRule;
+  nodes: TheiaSwarmNodeInfo[];
+  durationMs: number;
 }
 
 // --- Image Processing ---
@@ -618,6 +680,7 @@ export type TaskPayload = (
   | SwarmInferencePayload
   | CcExtractPayload
   | EmbedGemmaPayload
+  | TheiaInferencePayload
 ) & TaskPayloadRouting;
 
 export interface TaskRecord {

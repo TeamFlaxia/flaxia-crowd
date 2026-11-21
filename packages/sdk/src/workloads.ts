@@ -18,13 +18,14 @@ export const WORKLOAD_TYPES = [
   'swarm-inference',
   'cc-extract',
   'embed-gemma',
+  'theia-inference',
 ] as const satisfies readonly WorkloadType[];
 
 /**
  * Workloads that are implemented end-to-end (node executor + orchestrator
  * routing) and therefore safe for the orchestrator to enqueue. `moe-inference`
- * is declared in the protocol but has no node implementation yet, so it is
- * deliberately excluded.
+ * and `theia-inference` are declared in the protocol but have no node
+ * implementation yet, so they are deliberately excluded.
  */
 export const ROUTABLE_WORKLOADS = [
   'ai-inference',
@@ -56,6 +57,9 @@ export const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set<WorkloadType>(
   'nudenet',
   'swarm-inference',
   'embed-gemma',
+  // A Theia node holds dLLM weights and runs iterative denoising, so it must
+  // never be placed on a low-memory device once the executor lands.
+  'theia-inference',
 ]);
 
 /** Default per-workload task timeout in milliseconds. */
@@ -77,6 +81,9 @@ export const DEFAULT_WORKLOAD_TIMEOUT_MS: Readonly<Record<WorkloadType, number>>
   'cc-extract': 60_000,
   // EmbeddingGemma 2 text-only: model load plus a bounded batch.
   'embed-gemma': 120_000,
+  // Diffusion inference needs the cold model load plus K paths × denoise
+  // steps. Mirrors swarm-inference headroom until the executor is measured.
+  'theia-inference': 1_800_000,
 };
 
 /** Narrowing guard for untrusted input (HTTP bodies, postMessage, storage). */

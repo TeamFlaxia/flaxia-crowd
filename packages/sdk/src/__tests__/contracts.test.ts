@@ -29,6 +29,7 @@ describe('workloads', () => {
     expect(WORKLOAD_TYPES).toContain('swarm-inference');
     expect(WORKLOAD_TYPES).toContain('cc-extract');
     expect(WORKLOAD_TYPES).toContain('embed-gemma');
+    expect(WORKLOAD_TYPES).toContain('theia-inference');
     expect(new Set(WORKLOAD_TYPES).size).toBe(WORKLOAD_TYPES.length);
   });
 
@@ -36,15 +37,18 @@ describe('workloads', () => {
     expect(isWorkloadType('nudenet')).toBe(true);
     expect(isWorkloadType('moe-inference')).toBe(true);
     expect(isWorkloadType('swarm-inference')).toBe(true);
+    expect(isWorkloadType('theia-inference')).toBe(true);
     expect(isWorkloadType('not-a-workload')).toBe(false);
     expect(isWorkloadType(42)).toBe(false);
   });
 
   it('only treats implemented workloads as routable', () => {
     expect(ROUTABLE_WORKLOADS).not.toContain('moe-inference');
+    expect(ROUTABLE_WORKLOADS).not.toContain('theia-inference');
     expect(ROUTABLE_WORKLOADS).toContain('swarm-inference');
     expect(isRoutableWorkload('nudenet')).toBe(true);
     expect(isRoutableWorkload('moe-inference')).toBe(false);
+    expect(isRoutableWorkload('theia-inference')).toBe(false);
     expect(isRoutableWorkload('swarm-inference')).toBe(true);
     expect(isRoutableWorkload('cc-extract')).toBe(true);
     expect(isRoutableWorkload('embed-gemma')).toBe(true);
@@ -59,6 +63,7 @@ describe('workloads', () => {
     expect(isHeavyWorkload('vector-query')).toBe(true);
     expect(isHeavyWorkload('cc-extract')).toBe(false);
     expect(isHeavyWorkload('embed-gemma')).toBe(true);
+    expect(isHeavyWorkload('theia-inference')).toBe(true);
     expect(HEAVY_WORKLOADS.has('moe-inference')).toBe(false);
   });
 
@@ -69,6 +74,7 @@ describe('workloads', () => {
     }
     expect(defaultTimeoutFor('cc-extract')).toBe(60_000);
     expect(defaultTimeoutFor('embed-gemma')).toBe(120_000);
+    expect(defaultTimeoutFor('theia-inference')).toBe(1_800_000);
   });
 
   it('accepts only supported Matryoshka dimensions', () => {
