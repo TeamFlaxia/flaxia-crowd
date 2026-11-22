@@ -25,10 +25,10 @@ test('the built bundle emits both wasm modules as separate assets', () => {
   assert.ok(!glue.includes('data:application/wasm'), 'wasm was inlined into the glue chunk');
   assert.ok(glue.includes('../friedflaxia_wasm_bg.wasm'), 'glue does not use the emitted asset');
 
-  const init = readFileSync(resolve(DIST, 'assets/init.js'), 'utf8');
-  assert.ok(!init.includes('data:application/wasm'), 'baseline wasm was inlined into init.js');
+  const init = readFileSync(resolve(DIST, 'wasm-init.js'), 'utf8');
+  assert.ok(!init.includes('data:application/wasm'), 'baseline wasm was inlined into wasm-init.js');
   assert.ok(
-    init.includes('../friedflaxia_wasm_bg.scalar.wasm'),
+    init.includes('friedflaxia_wasm_bg.scalar.wasm'),
     'baseline fallback does not use the emitted asset',
   );
 });

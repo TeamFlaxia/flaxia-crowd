@@ -117,3 +117,21 @@ jobs:
         env:
           PLAYWRIGHT_MODULE: ${{ runner.temp }}/flaxia-browser-tools/node_modules/playwright/index.mjs
           CHROME: /usr/bin/google-chrome
+
+  wasm-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build --workspace=@flaxia/node
+      - run: npm install --prefix "$RUNNER_TEMP/flaxia-browser-tools" --package-lock=false --ignore-scripts playwright@1.62.1
+      - name: Instantiate the SIMD and baseline wasm in Chrome
+        run: node scripts/wasm-smoke.mjs
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/flaxia-browser-tools/node_modules/playwright/index.mjs
+          CHROME: /usr/bin/google-chrome

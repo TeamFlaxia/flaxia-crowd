@@ -11,6 +11,9 @@ export default defineConfig({
         index: resolve(__dirname, 'src/index.ts'),
         worker: resolve(__dirname, 'src/worker/main.worker.ts'),
         'swarm-engine': resolve(__dirname, 'src/swarm/engine-entry.js'),
+        // Small public entry used by the browser smoke test and hosts that
+        // want to warm the wasm runtime before the first task.
+        'wasm-init': resolve(__dirname, 'src/vendor/friedflaxia/init.ts'),
       },
       formats: ['es'],
     },
