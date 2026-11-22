@@ -128,7 +128,7 @@ jobs:
           node-version: 22.x
           cache: 'npm'
       - run: npm ci
-      - run: npm run build --workspace=@flaxia/node
+      - run: npm run build
       - run: npm install --prefix "$RUNNER_TEMP/flaxia-browser-tools" --package-lock=false --ignore-scripts playwright@1.62.1
       - name: Instantiate the SIMD and baseline wasm in Chrome
         run: node scripts/wasm-smoke.mjs
