@@ -39,6 +39,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - name: Add the wasm target to the pinned toolchain
+        run: |
+          cd friedflaxia
+          rustup target add wasm32-unknown-unknown
       - name: Install wasm-bindgen
         run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
       - name: Verify the vendored wasm matches the pinned source
