@@ -81,6 +81,14 @@ function bindgenVersion(dir) {
   return result.stdout.trim().replace(/^wasm-bindgen\s+/, '');
 }
 
+/** Rust toolchain pinned by the FriedFlaxia checkout, if any. */
+function pinnedToolchain() {
+  const path = resolve(friedflaxiaDir, 'rust-toolchain.toml');
+  if (!existsSync(path)) return null;
+  const match = readFileSync(path, 'utf8').match(/^\s*channel\s*=\s*"([^"]+)"/m);
+  return match ? match[1] : null;
+}
+
 function build(outDir, { simd }) {
   if (!existsSync(resolve(friedflaxiaDir, 'scripts/build-wasm.sh'))) {
     throw new Error(
@@ -94,6 +102,10 @@ function build(outDir, { simd }) {
     SOURCE_DATE_EPOCH: '0',
     FRIEDFLAXIA_WASM_SIMD: simd ? '1' : '0',
   };
+  // The action-installed default may be newer than the checkout's pin. Set it
+  // explicitly so CI reproduces the exact bytes the release was vendored from.
+  const toolchain = pinnedToolchain();
+  if (toolchain) env.RUSTUP_TOOLCHAIN = toolchain;
   if (!simd) env.CARGO_TARGET_DIR = SCALAR_TARGET_DIR;
   const result = spawnSync('./scripts/build-wasm.sh', ['web', outDir], {
     cwd: friedflaxiaDir,
