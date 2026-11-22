@@ -1,6 +1,6 @@
 {
   "sourceRepository": "https://github.com/TeamFlaxia/friedflaxia",
-  "sourceCommit": "dd85cb4692fc5d50b750d1e0ce917bd7a528ec78",
+  "sourceCommit": "66fdcc7cacfc9cb78ca3f32716674075d15bddca",
   "wasmBindgenVersion": "0.2.130",
   "wasmSimd128": true,
   "wasmScalarFallback": true,
@@ -8,8 +8,8 @@
   "files": {
     "friedflaxia_wasm.js": "854e9d140617f2f13f63b8e86a95723eaf5872fe3c5ddec556ed8c6b23c52395",
     "friedflaxia_wasm.d.ts": "773c7b844f2bf2f5fb73fc80fe4e6af6843747acb56b1d45c56d6dbfb3b97198",
-    "friedflaxia_wasm_bg.wasm": "0a7fa567774d3d382cb66dc2c73a1abb05a24f7c90e9d98fe1d40caf7cff2ee8",
-    "friedflaxia_wasm_bg.scalar.wasm": "a229269a798f228b5439bb9cf1b9eccc76eaa26fb82a89da3cb37cc46fa0abfc",
+    "friedflaxia_wasm_bg.wasm": "f1d5def127e023b3bede8ed4761a6f8f482fad469182359d51b6e399234a3e8a",
+    "friedflaxia_wasm_bg.scalar.wasm": "01ebea25cc3d4e8726702c5d729dea8651380debd6fbd03413874a422f0c00f7",
     "friedflaxia_wasm_bg.wasm.d.ts": "65909fb4e50aef44cadf596c51f3e312a8e231d4bdcf2c19ce62383588fb87bd",
     "model-manifest.json": "7526cfd1d58c31abae7839db6de639a95e937ca32dc4e8f4f37c10b7e31c851b"
   }

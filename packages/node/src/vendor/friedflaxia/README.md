@@ -4,7 +4,7 @@ Generated from the `friedflaxia-wasm` crate. Do not edit the generated files;
 run `node scripts/sync-friedflaxia.mjs` from the flaxia-crowd root instead.
 
 - Source: https://github.com/TeamFlaxia/friedflaxia
-- Commit: dd85cb4692fc5d50b750d1e0ce917bd7a528ec78
+- Commit: 66fdcc7cacfc9cb78ca3f32716674075d15bddca
 - wasm-bindgen: 0.2.130
 - Target: `web` (`./scripts/build-wasm.sh web <out>`)
 - wasm features: `simd128` + baseline fallback (`friedflaxia_wasm_bg.scalar.wasm`)
