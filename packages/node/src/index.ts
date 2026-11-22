@@ -15,6 +15,10 @@ export { initConsentIntegrity as initFlaxiaNodeConsent } from './consent/storage
 export { setHostManagedConsentAllowed as setFlaxiaNodeHostManagedConsent } from './consent/storage';
 export { initFlaxiaNode };
 export {
+  hasWasmSimd,
+  setFriedFlaxiaSimdEnabled,
+} from './vendor/friedflaxia/init';
+export {
   LIGHT_INFERENCE_TRANSLATE_MODEL,
   LIGHT_INFERENCE_PLAMO_TRANSLATE_MODEL,
   LIGHT_INFERENCE_PLAMO_TRANSLATE_TASK,

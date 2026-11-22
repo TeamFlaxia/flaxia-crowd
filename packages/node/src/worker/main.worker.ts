@@ -10,6 +10,7 @@ import {
 import { SwarmController } from '../swarm/controller';
 import { createSwarmRuntime, getSwarmModelCacheSnapshot } from '../swarm/runtime';
 import { isSwarmControlEnvelope } from '../swarm/messages';
+import { hasWasmSimd } from '../vendor/friedflaxia/init';
 
 let throttle: CpuThrottle | null = null;
 
@@ -118,7 +119,7 @@ function createTokenSink(id: string): (token: string) => Promise<void> {
 const WASM_MEMORY_BYTES = probeMaxWasmMemoryBytes();
 const CAPABLE = hasEnoughWasmMemoryForHeavy();
 console.log(
-  `[flaxia-node:worker] startup memory probe wasmMemoryBytes=${WASM_MEMORY_BYTES} capable=${CAPABLE}`,
+  `[flaxia-node:worker] startup memory probe wasmMemoryBytes=${WASM_MEMORY_BYTES} capable=${CAPABLE} wasmSimd=${hasWasmSimd()}`,
 );
 
 function hasEnoughMemoryForHeavyWorkload(): boolean {
