@@ -159,6 +159,9 @@ export function implicitWarmModelId(workload: string): string {
       return 'google/embeddinggemma-2';
     case 'nudenet':
       return 'deepghs/nudenet_onnx';
+    case 'theia-inference':
+      // Mirrors THEIA_DLLM_MODEL_ID; the worker cannot import the node vendor.
+      return 'qwen3-0.6b-diffusion-bd3lm';
     default:
       return '';
   }
