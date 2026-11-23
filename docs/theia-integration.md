@@ -31,28 +31,33 @@ interface TheiaInferencePayload {
   steps?: number;                // denoise steps in this block round
   maxSteps?: number;             // default 128
   strength?: number;             // Self-Repulsion λ, default 64
-  temperature?: number;          // default 0.6
+  temperature?: number;          // node-side sampling, default 0.6
   mergeRule?: 'confidence-count' | 'logit-mean' | 'probability-mean' | 'poe';
-  theia?: { minNodes?: number; maxNodes?: number; preferWarm?: boolean };
+  theia?: { preferWarm?: boolean };
 }
 ```
 
 `phase: 'generate'` runs a complete response for one expert (baseline and the
 existing Theia `CrowdInference` path). `phase: 'denoise'` runs `steps` denoise
-steps over the supplied canvas and returns edit deltas for the host reducer.
+steps (default 8) over the supplied canvas (`canvas` is required, and forbidden
+in generate mode) and returns edit deltas for the host reducer. `round` defaults
+to 0. Placement is independent per task; there is no room or session record.
 
 ```ts
 interface TheiaSpan {
   id: string;
   start: number;                 // UTF-16 offsets into canvas.text
   end: number;
+}
+
+interface TheiaCanvasSpan extends TheiaSpan {
   open: boolean;                 // false once committed (revisable if enabled)
 }
 
 interface TheiaCanvas {
   version: number;
   text: string;
-  spans: TheiaSpan[];
+  spans: TheiaCanvasSpan[];
 }
 
 type TheiaEditOp = {
@@ -101,12 +106,14 @@ interface TheiaInferenceResult {
     confidence: number;          // 0..1
     steps: number;
     deltaCount?: number;
-    revertCount?: number;
-    ageSteps?: number;           // staleness when merged
+    ageSteps?: number;           // staleness in rounds when merged
   }>;
   durationMs: number;
 }
 ```
+
+`nodes` and `paths` are **host-side aggregates**: a single node task returns one
+expert's deltas, and a node cannot observe how many deltas were later superseded.
 
 ## Host flow (target)
 
@@ -116,7 +123,7 @@ to expert nodes; Crowd is a compute pool, not a session orchestrator.
 1. The host builds a canvas (text + open span slots) for the response.
 2. Every block round, it snapshots the canvas and submits one
    `theia-inference` task per expert (`phase: 'denoise'`, `steps: 8`, same
-   `canvasVersion`).
+   `canvas.version`).
 3. Each node runs its LoRA expert over the snapshot and returns `deltas`.
 4. The host validates and accumulates deltas as evidence, then projects and
    commits with the gate (margin, support, persistence, cooldown, revision
@@ -146,10 +153,28 @@ Qwen3-0.6B-bd3lm for algorithm validation) plus LoRA adapters for `code`,
 deltas and confidences are directly comparable.
 
 - Distribution: base GGUF + adapter files, each pinned by SHA-256.
-- Routing: node capabilities such as `theia-expert-code`; no grouping logic.
-- Warm placement: the existing `modelCache` heartbeat, extended with the adapter
-  id.
+- Routing (planned): expert capabilities such as `theia-expert-code`. The
+  current capability schema is `WorkloadType[]`, so this needs an
+  `expertCapabilities` field (or equivalent) before it can be advertised.
+- Warm placement (planned): the existing `modelCache` heartbeat extended with
+  the adapter id; `preferWarm` has no adapter advertisement yet.
 
+
+## Validation
+
+The SDK exports the same guards the node/worker should use:
+
+```ts
+isTheiaInferencePayload(value)                       // messages/model/phase/canvas
+isTheiaCanvas(value)                                 // bounds + sorted spans
+isTheiaDelta(value, canvas, { allowRevisions })      // op -> editable span match
+```
+
+`isTheiaDelta` needs the canvas because v1 ops must target an existing editable
+span; a shape-only check would accept deltas the host discards. Each delta is
+capped at 8 ops and 512 chars/op; a denoise result should keep at most
+`MAX_THEIA_RESULT_DELTAS` (64). Message objects may carry `id`/`createdAt`; the
+validator ignores extra consumer fields.
 
 ## Model candidates
 
