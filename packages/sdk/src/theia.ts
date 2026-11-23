@@ -27,6 +27,12 @@ export const MAX_THEIA_DELTA_OPS = 8;
 export const MAX_THEIA_DELTA_TEXT_CHARS = 512;
 /** Bound the optional per-token probabilities attached to one op. */
 export const MAX_THEIA_DELTA_TOKEN_PROBS = 512;
+/**
+ * Manifest id of the pinned base dLLM. The node reports it in `modelCache`
+ * (with the adapter id in T5) so the coordinator can place a task on a warm
+ * node; keep it in sync with FriedFlaxia's `model-manifest.json`.
+ */
+export const THEIA_DLLM_MODEL_ID = 'qwen3-0.6b-diffusion-bd3lm';
 /** Bound the deltas a node may return in one denoise result. */
 export const MAX_THEIA_RESULT_DELTAS = 64;
 /** Bound the conversation handed to one task. */
@@ -220,6 +226,9 @@ export function isTheiaInferencePayload(value: unknown): value is TheiaInference
   if (value.round !== undefined && !isIntegerInRange(value.round, 0, 1_000_000)) return false;
   if (value.steps !== undefined && !isIntegerInRange(value.steps, 1, 256)) return false;
   if (value.maxSteps !== undefined && !isIntegerInRange(value.maxSteps, 1, 4096)) return false;
+  if (value.maxNewTokens !== undefined && !isIntegerInRange(value.maxNewTokens, 1, 256)) {
+    return false;
+  }
   if (
     value.strength !== undefined &&
     (typeof value.strength !== 'number' || !Number.isFinite(value.strength) || value.strength < 0)

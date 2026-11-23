@@ -24,8 +24,8 @@ export const WORKLOAD_TYPES = [
 /**
  * Workloads that are implemented end-to-end (node executor + orchestrator
  * routing) and therefore safe for the orchestrator to enqueue. `moe-inference`
- * and `theia-inference` are declared in the protocol but have no node
- * implementation yet, so they are deliberately excluded.
+ * is declared in the protocol but has no node implementation yet, so it is
+ * deliberately excluded.
  */
 export const ROUTABLE_WORKLOADS = [
   'ai-inference',
@@ -39,6 +39,7 @@ export const ROUTABLE_WORKLOADS = [
   'swarm-inference',
   'cc-extract',
   'embed-gemma',
+  'theia-inference',
 ] as const satisfies readonly WorkloadType[];
 
 /**

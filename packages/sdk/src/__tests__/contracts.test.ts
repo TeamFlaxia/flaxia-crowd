@@ -44,11 +44,11 @@ describe('workloads', () => {
 
   it('only treats implemented workloads as routable', () => {
     expect(ROUTABLE_WORKLOADS).not.toContain('moe-inference');
-    expect(ROUTABLE_WORKLOADS).not.toContain('theia-inference');
+    expect(ROUTABLE_WORKLOADS).toContain('theia-inference');
     expect(ROUTABLE_WORKLOADS).toContain('swarm-inference');
     expect(isRoutableWorkload('nudenet')).toBe(true);
     expect(isRoutableWorkload('moe-inference')).toBe(false);
-    expect(isRoutableWorkload('theia-inference')).toBe(false);
+    expect(isRoutableWorkload('theia-inference')).toBe(true);
     expect(isRoutableWorkload('swarm-inference')).toBe(true);
     expect(isRoutableWorkload('cc-extract')).toBe(true);
     expect(isRoutableWorkload('embed-gemma')).toBe(true);
