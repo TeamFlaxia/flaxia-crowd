@@ -440,8 +440,8 @@ export interface TheiaNodeInfo {
   steps: number;
   /** Deltas accepted from this node. */
   deltaCount?: number;
-  /** Staleness in rounds when this node's proposal was merged. */
-  ageSteps?: number;
+  /** Staleness in merge rounds when this node's proposal was merged. */
+  ageRounds?: number;
 }
 
 export interface TheiaInferenceResult {
@@ -460,7 +460,7 @@ export interface TheiaInferenceResult {
   phase?: TheiaPhase;
   tokens?: string[];
   /** Host-side fan-out width K (number of expert tasks), not a node request. */
-  paths?: number;
+  expertCount?: number;
   mergeRule?: TheiaMergeRule;
   /** Host aggregate; a single node task does not populate this. */
   nodes?: TheiaNodeInfo[];

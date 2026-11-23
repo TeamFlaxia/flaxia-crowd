@@ -81,7 +81,7 @@ export const DEFAULT_WORKLOAD_TIMEOUT_MS: Readonly<Record<WorkloadType, number>>
   'cc-extract': 60_000,
   // EmbeddingGemma 2 text-only: model load plus a bounded batch.
   'embed-gemma': 120_000,
-  // Diffusion inference needs the cold model load plus K paths × denoise
+  // Diffusion inference needs the cold model load plus expertCount × denoise
   // steps. Mirrors swarm-inference headroom until the executor is measured.
   'theia-inference': 1_800_000,
 };

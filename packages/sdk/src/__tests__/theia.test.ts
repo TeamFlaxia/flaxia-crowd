@@ -134,6 +134,10 @@ describe('theia delta guard', () => {
     expect(isTheiaDelta(delta(), committed, { allowRevisions: true })).toBe(true);
   });
 
+  it('rejects a delta against a zero-span canvas', () => {
+    expect(isTheiaDelta(delta(), canvas({ text: '', spans: [] }))).toBe(false);
+  });
+
   it('rejects duplicate targets inside one delta', () => {
     expect(
       isTheiaDelta(
@@ -251,12 +255,33 @@ describe('theia payload guard', () => {
       ),
     ).toBe(false);
     expect(
-      isTheiaInferencePayload(payload({ messages: [{ role: 'user', content: 'x'.repeat(16_001) }] })),
+      isTheiaInferencePayload(payload({ messages: [{ role: 'user', content: 'x'.repeat(64_001) }] })),
     ).toBe(false);
+    expect(
+      isTheiaInferencePayload(
+        payload({
+          messages: [
+            { role: 'user', content: 'x'.repeat(33_000) },
+            { role: 'user', content: 'y'.repeat(33_000) },
+          ],
+        }),
+      ),
+    ).toBe(false);
+    expect(isTheiaInferencePayload(payload({ model: 'x'.repeat(129) }))).toBe(false);
+    expect(isTheiaInferencePayload(payload({ maxSteps: 0 }))).toBe(false);
+    expect(isTheiaInferencePayload(payload({ maxSteps: 5000 }))).toBe(false);
   });
 
   it('rejects invalid phase, expert, and numeric options', () => {
     expect(isTheiaInferencePayload(payload({ phase: 'step' as never }))).toBe(false);
+    expect(isTheiaInferencePayload(payload({ phase: null as never }))).toBe(false);
+    expect(
+      isTheiaInferencePayload(
+        payload({
+          messages: [{ role: 'user', content: 'hi', id: 'm1', createdAt: 1 }],
+        }),
+      ),
+    ).toBe(true);
     expect(isTheiaInferencePayload(payload({ expert: 'x'.repeat(65) }))).toBe(false);
     expect(isTheiaInferencePayload(payload({ round: -1 }))).toBe(false);
     expect(isTheiaInferencePayload(payload({ steps: 0 }))).toBe(false);

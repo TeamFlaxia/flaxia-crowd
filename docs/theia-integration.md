@@ -22,7 +22,7 @@ implemented yet, so `theia-inference` is declared but deliberately excluded from
 
 ```ts
 interface TheiaInferencePayload {
-  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string; id?: string; createdAt?: number }>;
   model: string;                 // base model, e.g. 'qwen-dlm-4b'
   phase?: 'generate' | 'denoise'; // default 'generate'
   expert?: string;               // LoRA adapter id, e.g. 'code' | 'math' | 'chat'
@@ -98,7 +98,7 @@ interface TheiaInferenceResult {
   expert?: string;
   phase?: 'generate' | 'denoise';
   tokens?: string[];
-  paths?: number;
+  expertCount?: number;          // host fan-out K
   mergeRule?: TheiaMergeRule;
   nodes?: Array<{
     nodeId: string;
@@ -106,13 +106,13 @@ interface TheiaInferenceResult {
     confidence: number;          // 0..1
     steps: number;
     deltaCount?: number;
-    ageSteps?: number;           // staleness in rounds when merged
+    ageRounds?: number;          // staleness in merge rounds when merged
   }>;
   durationMs: number;
 }
 ```
 
-`nodes` and `paths` are **host-side aggregates**: a single node task returns one
+`nodes` and `expertCount` are **host-side aggregates**: a single node task returns one
 expert's deltas, and a node cannot observe how many deltas were later superseded.
 
 ## Host flow (target)
@@ -173,8 +173,8 @@ isTheiaDelta(value, canvas, { allowRevisions })      // op -> editable span matc
 `isTheiaDelta` needs the canvas because v1 ops must target an existing editable
 span; a shape-only check would accept deltas the host discards. Each delta is
 capped at 8 ops and 512 chars/op; a denoise result should keep at most
-`MAX_THEIA_RESULT_DELTAS` (64). Message objects may carry `id`/`createdAt`; the
-validator ignores extra consumer fields.
+`MAX_THEIA_RESULT_DELTAS` (64). Message `id`/`createdAt` are validated when
+present; unknown extra fields are ignored.
 
 ## Model candidates
 

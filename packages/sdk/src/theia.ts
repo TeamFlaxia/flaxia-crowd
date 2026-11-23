@@ -31,7 +31,7 @@ export const MAX_THEIA_DELTA_TOKEN_PROBS = 512;
 export const MAX_THEIA_RESULT_DELTAS = 64;
 /** Bound the conversation handed to one task. */
 export const MAX_THEIA_MESSAGES = 64;
-export const MAX_THEIA_MESSAGE_CHARS = 16_000;
+export const MAX_THEIA_MESSAGE_CHARS = 64_000;
 export const MAX_THEIA_MESSAGES_TOTAL_CHARS = 64_000;
 export const MAX_THEIA_MODEL_CHARS = 128;
 
@@ -208,7 +208,7 @@ export function isTheiaInferencePayload(value: unknown): value is TheiaInference
   if (chars > MAX_THEIA_MESSAGES_TOTAL_CHARS) return false;
   if (!isShortString(value.model, MAX_THEIA_MODEL_CHARS)) return false;
 
-  const phase = value.phase ?? 'generate';
+  const phase = value.phase === undefined ? 'generate' : value.phase;
   if (!isTheiaPhase(phase)) return false;
   if (value.expert !== undefined && !isShortString(value.expert, 64)) return false;
   if (phase === 'denoise') {
