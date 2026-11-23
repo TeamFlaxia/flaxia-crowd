@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",
+    "@flaxia/sdk": "^0.7.1",
     "mp4box": "2.5.0",
     "parse5": "^8.1.0",
     "rollup": "^4.61.0"
@@ -27,15 +28,6 @@
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",
     "@types/node": "^22.0.0",
-    "vitest": "^4.1.6",
-    "@flaxia/sdk": "^0.7.1"
-  },
-  "peerDependencies": {
-    "@flaxia/sdk": "^0.7.1"
-  },
-  "peerDependenciesMeta": {
-    "@flaxia/sdk": {
-      "optional": true
-    }
+    "vitest": "^4.1.6"
   }
 }

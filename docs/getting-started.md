@@ -24,9 +24,8 @@ npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.
 npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz
 ```
 
-`@flaxia/node` の実行時コードは `@flaxia/sdk` を同梱していますが、型定義
-（`.d.ts`）は `@flaxia/sdk` を参照します。TypeScript で使う場合だけ、sdk の
-tarball も入れてください（レジストリからの解決は行いません）:
+`@flaxia/node` は `@flaxia/sdk` に依存します。レジストリからの解決を避けたい場合は
+両方の tarball を同時に指定してください:
 
 ```bash
 npm install \
