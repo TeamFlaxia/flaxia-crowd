@@ -53,7 +53,15 @@ export const releaseCache = (): void => {
 /** Whether the text encoder is resident, for the coordinator's warm placement. */
 export const isEmbedGemmaLoaded = (): boolean => model !== null;
 
-/** Cache snapshot entry for the resident text encoder (empty when cold). */
+/**
+ * Cache snapshot entry for the resident text encoder (empty when cold).
+ *
+ * The manifest uses one id for the base encoder and the mmproj-qualified
+ * multimodal model, so this entry is also what the coordinator matches for a
+ * `vector-embed` task. A node that only has the text encoder warm therefore
+ * advertises warm for a multimodal task too; that overstatement is intentional
+ * because the cache identity cannot distinguish the two.
+ */
 export function getEmbedGemmaCacheSnapshot(): NodeModelCacheSnapshot {
   const sampledAt = Date.now();
   return {
@@ -133,10 +141,10 @@ export async function handleFriedFlaxiaEmbedGemma(
   const startedAt = performance.now();
   const dimensions = payload.dimensions ?? (FRIEDFLAXIA_EMBED_GEMMA.dimensions as EmbedGemmaDimensions);
   const loaded = await loadFriedFlaxiaModel();
-  const tokens = payload.texts.reduce((sum, text) => sum + text.length, 0);
+  const chars = payload.texts.reduce((sum, text) => sum + text.length, 0);
   const vectors = await embedTexts(loaded, payload.texts, dimensions, onBatch);
   console.log(
-    `[flaxia-node:worker] embed-gemma texts=${payload.texts.length} chars=${tokens} ` +
+    `[flaxia-node:worker] embed-gemma texts=${payload.texts.length} chars=${chars} ` +
       `dimensions=${dimensions} ms=${Math.round(performance.now() - startedAt)}`,
   );
   return {

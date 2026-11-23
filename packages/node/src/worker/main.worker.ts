@@ -145,8 +145,15 @@ function releaseLoadedCaches(): void {
 
 function getModelCacheSnapshot(): NodeModelCacheSnapshot {
   const sampledAt = Date.now();
+  // Dedupe after flatMap: the text and multimodal snapshotters can both report
+  // the same manifest id, and the 8-entry budget is shared with swarm.
+  const seen = new Set<string>();
   const entries = [...cacheSnapshotters.values()].flatMap((snapshot) => {
     try { return snapshot().entries; } catch { return []; }
+  }).filter((entry) => {
+    if (seen.has(entry.modelId)) return false;
+    seen.add(entry.modelId);
+    return true;
   }).slice(0, 8);
   return { version: 1, sampledAt, expiresAt: sampledAt + 60_000, entries };
 }

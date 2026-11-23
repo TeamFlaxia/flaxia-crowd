@@ -85,7 +85,13 @@ export const releaseCache = (): void => {
 /** Whether the multimodal encoder (text + mmproj) is resident. */
 export const isMultimodalLoaded = (): boolean => model !== null;
 
-/** Cache snapshot entry for the resident multimodal encoder. */
+/**
+ * Cache snapshot entry for the resident multimodal encoder (text + mmproj).
+ *
+ * It shares the manifest id with the text-only encoder (see the matching note
+ * in `embed-gemma.ts`), so a text-warm node also counts as warm here. The
+ * coordinator cannot tell the two apart from the cache identity alone.
+ */
 export function getMultimodalCacheSnapshot(): NodeModelCacheSnapshot {
   const sampledAt = Date.now();
   return {
