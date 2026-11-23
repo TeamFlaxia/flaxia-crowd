@@ -9,11 +9,12 @@ interface ActiveTask {
   id: string;
   workload: string;
   priority: number;
-  resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   worker: Worker;
   removeListener: () => void;
+  /** Re-run this exact task (used when a foreground task preempts it). */
+  job: () => void;
 }
 
 /** A task waiting for the worker, with the handle needed to settle or drop it. */
@@ -98,6 +99,9 @@ export class WorkerPool {
   ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const queuedAt = performance.now();
+      // Only two classes exist: foreground (0) and speculative (1). Normalising
+      // keeps a stray negative value from preempting everything.
+      priority = priority > 0 ? 1 : 0;
       if (!this.worker) {
         reject(new Error('Worker not available'));
         return;
@@ -110,7 +114,8 @@ export class WorkerPool {
         reject(new Error('WorkerPool queue is full; task rejected (retryable)'));
         return;
       }
-      const job = () => this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, swarm, priority, queuedAt);
+      const job: () => void = () =>
+        this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, swarm, priority, queuedAt, job);
       // A foreground task must not wait behind a speculative model warm-up:
       // terminate that worker (the only way to stop a synchronous wasm load)
       // and let this task start on a fresh one.
@@ -130,10 +135,11 @@ export class WorkerPool {
   }
 
   /**
-   * Stop the active task without an error and start from a fresh worker.
+   * Re-queue the active task at its own priority and start from a fresh worker.
    *
-   * Used only for speculative preloads; the promise resolves with a marker so
-   * the caller can tell that the warm-up did not finish.
+   * Used for speculative preloads. Re-queueing (instead of settling) keeps the
+   * warm-up alive: a preempted preload runs again once the foreground task
+   * finishes, so the connect-time warm-up is not lost for the whole connection.
    */
   private preemptActive(reason: string): boolean {
     const active = this.active;
@@ -143,8 +149,20 @@ export class WorkerPool {
     clearTimeout(active.timer);
     active.removeListener();
     this.pendingControls = this.pendingControls.filter((c) => c.taskId !== active.id);
-    this.cleanupWorker();
-    active.resolve({ preempted: true });
+    try {
+      this.cleanupWorker();
+    } catch (err) {
+      log(`worker restart failed after preemption error=${err instanceof Error ? err.message : String(err)}`);
+    }
+    const entry: QueuedTask = {
+      id: active.id,
+      job: active.job,
+      reject: active.reject,
+      priority: active.priority,
+    };
+    const index = this.queue.findIndex((queued) => queued.priority > entry.priority);
+    if (index === -1) this.queue.push(entry);
+    else this.queue.splice(index, 0, entry);
     return true;
   }
 
@@ -160,6 +178,7 @@ export class WorkerPool {
     swarm?: SwarmCallbacks,
     priority = 0,
     queuedAt = performance.now(),
+    job?: () => void,
   ) {
     const worker = this.worker;
     if (!worker) {
@@ -253,7 +272,7 @@ export class WorkerPool {
       settle(() => reject(new Error('TIMEOUT')));
     }, timeout);
 
-    this.active = { id, workload, priority, resolve, reject, timer, worker, removeListener };
+    this.active = { id, workload, priority, reject, timer, worker, removeListener, job: job ?? (() => {}) };
     worker.addEventListener('message', handleMessage);
 
     try {

@@ -80,7 +80,7 @@ export class LightPreloader {
     ];
   }
 
-  /** Schedule a preload at the next idle moment (no-op when already ready). */
+  /** Schedule a preload after the idle delay (no-op when already ready). */
   start(): void {
     if (this.stopped) return;
     if (this.getConsentState() !== 'granted') return;
@@ -88,16 +88,23 @@ export class LightPreloader {
     if (!this.hasMemoryHeadroom()) return;
     if (!this.targets.some((target) => !this.isPreloaded(target))) return;
     if (this.preloading) return;
+    if (this.timer) clearTimeout(this.timer);
+    if (this.idleHandle !== null && typeof cancelIdleCallback === 'function') {
+      cancelIdleCallback(this.idleHandle);
+    }
+    this.timer = null;
+    this.idleHandle = null;
 
     const run = () => {
       this.idleHandle = null;
+      this.timer = null;
       void this.preloadNow();
     };
     const delay = Math.max(0, this.options.idleDelayMs ?? 10_000);
     if (typeof requestIdleCallback === 'function' && delay === 0) {
       this.idleHandle = requestIdleCallback(run, { timeout: 2_000 });
     } else {
-      this.timer = setTimeout(run, delay || 1_000);
+      this.timer = setTimeout(run, delay);
     }
   }
 
