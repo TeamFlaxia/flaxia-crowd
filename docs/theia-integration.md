@@ -52,10 +52,14 @@ open span tokens with `<|mask|>`, and runs low-confidence remasking with
 
 - Open spans are grouped into **32-token blocks** (BD3LM's training block). A
   span longer than 32 tokens is generated left to right in 32-token chunks, not
-  truncated. Closed spans are left as the clean prefix.
-- Spans must fall on token boundaries. A span that cuts through a BPE pre-token
-  is rejected (`does not align to a token boundary`) rather than replacing
-  characters outside the span. Split the span in the host.
+  truncated. Closed spans stay in the text as context; if one falls inside a
+  regenerated block its tokens are regenerated too, but no delta is returned
+  for it.
+- Open spans must fall on token boundaries, must not include leading/trailing
+  whitespace, and are limited to `MAX_THEIA_DELTA_TEXT_CHARS` (512)
+  characters. Otherwise the task fails with an explicit error instead of
+  returning a delta the host would discard. Closed spans are only context and
+  are not token-checked.
 - The last span in a block grows into the generated tail **only when it ends at
   the canvas end**; otherwise it keeps its own token count so following text is
   not duplicated. Give the span enough characters for the expected answer.
@@ -71,7 +75,12 @@ open span tokens with `<|mask|>`, and runs low-confidence remasking with
 - A requested `expert` is rejected until LoRA adapters are distributed (T5); an
   adapter-loaded node also rejects an expert-less payload. The node never
   silently returns a base-model answer under an expert's name.
-- At most `MAX_THEIA_RESULT_DELTAS` (64) deltas are returned per task.
+- `maxSteps`, `temperature`, `strength`, `mergeRule` and `theia.preferWarm` are
+  accepted by the contract but not used by this executor. `maxNewTokens`
+  controls the generate response; `steps` is per 32-token chunk.
+- At most `MAX_THEIA_RESULT_DELTAS` (64) deltas are returned per task. A
+  replacement is capped at `MAX_THEIA_DELTA_TEXT_CHARS` (512) characters; a
+  longer open span must be split by the host.
   `result.model` is the pinned cache id (`qwen3-0.6b-diffusion-bd3lm`), not the
   requested alias.
 

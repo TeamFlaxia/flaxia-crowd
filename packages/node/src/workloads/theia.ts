@@ -1,5 +1,6 @@
 import type { TheiaInferencePayload, TheiaInferenceResult } from '@flaxia/sdk';
 import { isTheiaInferencePayload } from '@flaxia/sdk';
+import { THEIA_MAX_CANVAS_CHARS } from './friedflaxia/theia';
 import type { DllmModel } from '../vendor/friedflaxia/types';
 import { runTheiaInference } from './friedflaxia/theia';
 import { DLLM_MODEL_ID, loadFriedFlaxiaDllm } from './friedflaxia/dllm';
@@ -18,6 +19,11 @@ export async function handleTheiaInference(
 ): Promise<TheiaInferenceResult> {
   if (!isTheiaInferencePayload(payload)) {
     throw new Error('theia-inference: invalid payload');
+  }
+  // Reject an oversized canvas before downloading the 342 MB model.
+  const candidate = payload as { canvas?: { text?: unknown } };
+  if (typeof candidate.canvas?.text === 'string' && candidate.canvas.text.length > THEIA_MAX_CANVAS_CHARS) {
+    throw new Error(`theia-inference: canvas text exceeds ${THEIA_MAX_CANVAS_CHARS} characters`);
   }
   const loaded = model ?? (await loadFriedFlaxiaDllm());
   return runTheiaInference(loaded, payload as TheiaInferencePayload, { onStep, modelId: DLLM_MODEL_ID });

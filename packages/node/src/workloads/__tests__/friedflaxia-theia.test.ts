@@ -19,7 +19,7 @@ const SPECIALS: Record<string, number> = {
   '<|endoftext|>': 4,
 };
 
-function fakeModel(options: { outputToken?: number } = {}): DllmModel & {
+function fakeModel(options: { outputToken?: number; loraExpert?: string } = {}): DllmModel & {
   denoise_topk: ReturnType<typeof vi.fn>;
 } {
   const outputToken = options.outputToken ?? 88; // 'X'
@@ -62,7 +62,7 @@ function fakeModel(options: { outputToken?: number } = {}): DllmModel & {
     eos_token_id: vi.fn(() => undefined),
     free: vi.fn(),
     loraRank: vi.fn(() => undefined),
-    loraExpert: vi.fn(() => undefined),
+    loraExpert: vi.fn(() => options.loraExpert),
     denoise_topk,
   } as never;
 }
@@ -151,6 +151,40 @@ describe('theia canvas tokenization', () => {
         spans: [{ id: 'a', start: 7, end: 10, open: true }],
       }),
     ).toThrow(/token boundary/);
+  });
+
+  it('rejects an open span over the 512-character replacement limit', () => {
+    const text = 'x'.repeat(513);
+    expect(() =>
+      tokenizeCanvas(fakeModel(), {
+        version: 0,
+        text,
+        spans: [{ id: 'a', start: 0, end: 513, open: true }],
+      }),
+    ).toThrow(/limited to 512/);
+  });
+
+  it('rejects an open span with boundary whitespace', () => {
+    expect(() =>
+      tokenizeCanvas(fakeModel(), {
+        version: 0,
+        text: 'Hello ____ world',
+        spans: [{ id: 'a', start: 5, end: 11, open: true }],
+      }),
+    ).toThrow(/leading\/trailing whitespace/);
+  });
+
+  it('ignores a closed span that falls inside a token', () => {
+    const tokenized = tokenizeCanvas(wordModel(), {
+      version: 0,
+      text: 'foo bar baz',
+      spans: [
+        { id: 'closed', start: 3, end: 4, open: false },
+        { id: 'open', start: 8, end: 11, open: true },
+      ],
+    });
+    expect(tokenized.spans.map(({ span }) => span.id)).toEqual(['open']);
+    expect(tokenized.spans[0]).toMatchObject({ start: 4, end: 5 });
   });
 
   it('rejects a canvas with a control token', () => {
@@ -254,6 +288,34 @@ describe('theia executor', () => {
     expect(model.denoise_topk.mock.calls.length).toBeLessThanOrEqual(8);
   });
 
+  it('starts a new block when a span extends past the current one', async () => {
+    const model = fakeModel();
+    const text = 'x'.repeat(80);
+    const result = await runTheiaInference(
+      model,
+      payload({
+        canvas: {
+          version: 0,
+          text,
+          spans: [
+            { id: 'a', start: 0, end: 10, open: true },
+            { id: 'b', start: 31, end: 41, open: true },
+          ],
+        },
+      }),
+    );
+    expect(result.deltas).toHaveLength(2);
+    const masks = model.denoise_topk.mock.calls.map((call) => (call[1] as number[]).length);
+    expect(Math.max(...masks)).toBeLessThanOrEqual(32);
+  });
+
+  it('requires an expert id when an adapter is resident', async () => {
+    const model = fakeModel({ loraExpert: 'code' });
+    await expect(runTheiaInference(model, payload())).rejects.toThrow(/expert id is required/);
+    const result = await runTheiaInference(model, payload({ expert: 'code' }));
+    expect(result.deltas?.[0].expert).toBe('code');
+  });
+
   it('skips a committed span', async () => {
     const model = fakeModel();
     const result = await runTheiaInference(
@@ -291,11 +353,12 @@ describe('theia executor', () => {
     const model = fakeModel({ outputToken: 88 });
     const result = await runTheiaInference(
       model,
-      payload({ phase: 'generate', canvas: undefined, maxNewTokens: 4, steps: 2 }),
+      payload({ phase: 'generate', canvas: undefined, maxNewTokens: 4, steps: 8 }),
     );
     expect(result.phase).toBe('generate');
     expect(result.output).toBe('XXXX');
-    expect(result.steps).toBe(2);
+    // steps is capped to the four masked positions.
+    expect(result.steps).toBe(4);
   });
 
   it('rejects an expert that is not loaded', async () => {

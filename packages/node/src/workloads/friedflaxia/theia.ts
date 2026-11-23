@@ -6,7 +6,12 @@ import type {
   TheiaInferencePayload,
   TheiaInferenceResult,
 } from '@flaxia/sdk';
-import { MAX_THEIA_RESULT_DELTAS, THEIA_DLLM_MODEL_ID, isTheiaDelta } from '@flaxia/sdk';
+import {
+  MAX_THEIA_DELTA_TEXT_CHARS,
+  MAX_THEIA_RESULT_DELTAS,
+  THEIA_DLLM_MODEL_ID,
+  isTheiaDelta,
+} from '@flaxia/sdk';
 import type { DllmModel } from '../../vendor/friedflaxia/types';
 
 /**
@@ -134,6 +139,25 @@ export function tokenizeCanvas(model: DllmModel, canvas: TheiaCanvas): TheiaCanv
     if (span.start < cursor || span.end > canvas.text.length || span.start >= span.end) {
       throw new Error(`theia-inference: canvas span ${span.id} is out of bounds`);
     }
+    if (!span.open) {
+      // Closed spans are only context; they are never edited, so they do not
+      // need a token range and a mid-token boundary must not fail the task.
+      cursor = span.end;
+      continue;
+    }
+    const spanText = canvas.text.slice(span.start, span.end);
+    if (spanText.length > MAX_THEIA_DELTA_TEXT_CHARS) {
+      throw new Error(
+        `theia-inference: canvas span ${span.id} is ${spanText.length} characters; ` +
+          `v1 replacements are limited to ${MAX_THEIA_DELTA_TEXT_CHARS}. Split the span.`,
+      );
+    }
+    if (spanText !== spanText.trim()) {
+      throw new Error(
+        `theia-inference: canvas span ${span.id} has leading/trailing whitespace; ` +
+          'put the whitespace outside the span',
+      );
+    }
     const prefix = encode(model, canvas.text.slice(0, span.start));
     const through = encode(model, canvas.text.slice(0, span.end));
     let common = 0;
@@ -146,8 +170,7 @@ export function tokenizeCanvas(model: DllmModel, canvas: TheiaCanvas): TheiaCanv
       throw new Error(`theia-inference: canvas span ${span.id} has no tokens`);
     }
     const decoded = model.decode(tokens.slice(start, end)).trim();
-    const expected = canvas.text.slice(span.start, span.end).trim();
-    if (!expected || decoded !== expected) {
+    if (decoded !== spanText) {
       throw new Error(
         `theia-inference: canvas span ${span.id} does not align to a token boundary; ` +
           'split the span so it starts and ends on a token',
@@ -374,7 +397,7 @@ export async function runTheiaInference(
   }
 
   const maxBlockEnd = blocks.reduce((max, block) => Math.max(max, block.end), 0);
-  if (promptLength + maxBlockEnd > THEIA_MAX_CONTEXT_TOKENS) {
+  if (promptLength + maxBlockEnd + SPAN_CONTEXT_TOKENS > THEIA_MAX_CONTEXT_TOKENS) {
     throw new Error(
       `theia-inference: prompt (${promptLength}) + block (${maxBlockEnd}) exceed ` +
         `${THEIA_MAX_CONTEXT_TOKENS}; keep a block round small`,
@@ -419,8 +442,13 @@ export async function runTheiaInference(
       const atCanvasEnd = entry.end === canvasTokens.tokens.length;
       const growTo =
         index === block.spans.length - 1 && atCanvasEnd ? block.end : entry.end;
-      const text = decodeSpan(model, working, spanStart, promptLength + growTo, eosId).trim();
+      let text = decodeSpan(model, working, spanStart, promptLength + growTo, eosId).trim();
       if (!text) continue;
+      // A small span may grow into the rest of the block; the host guard still
+      // bounds one replacement to MAX_THEIA_DELTA_TEXT_CHARS.
+      if (text.length > MAX_THEIA_DELTA_TEXT_CHARS) {
+        text = text.slice(0, MAX_THEIA_DELTA_TEXT_CHARS).trimEnd();
+      }
       const delta: TheiaDelta = {
         id: deltaId(),
         expert: expertName,
