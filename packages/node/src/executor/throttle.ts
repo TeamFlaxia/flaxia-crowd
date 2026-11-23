@@ -65,14 +65,21 @@ export class CpuThrottle {
   }
 
   /**
-   * Charge a completed task's *work* time (wall time minus the duty-cycle
-   * pauses this instance inserted) against the rolling CPU budget.
+   * Charge a completed task's residual *work* time (wall time minus the
+   * duty-cycle pauses this instance inserted) against the rolling CPU budget.
+   *
+   * Bursts that already ended in `yieldIfOverloaded()` were charged when they
+   * closed, so only the work since the last yield is added here. Without that,
+   * a 10-minute task would charge 10 minutes of work into a 30-second window
+   * and wrongly block the next task for a whole window.
    */
   markTaskComplete(durationMs: number): void {
     const now = performance.now();
     this.rollWindow(now);
-    const work = Math.max(0, durationMs - this.taskSleepMs);
-    this.windowBusyMs += work;
+    const residual = this.lastYieldAt === null
+      ? Math.max(0, durationMs - this.taskSleepMs)
+      : Math.max(0, now - this.lastYieldAt);
+    this.windowBusyMs += this.burstWorkMs + residual;
     this.taskSleepMs = 0;
     this.burstWorkMs = 0;
     this.lastYieldAt = null;
@@ -146,15 +153,20 @@ export class CpuThrottle {
     this.lastYieldAt = now;
     if (this.burstWorkMs < DUTY_CYCLE_BUDGET_MS) return 0;
 
-    // Sleep so that work / (work + pause) <= maxLoad. The pause is not charged
-    // as work when the task completes, so the rolling estimate reflects the
-    // duty cycle instead of the full wall time.
+    // Sleep so that work / (work + pause) <= maxLoad. The burst is charged now,
+    // when it closes, so the rolling estimate reflects recent work instead of
+    // dumping a whole long task into one increment at completion.
     const work = this.burstWorkMs;
-    const pauseMs = Math.ceil(work * (1 / this.maxLoad - 1));
     this.burstWorkMs = 0;
+    this.windowBusyMs += work;
+    this.estimate(now);
+    const pauseMs = Math.ceil(work * (1 / this.maxLoad - 1));
     this.taskSleepMs += pauseMs;
     if (pauseMs > 0) await sleep(pauseMs);
     this.lastYieldAt = performance.now();
+    // Publish the post-pause load so a mid-task heartbeat does not keep
+    // reporting the pre-pause sample from the previous task.
+    this.estimate();
     return pauseMs;
   }
 

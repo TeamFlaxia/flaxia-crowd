@@ -210,7 +210,7 @@ describe('CpuThrottle mid-execution duty cycle (#10-1)', () => {
     expect(pauseMs).toBeGreaterThan(DUTY_CYCLE_BUDGET_MS);
   });
 
-  it('should keep the reported load at or below maxLoad after a duty-cycle pause', async () => {
+  it('should charge a closing burst and keep the reported load at or below maxLoad', async () => {
     const ref = { now: 1000 };
     // Fake timers replace performance.now with their own clock, so the spy has
     // to be installed afterwards to keep driving the throttle deterministically.
@@ -222,11 +222,62 @@ describe('CpuThrottle mid-execution duty cycle (#10-1)', () => {
     ref.now += DUTY_CYCLE_BUDGET_MS;
 
     const pausePromise = t.yieldIfOverloaded();
-    await vi.advanceTimersByTimeAsync(600);
+    const expectedPause = Math.ceil(DUTY_CYCLE_BUDGET_MS * (1 / 0.3 - 1));
+    // The fake clock and performance.now are separate: advance both so the
+    // rolling estimate sees the pause as wall time.
+    ref.now += expectedPause;
+    await vi.advanceTimersByTimeAsync(expectedPause + 100);
     const pauseMs = await pausePromise;
-    expect(pauseMs).toBeGreaterThan(0);
-    // The pause is charged as wall time, so the rolling estimate stays bounded.
+
+    expect(pauseMs).toBe(expectedPause);
+    // The burst is charged at the pause, so the published load is non-zero and
+    // reflects the duty cycle instead of staying at the initial 0.
+    expect(t.lastMeasuredLoad).toBeGreaterThan(0);
     expect(t.lastMeasuredLoad).toBeLessThanOrEqual(t.maxLoadValue + 0.001);
+  });
+
+  it('should charge each burst as it closes instead of one lump at completion', async () => {
+    const ref = { now: 0 };
+    vi.useFakeTimers();
+    mockPerformanceNow(ref);
+
+    const t = new CpuThrottle(0.15);
+    t.beginWork();
+    const pauseMs = Math.ceil(DUTY_CYCLE_BUDGET_MS * (1 / 0.15 - 1));
+    for (let index = 0; index < 10; index += 1) {
+      ref.now += DUTY_CYCLE_BUDGET_MS;
+      const pausePromise = t.yieldIfOverloaded();
+      ref.now += pauseMs;
+      await vi.advanceTimersByTimeAsync(pauseMs);
+      await pausePromise;
+    }
+
+    // ~2s of work across ~13.3s of wall time stays near the duty cycle; a lump
+    // charge at completion would have reported 1.0 and blocked the next task.
+    expect(t.lastMeasuredLoad).toBeLessThanOrEqual(0.16);
+    expect(t.lastMeasuredLoad).toBeGreaterThan(0);
+  });
+
+  it('should not charge a long task as one full window at completion', async () => {
+    const ref = { now: 1_000 };
+    vi.useFakeTimers();
+    mockPerformanceNow(ref);
+
+    const t = new CpuThrottle(0.15);
+    t.beginWork();
+    for (let index = 0; index < 30; index += 1) {
+      ref.now += DUTY_CYCLE_BUDGET_MS;
+      const pausePromise = t.yieldIfOverloaded();
+      ref.now += Math.ceil(DUTY_CYCLE_BUDGET_MS * (1 / 0.15 - 1));
+      await vi.advanceTimersByTimeAsync(2_000);
+      await pausePromise;
+    }
+    ref.now += DUTY_CYCLE_BUDGET_MS;
+    t.markTaskComplete(10 * 60 * 1000);
+
+    // Only the residual burst is charged; a whole-task lump would clamp to 1.0.
+    expect(t.lastMeasuredLoad).toBeGreaterThan(0);
+    expect(t.lastMeasuredLoad).toBeLessThan(0.5);
   });
 
   it('should reset the duty cycle when a new task begins', async () => {
