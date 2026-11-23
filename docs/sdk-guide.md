@@ -2,6 +2,14 @@
 
 タスクの投入から結果取得までを行うためのクライアントライブラリです。
 
+## インストール
+
+npm レジストリでは配布していません。GitHub Releases の tarball を直接インストールします。
+
+```bash
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
+```
+
 ## クライアント初期化
 
 ```typescript

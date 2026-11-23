@@ -4,8 +4,10 @@ Flaxia Crowd の**タスク依頼者向けSDK**。型定義は全パッケージ
 
 ## インストール
 
+npm レジストリでは配布していません。GitHub Releases の tarball を直接インストールします。
+
 ```bash
-npm install @flaxia/sdk
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
 ```
 
 依存関係はゼロ（`fetch` のみ使用）。

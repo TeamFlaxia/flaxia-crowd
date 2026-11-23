@@ -116,8 +116,12 @@ workerとnodeは`@flaxia/sdk`を依存に追加して型だけ参照する。
 ## Flaxia SNSへの組み込み方法
 
 ```bash
-# ホストアプリ側で
-npm install @flaxia/worker @flaxia/sdk
+# ホストアプリ側で（monorepo の workspace を使う場合）
+npm install
+
+# 外部リポジトリから使う場合、@flaxia/sdk はリリース tarball を指定する
+# （@flaxia/worker は非公開。npm レジストリでは配布していない）
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
 
 # wrangler.tomlへの追記は packages/worker/docs/06-wrangler.md を参照
 ```

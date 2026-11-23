@@ -33,6 +33,17 @@ flaxia-crowd/
 
 ## How to use
 
+公開パッケージは npm レジストリでは配布していません。GitHub Releases に添付された
+tarball を直接インストールします（バージョンはリリースに合わせて読み替えてください）。
+
+```bash
+# 依頼者 (Requester)
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
+
+# サイトオーナー (Node Provider)
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz
+```
+
 詳細な利用方法や各コンポーネントの仕様は `docs/` ディレクトリを参照してください。
 
 - [導入ガイド (Getting Started)](docs/getting-started.md)

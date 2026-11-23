@@ -7,14 +7,12 @@
   "files": [
     "dist"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "https://github.com/TeamFlaxia/flaxia-crowd.git"
   },
   "scripts": {
+    "prepublishOnly": "node -e \"console.error('npm publishing is disabled; use the GitHub Release tarball'); process.exit(1)\"",
     "build": "rm -f tsconfig.tsbuildinfo && vite build && tsc -b",
     "dev": "vite",
     "typecheck": "tsc --noEmit",

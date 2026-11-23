@@ -1,0 +1,153 @@
+name: Release @flaxia packages
+
+# Packages are distributed as tarballs attached to GitHub Releases. Nothing is
+# published to the npm registry, and no registry token is used anywhere.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package to pack and attach to a GitHub Release'
+        required: true
+        default: 'node'
+        type: choice
+        options:
+          - node
+          - sdk
+  push:
+    tags:
+      - 'node-v*'
+      - 'sdk-v*'
+
+jobs:
+  verify-vendoring:
+    # Tag pushes do not trigger ci.yml, so re-check here that the vendored wasm
+    # is built from the exact FriedFlaxia commit recorded in the manifest.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Read the pinned FriedFlaxia commit
+        id: pin
+        run: |
+          echo "commit=$(node -p "require('./packages/node/src/vendor/friedflaxia/manifest.json').sourceCommit")" >> "$GITHUB_OUTPUT"
+      - name: Checkout the pinned FriedFlaxia source
+        uses: actions/checkout@v4
+        with:
+          repository: TeamFlaxia/friedflaxia
+          ref: ${{ steps.pin.outputs.commit }}
+          path: friedflaxia
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Add the wasm target to the pinned toolchain
+        run: |
+          cd friedflaxia
+          rustup target add wasm32-unknown-unknown
+      - name: Install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - name: Verify the vendored wasm matches the pinned source
+        env:
+          FRIEDFLAXIA_DIR: ${{ github.workspace }}/friedflaxia
+        run: npm run check:friedflaxia
+
+  release:
+    needs: verify-vendoring
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Build the workspace
+        run: npm run build
+
+      - name: Run the workspace tests
+        run: npm test --workspaces --if-present
+
+      - name: Resolve package metadata
+        id: meta
+        env:
+          DISPATCH_PACKAGE: ${{ inputs.package }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            pkg="$DISPATCH_PACKAGE"
+          else
+            # node-v0.9.1 -> node, sdk-v0.7.1 -> sdk
+            pkg="${REF_NAME%%-v*}"
+          fi
+          case "$pkg" in
+            node)
+              dir=packages/node
+              prefix=node
+              asset_prefix=flaxia-node
+              ;;
+            sdk)
+              dir=packages/sdk
+              prefix=sdk
+              asset_prefix=flaxia-sdk
+              ;;
+            *)
+              echo "::error::Unknown package '$pkg' (expected 'node' or 'sdk')"
+              exit 1
+              ;;
+          esac
+          version=$(node -p "require('./$dir/package.json').version")
+          name=$(node -p "require('./$dir/package.json').name")
+          tag="$prefix-v$version"
+          asset="$asset_prefix-$version.tgz"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ "$REF_NAME" != "$tag" ]; then
+            echo "::error::Tag $REF_NAME does not match $dir/package.json version $version (expected $tag)"
+            exit 1
+          fi
+          {
+            echo "dir=$dir"
+            echo "name=$name"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "asset=$asset"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Pack the ${{ steps.meta.outputs.name }} tarball
+        working-directory: ${{ steps.meta.outputs.dir }}
+        run: npm pack
+
+      - name: Upload the tarball to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          ASSET: ${{ steps.meta.outputs.asset }}
+          PKG: ${{ steps.meta.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          tarball="${{ steps.meta.outputs.dir }}/$ASSET"
+          test -f "$tarball"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$tarball" --clobber
+          else
+            notes="$(printf '%s\n' \
+              "Release tarball for \`$PKG@$VERSION\`." \
+              "" \
+              "Install it directly from this release (no npm registry involved):" \
+              "" \
+              "\`\`\`sh" \
+              "npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/$TAG/$ASSET" \
+              "\`\`\`")"
+            gh release create "$TAG" "$tarball" \
+              --title "$TAG" \
+              --notes "$notes" \
+              --target "${{ github.sha }}"
+          fi

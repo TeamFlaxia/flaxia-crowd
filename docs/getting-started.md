@@ -10,15 +10,31 @@ Flaxia Crowdを使い始めるためのステップ・バイ・ステップガ�
 ## インストール
 各パッケージは独立しており、用途に合わせてインストールします。
 
+公開パッケージは npm レジストリでは配布していません。GitHub Releases に添付された
+tarball を URL 指定でインストールしてください（URL のバージョンは利用するリリースに
+合わせて読み替えます）。
+
 ### 依頼者 (Requester)
 ```bash
-npm install @flaxia/sdk
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
 ```
 
 ### サイトオーナー (Node Provider)
 ```bash
-npm install @flaxia/node
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz
 ```
+
+`@flaxia/node` は `@flaxia/sdk` に依存します。レジストリからの解決を避けたい場合は
+両方の tarball を同時に指定してください:
+
+```bash
+npm install \
+  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz \
+  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
+```
+
+> リポジトリ内（この monorepo の workspace）では引き続き `@flaxia/sdk` が
+> workspace として解決されます。ソースの import は変更不要です。
 
 ## プロジェクトのアーキテクチャ概要
 1. **依頼者**: `@flaxia/sdk` を通じて処理をリクエスト。
