@@ -50,18 +50,30 @@ The node builds a Qwen chat prompt from `messages`, appends the canvas, masks th
 open span tokens with `<|mask|>`, and runs low-confidence remasking with
 `denoise_topk`:
 
-- Each open span is denoised as its own block: the span plus 32 tokens of right
-  context. The clean prompt is the prefix. Closed spans are left untouched.
-- Commits are greedy top-1, most-confident first; `.steps` controls how many
-  refinement passes a task spends. `.maxNewTokens` (generate) bounds the
-  response.
-- The prompt plus canvas must fit `THEIA_MAX_CONTEXT_TOKENS = 512`. The 0.6B
-  validation model was trained at 512 tokens, so the host keeps each block round
-  small instead of sending a whole conversation.
+- Open spans are grouped into **32-token blocks** (BD3LM's training block). A
+  span longer than 32 tokens is generated left to right in 32-token chunks, not
+  truncated. Closed spans are left as the clean prefix.
+- Spans must fall on token boundaries. A span that cuts through a BPE pre-token
+  is rejected (`does not align to a token boundary`) rather than replacing
+  characters outside the span. Split the span in the host.
+- The last span in a block grows into the generated tail **only when it ends at
+  the canvas end**; otherwise it keeps its own token count so following text is
+  not duplicated. Give the span enough characters for the expected answer.
+- Commits are greedy top-1, most-confident first. `.steps` is per 32-token
+  chunk; `result.steps` reports the total forwards actually spent.
+- The prompt plus the padded block must fit `THEIA_MAX_CONTEXT_TOKENS = 512`
+  (the validation model's training window). A canvas longer than
+  `THEIA_MAX_CANVAS_CHARS = 16_000` is rejected before tokenization.
 - `phase: 'generate'` uses the same loop over a masked response region and stops
-  at `<|im_end|>`.
-- A requested `expert` is rejected until LoRA adapters are distributed (T5).
-  The node never silently returns a base-model answer under an expert's name.
+  at `<|im_end|>`. `.maxNewTokens` bounds the response.
+- Control markers (`<|...|>`) in message or canvas text are rejected: the
+  tokenizer matches them verbatim, so allowing them would inject turns.
+- A requested `expert` is rejected until LoRA adapters are distributed (T5); an
+  adapter-loaded node also rejects an expert-less payload. The node never
+  silently returns a base-model answer under an expert's name.
+- At most `MAX_THEIA_RESULT_DELTAS` (64) deltas are returned per task.
+  `result.model` is the pinned cache id (`qwen3-0.6b-diffusion-bd3lm`), not the
+  requested alias.
 
 The pinned model is `qwen3-0.6b-diffusion-bd3lm` (Q4_0, SHA-256 pinned in the
 FriedFlaxia manifest). Nodes report it in `modelCache`, so the coordinator's
