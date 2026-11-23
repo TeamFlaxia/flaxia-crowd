@@ -45,7 +45,7 @@ Tag prefixes:
 | Package        | Tag           | Release asset              |
 | -------------- | ------------- | -------------------------- |
 | `@flaxia/node` | `node-v0.9.1` | `flaxia-node-0.9.1.tgz`    |
-| `@flaxia/sdk`  | `sdk-v0.7.1`  | `flaxia-sdk-0.7.1.tgz`     |
+| `@flaxia/sdk`  | `sdk-v0.8.0`  | `flaxia-sdk-0.8.0.tgz`     |
 
 `release.yml` re-runs the vendoring verification (tag pushes do not trigger
 `ci.yml`), installs with `npm ci`, builds the workspace, runs the package tests,
@@ -68,7 +68,7 @@ Outside consumers can install the release asset directly:
 
 ```sh
 npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.8.0/flaxia-sdk-0.8.0.tgz
 ```
 
 `flaxia` does not install from the URL; it vendors the assets so CI needs no

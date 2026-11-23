@@ -85,7 +85,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             pkg="$DISPATCH_PACKAGE"
           else
-            # node-v0.9.1 -> node, sdk-v0.7.1 -> sdk
+            # node-v0.9.1 -> node, sdk-v0.8.0 -> sdk
             pkg="${REF_NAME%%-v*}"
           fi
           case "$pkg" in

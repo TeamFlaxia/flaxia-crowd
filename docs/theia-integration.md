@@ -182,9 +182,6 @@ The reducer lives on the host. The coordinator stays an opaque relay and needs
 no peer transport, layer planner, hop HMAC or session record: each round is a
 set of ordinary tasks, placed independently. `ageRounds` carries staleness.
 
-`swarm-inference` is therefore slated for removal once this executor lands. The
-contract above does not depend on any swarm type.
-
 ## Asynchrony
 
 The research question is how much staleness the merge tolerates. Deltas carry
@@ -243,7 +240,4 @@ License safety comes first; avoid PolyForm Noncommercial models.
 - [ ] Add expert capabilities (`theia-expert-*`), distribute LoRA adapters and
       extend warm `modelCache` entries with the adapter id (T5).
 - [ ] Add the block/KV cache so a denoise step does not recompute the prefix.
-- [ ] Remove `swarm-inference` and its chain/peer/layer-plan machinery once the
-      Theia executor is the supported distributed path.
-- [ ] Replace the Qwen3.5 generation acceptance workflow with a Theia
-      single-expert / multi-expert generation check.
+- [ ] Add a Theia single-expert / multi-expert generation check.

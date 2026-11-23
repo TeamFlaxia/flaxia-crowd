@@ -16,7 +16,7 @@ SDK の tarball も同時に指定してください。
 ```bash
 npm install \
   https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz \
-  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
+  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.8.0/flaxia-sdk-0.8.0.tgz
 ```
 
 ## 基本設定
