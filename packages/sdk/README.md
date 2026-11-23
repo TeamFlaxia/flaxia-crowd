@@ -109,4 +109,4 @@ import {
 | `parseCrowdWebhook` / `extractCallbackOutput` | Webhook ボディの検証と結果抽出 |
 | `resolveNsfwTags` | NudeNet 検出結果からコンテンツタグへの変換 |
 
-`moe-inference` と `theia-inference` はプロトコル型として宣言済みですが、ノード実装が無いため `ROUTABLE_WORKLOADS` には含まれません。`swarm-inference` は複数ノードでモデルのレイヤーを分割して1件の生成ジョブを処理するワークロードで、WebGPU と（`NodeConfig.allowModelDownload` による）モデル重みのダウンロード同意が前提です。`theia-inference` の契約は [docs/theia-integration.md](../../docs/theia-integration.md) を参照してください。
+`moe-inference` はプロトコル型として宣言済みですが、ノード実装が無いため `ROUTABLE_WORKLOADS` には含まれません。`theia-inference` の契約は [docs/theia-integration.md](../../docs/theia-integration.md) を参照してください。

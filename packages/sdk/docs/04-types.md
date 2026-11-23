@@ -130,18 +130,6 @@ parseBearerSubprotocol(header, protocol) // サーバー側の検証（重複・
 buildWsUrl(baseUrl, path, params)
 ```
 
-## swarm 計画の上限
-
-```typescript
-const MIN_SWARM_NODES = 2
-const MAX_SWARM_NODES = 16
-const MAX_SWARM_LAYERS = 1024        // 総層数の上限
-const MAX_SWARM_SLICE_LAYERS = 256   // 1 ノードあたりの上限
-```
-
-`isValidSwarmChain()` は連続性・全被覆に加えてこれらの上限と
-整数スライスを検査する（`end: 1e9` のような計画を拒否する）。
-
 ## 型のバージョン管理方針
 
 型定義に破壊的変更が生じた場合：

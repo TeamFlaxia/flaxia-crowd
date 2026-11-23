@@ -2,7 +2,7 @@
 export const MAX_SUBSCRIBER_INFLIGHT_TOKENS = 32;
 /** Bound serialized token messages retained by one unacknowledged subscriber window. */
 export const MAX_SUBSCRIBER_INFLIGHT_BYTES = 512 * 1024;
-/** Pause a swarm host before its bounded subscriber window is exhausted. */
+/** Pause a token producer before its bounded subscriber window is exhausted. */
 export const SUBSCRIBER_PAUSE_AT_TOKENS = 16;
 /** Resume generation once all subscribers have drained below this watermark. */
 export const SUBSCRIBER_RESUME_AT_TOKENS = 8;
