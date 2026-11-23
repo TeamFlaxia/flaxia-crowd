@@ -1,6 +1,6 @@
 {
   "sourceRepository": "https://github.com/TeamFlaxia/friedflaxia",
-  "sourceCommit": "4334086aaf7f8da125ed4597e4ce14b19c559b88",
+  "sourceCommit": "1fcf24d29da86f9fd8c28d161ab7a8b22c757025",
   "wasmBindgenVersion": "0.2.130",
   "wasmSimd128": true,
   "wasmScalarFallback": true,
