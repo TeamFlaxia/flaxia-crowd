@@ -16,7 +16,8 @@ export type WorkloadType =
   | 'nudenet'
   | 'swarm-inference'
   | 'cc-extract'
-  | 'embed-gemma';
+  | 'embed-gemma'
+  | 'theia-inference';
 
 // --- AI Inference ---
 
@@ -312,6 +313,158 @@ export interface SwarmSessionPlan {
   layers: number;
   /** Ordered chain; index 0 is the host and owns the generation loop. */
   chain: SwarmChainNode[];
+}
+
+// --- Theia distributed diffusion inference ---
+//
+// `theia-inference` is the Theia chat service's workload. It is declared here
+// so hosts and the coordinator can share one contract before the node executor
+// lands (the same staging as `moe-inference`). It is deliberately absent from
+// ROUTABLE_WORKLOADS until a node can execute a denoise step.
+//
+// Theia is a star topology: the host owns the canvas and submits normal tasks
+// for each expert. There is no peer transport, layer split or swarm session.
+
+export interface TheiaChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  /** Optional consumer fields; the node ignores them. */
+  id?: string;
+  createdAt?: number;
+}
+
+export type TheiaMergeRule =
+  | 'confidence-count'
+  | 'logit-mean'
+  | 'probability-mean'
+  | 'poe';
+
+/**
+ * `generate` runs a complete response (single expert / baseline).
+ * `denoise` runs a bounded number of denoise steps over a supplied canvas and
+ * returns edit deltas for the host reducer.
+ */
+export type TheiaPhase = 'generate' | 'denoise';
+
+export interface TheiaSpan {
+  id: string;
+  /** UTF-16 offsets, `[start, end)` into `TheiaCanvas.text`. */
+  start: number;
+  end: number;
+}
+
+/** A span in a snapshot, including whether it is still open. */
+export interface TheiaCanvasSpan extends TheiaSpan {
+  open: boolean;
+}
+
+export interface TheiaCanvas {
+  version: number;
+  text: string;
+  /**
+   * Every span slot. Open slots are unmasked positions; committed slots may
+   * still be revised when the host enables revisions.
+   */
+  spans: TheiaCanvasSpan[];
+}
+
+/**
+ * v1 accepts `replace` only. Insert/delete need stable span ids and Levenshtein
+ * alignment (the LLaDA2.2 style edit primitives) and are a later protocol
+ * version.
+ */
+export type TheiaEditOp = {
+  kind: 'replace';
+  /** Must exactly match an editable span of the canvas snapshot. */
+  span: [number, number];
+  text: string;
+  /** Optional per-token probabilities used to calibrate confidence. */
+  tokenProbs?: number[];
+};
+
+export interface TheiaDelta {
+  /** Idempotency key; re-delivery of the same id is ignored. */
+  id: string;
+  /** LoRA expert id, e.g. `code`, `math`, `chat`. */
+  expert: string;
+  /** Canvas version this proposal was computed from. */
+  baseVersion: number;
+  round: number;
+  ops: TheiaEditOp[];
+  /** Self-reported confidence in `[0, 1]`. */
+  confidence: number;
+  entropy?: number;
+  ageRounds?: number;
+}
+
+export interface TheiaInferencePayload {
+  /** Conversation handed to the dLLM denoiser. */
+  messages: TheiaChatMessage[];
+  /** Base model id understood by the Theia dLLM runtime (e.g. 'qwen-dlm-4b'). */
+  model: string;
+  /** `generate` (default) or one denoise block round. */
+  phase?: TheiaPhase;
+  /** LoRA adapter id for this task; omitted for the base model. */
+  expert?: string;
+  /** Required for `phase: 'denoise'`; the snapshot the node should edit. */
+  canvas?: TheiaCanvas;
+  /** Denoise round number, used for stale detection and freshness decay. */
+  round?: number;
+  /** Denoise steps to run in this task (block-round granularity). */
+  steps?: number;
+  /** Maximum denoising steps per response (default: 128). */
+  maxSteps?: number;
+  /** Self-Repulsion strength λ (default: 64). */
+  strength?: number;
+  /** Node-side denoise sampling temperature (default: 0.6). */
+  temperature?: number;
+  /** Distribution merge rule applied by the host reducer (generate mode). */
+  mergeRule?: TheiaMergeRule;
+  /**
+   * Scheduling hints. Task placement is independent (star topology); there is
+   * no room/session record in the coordinator.
+   */
+  theia?: {
+    preferWarm?: boolean;
+  };
+}
+
+/** One node's contribution to a host aggregate (not a per-task field). */
+export interface TheiaNodeInfo {
+  nodeId: string;
+  /** LoRA expert served by this node. */
+  expert?: string;
+  /** Mean prediction confidence observed for this node (0..1). */
+  confidence: number;
+  /** Denoising steps contributed by this node. */
+  steps: number;
+  /** Deltas accepted from this node. */
+  deltaCount?: number;
+  /** Staleness in merge rounds when this node's proposal was merged. */
+  ageRounds?: number;
+}
+
+export interface TheiaInferenceResult {
+  /** Present in `generate` mode. */
+  output?: string;
+  /** Present in `denoise` mode. */
+  deltas?: TheiaDelta[];
+  /** Canvas version the deltas are based on. */
+  canvasVersion?: number;
+  /** Denoise round the node executed. */
+  round?: number;
+  model: string;
+  steps: number;
+  /** LoRA expert served by this task. */
+  expert?: string;
+  phase?: TheiaPhase;
+  tokens?: string[];
+  /** Host-side fan-out width K (number of expert tasks), not a node request. */
+  expertCount?: number;
+  mergeRule?: TheiaMergeRule;
+  /** Host aggregate; a single node task does not populate this. */
+  nodes?: TheiaNodeInfo[];
+  durationMs: number;
 }
 
 // --- Image Processing ---
@@ -618,6 +771,7 @@ export type TaskPayload = (
   | SwarmInferencePayload
   | CcExtractPayload
   | EmbedGemmaPayload
+  | TheiaInferencePayload
 ) & TaskPayloadRouting;
 
 export interface TaskRecord {

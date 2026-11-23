@@ -4,6 +4,7 @@ export * from './client';
 export * from './workloads';
 export * from './cc-extract';
 export * from './embed-gemma';
+export * from './theia';
 export * from './webhook';
 export * from './nsfw';
 export * from './swarm';
