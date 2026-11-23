@@ -178,9 +178,10 @@ to expert nodes; Crowd is a compute pool, not a session orchestrator.
 5. The committed canvas feeds the next block round until the stop rule fires
    (all spans committed, patience, or max rounds).
 
-The reducer lives on the host. The coordinator stays an opaque relay and needs
-no peer transport, layer planner, hop HMAC or session record: each round is a
-set of ordinary tasks, placed independently. `ageRounds` carries staleness.
+The reducer lives on the host. The coordinator only performs ordinary task
+placement: each round is a set of independent tasks, and it stores no peer
+transport, layer planner, hop HMAC or session record. `ageRounds` carries
+staleness.
 
 ## Asynchrony
 

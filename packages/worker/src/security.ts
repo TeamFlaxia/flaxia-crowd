@@ -170,10 +170,10 @@ export async function verifyNodeToken(secret: string, token: string | null): Pro
 // --- Self-reported capacity bounds ---
 
 /**
- * Ceiling for any capacity a node reports about itself (`wasmMemoryBytes`,
- * WebGPU buffer limits). A node that advertises `1e300` would otherwise always
- * win host election; clamping makes lying about capacity pointless beyond the
- * ceiling while keeping honest large devices ahead of small ones.
+ * Ceiling for a capacity a node reports about itself (`wasmMemoryBytes`). A
+ * node that advertises `1e300` would otherwise always win capacity ranking;
+ * clamping makes lying about capacity pointless beyond the ceiling while
+ * keeping honest large devices ahead of small ones.
  */
 export const MAX_WASM_MEMORY_BYTES = 16 * 1024 ** 3;
 

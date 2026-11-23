@@ -433,10 +433,10 @@ export class Coordinator extends DurableObject<Env> {
 
   // --- Node messaging ---
 
-  private sendToNode(nodeId: string, message: unknown, binary?: ArrayBuffer) {
+  private sendToNode(nodeId: string, message: unknown) {
     for (const sock of this.ctx.getWebSockets(nodeId)) {
       try {
-        sock.send(binary ?? JSON.stringify(message));
+        sock.send(JSON.stringify(message));
       } catch {}
     }
   }

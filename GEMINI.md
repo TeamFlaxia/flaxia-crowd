@@ -22,7 +22,7 @@ flaxia-crowd/
 │   │
 │   ├── node/                    @flaxia/node
 │   │   → 一般サイト埋め込み用ブラウザノードSDK
-│   │   → 同意UI・WebRTC・処理実行
+│   │   → 同意UI・処理実行
 │   │
 │   └── sdk/                     @flaxia/sdk
 │       → 依頼者向けSDK

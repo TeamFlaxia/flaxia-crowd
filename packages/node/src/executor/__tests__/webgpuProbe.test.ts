@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { probeWebGpu, probeWebGpuDetailed } from '../webgpuProbe';
+import { probeWebGpuDetailed } from '../webgpuProbe';
 
 describe('probeWebGpu', () => {
   const gpuHost = navigator as unknown as { gpu?: unknown };
@@ -36,7 +36,7 @@ describe('probeWebGpu', () => {
 
   it('reports unsupported when navigator.gpu is absent', async () => {
     delete gpuHost.gpu;
-    expect(await probeWebGpu()).toEqual({ webgpu: false });
+    expect((await probeWebGpuDetailed()).capabilities).toEqual({ webgpu: false });
     expect((await probeWebGpuDetailed()).status).toBe('unsupported');
   });
 
@@ -76,7 +76,7 @@ describe('probeWebGpu', () => {
     gpuHost.gpu = {
       requestAdapter: async () => ({ requestDevice: async () => { throw new Error('device denied'); } }),
     };
-    expect(await probeWebGpu()).toEqual({ webgpu: false });
+    expect((await probeWebGpuDetailed()).capabilities).toEqual({ webgpu: false });
     expect((await probeWebGpuDetailed()).status).toBe('unavailable');
   });
 

@@ -97,6 +97,7 @@ impl Harness {
                 image_process: true,
                 memory_limit_mb: 512,
                 max_timeout_ms,
+                legacy_swarm: None,
             },
         };
         let router = Router::new()

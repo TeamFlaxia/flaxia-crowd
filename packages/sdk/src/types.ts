@@ -874,6 +874,13 @@ export interface NodeConfig {
   consent: ConsentConfig;
   maxCpuLoad?: number;
   capabilities?: WorkloadType[];
+  /**
+   * Opt in to the bounded WebGPU compute probe used as resource telemetry.
+   * Disabled by default: the probe creates a temporary device and submits a
+   * few tiny compute passes, so hosts must ask for it explicitly. It is only a
+   * scheduling hint and never authorizes a workload.
+   */
+  probeGpu?: boolean;
   /** Exact HTTPS origins allowed to serve executable container WASM images. */
   containerImageOrigins?: string[];
   /** Exact HTTPS origins from which signed container file sources may be fetched. */

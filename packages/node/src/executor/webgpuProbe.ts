@@ -211,8 +211,3 @@ export async function probeWebGpuDetailed(): Promise<WebGpuProbeResult> {
     try { device?.destroy(); } catch {}
   }
 }
-
-/** Backwards-compatible capability probe; eligibility requires a working device. */
-export async function probeWebGpu(): Promise<GpuCapabilities> {
-  return (await probeWebGpuDetailed()).capabilities;
-}

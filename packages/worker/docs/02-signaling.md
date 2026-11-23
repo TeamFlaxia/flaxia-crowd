@@ -1,9 +1,11 @@
-# 02. WebRTC Signalingサーバー
+# 02. Node WebSocket signaling
 
 ## 概要
 
-Cloudflare Workers の WebSocket サポートを使い、
-`/crowd/signal` エンドポイントで WebRTC の Offer/Answer/ICE 交換を仲介する。
+Cloudflare Workers の WebSocket サポートを使い、`/crowd/signal` エンドポイントで
+ノードの登録・認証・タスク配信・heartbeat・結果受信を行う。タスクは JSON
+メッセージとして同じ WebSocket 上を流れ、WebRTC の Offer/Answer/ICE 交換や
+DataChannel は使わない。
 
 実装には Hono の `upgradeWebSocket` を使用する。
 
@@ -32,33 +34,29 @@ Sec-WebSocket-Protocol: flaxia-node-v1
 ## 接続フロー
 
 ```
-[Node]                  [Worker: Signaling]            [SDK Client]
+[Node]                  [Worker: /crowd/signal]         [SDK Client]
   |                            |                             |
   |-- WS Connect (subprotocol)->|                            |
-  |<- { type: "hello", nodeId }|                             |
+  |<- { type: "pong", ... } ---|                             |
   |                            |<-- POST /crowd/tasks -------|
   |<- { type: "task", taskId, |                             |
-  |     offer: RTCSessionDesc }|                             |
-  |-- { type: "answer",  ----->|                             |
-  |     taskId, answer }       |                             |
-  |-- { type: "ice", --------->|                             |
-  |     taskId, candidate }    |                             |
-  |                            |--- callback / polling ----->|
+  |     workload, payload,    |                             |
+  |     timeoutMs, attemptId }|                             |
+  |-- { type: "progress" } --->|                             |
   |-- { type: "result", ------>|                             |
-  |     taskId, payload }      |-- { status: done, result }->|
+  |     taskId, attemptId,     |--- callback / polling ----->|
+  |     payload }              |                             |
 ```
+
+Coordinator は `task` を JSON で配信し、ノードは同じ試行の `attemptId` を
+`progress` / `result` / `error` に付けて返す。ノードが処理を続けられない場合は
+`{ type: "abort", taskId, error }` を受け取り、エラーを返送せずに停止する。
 
 ## WebSocketメッセージスキーマ
 
 ### Worker → Node
 
 ```typescript
-// 接続確立時
-type HelloMessage = {
-  type: 'hello'
-  nodeId: string
-}
-
 // タスク割り当て
 type TaskAssignMessage = {
   type: 'task'
@@ -78,25 +76,18 @@ type TaskAssignMessage = {
 type PingMessage = {
   type: 'ping'
 }
+
+// タスク停止（エラーを返送しない）
+type AbortMessage = {
+  type: 'abort'
+  taskId: string
+  error: string
+}
 ```
 
 ### Node → Worker
 
 ```typescript
-// Answer返却
-type AnswerMessage = {
-  type: 'answer'
-  taskId: string
-  answer: RTCSessionDescriptionInit
-}
-
-// ICE Candidate
-type IceCandidateMessage = {
-  type: 'ice'
-  taskId: string
-  candidate: RTCIceCandidateInit
-}
-
 // 処理結果（attemptId 必須。result はプレーンオブジェクトのみ受理）
 type ResultMessage = {
   type: 'result'
@@ -121,21 +112,22 @@ type ErrorMessage = {
   attemptId: string
 }
 
-// Pong
+// Pong（heartbeat 応答。resources は任意の自己申告テレメトリ）
 type PongMessage = {
   type: 'pong'
-  nodeId: string
-  cpuLoad: number   // 0.0 - 1.0
+  cpuLoad: number | null   // 0.0 - 1.0、未計測は null
+  resources?: NodeResourceReport
 }
 ```
 
 ## Durable Object との連携
 
-Signalingハンドラは `NodeManager` Durable Object に以下を委譲する：
+Signaling ハンドラは `Coordinator` Durable Object に以下を委譲する：
 
-- ノードのWebSocket接続の保持
-- タスク割り当て（どのノードにどのタスクを振るか）
-- Ping/Pongによる死活確認（30秒間隔）
+- ノードの WebSocket 接続の保持
+- タスク配置（どのノードにどのタスクを振るか）
+- Ping/Pong による死活確認（30 秒間隔）
+- 結果の受理と購読者へのトークン転送
 
 ## 実装上の注意
 

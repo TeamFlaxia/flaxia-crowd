@@ -219,6 +219,47 @@ describe('SignalingClient', () => {
     expect(pongs[0].resources).toEqual(resourceReport);
     expect(pongs[1].resources).toEqual(resourceReport);
     expect(collectNodeResourceReportMock).toHaveBeenCalledTimes(2);
+    // The GPU probe is opt-in; an omitted config value must stay off.
+    for (const [options] of collectNodeResourceReportMock.mock.calls) {
+      expect(options).toMatchObject({ probeGpu: false });
+    }
+  });
+
+  it('passes the explicit probeGpu opt-in to the resource reporter', async () => {
+    let wsInstance: any;
+    class MockWebSocket {
+      readyState = 1;
+      binaryType = 'arraybuffer';
+      onopen?: () => void;
+      close = vi.fn();
+      send = vi.fn();
+      constructor() { wsInstance = this; }
+    }
+    globalThis.WebSocket = MockWebSocket as any;
+    (globalThis.WebSocket as any).OPEN = 1;
+    mockFetchToken();
+    seedGrantedConsent();
+    collectNodeResourceReportMock.mockResolvedValue({
+      version: 1,
+      sampledAt: Date.now(),
+      expiresAt: Date.now() + 90_000,
+      gpu: { status: 'unknown' },
+    });
+
+    initFlaxiaNode({
+      orchestratorUrl: 'https://flaxia.app',
+      siteId: 'test-site',
+      consent: { brandName: 'Test', position: 'bottom-right' },
+      probeGpu: true,
+    });
+    await flush();
+    await flush();
+    wsInstance.onopen();
+    await flush();
+
+    expect(collectNodeResourceReportMock).toHaveBeenCalledWith(
+      expect.objectContaining({ probeGpu: true }),
+    );
   });
 
   it('should create consent container with correct id', () => {

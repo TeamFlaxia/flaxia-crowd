@@ -512,7 +512,7 @@ app.post('/nodes/register', async (c) => {
   // A `null`/undefined deviceMemory means a mobile WebView or unknown device.
   const deviceMemory = typeof body.deviceMemory === 'number' ? body.deviceMemory : null
   // Self-reported and only used to order candidates, so clamp it to a sane
-  // ceiling: a node claiming 1e300 bytes must not dominate host election.
+  // ceiling: a node claiming 1e300 bytes must not dominate capacity ranking.
   const wasmMemoryBytes = clampByteCapacity(body.wasmMemoryBytes)
 
   const warmModels = parseWarmModels(body.warmModels)

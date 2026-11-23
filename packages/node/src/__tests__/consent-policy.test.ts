@@ -3,9 +3,10 @@ import { getFlaxiaNodeConsentState, initFlaxiaNode, setFlaxiaNodeHostManagedCons
 import { __consentTestHooks } from '../consent/storage';
 import { CONSENT_NOTICE_VERSION } from '../consent/notice';
 
-// Capability probes are irrelevant here; keep them off the real hardware.
-const { probeWebGpuMock } = vi.hoisted(() => ({ probeWebGpuMock: vi.fn() }));
-vi.mock('../executor/webgpuProbe', () => ({ probeWebGpu: probeWebGpuMock }));
+// Capability probes are irrelevant here; keep them off the real hardware. The
+// mock must expose the same live entry point resourceReporter imports.
+const { probeWebGpuDetailedMock } = vi.hoisted(() => ({ probeWebGpuDetailedMock: vi.fn() }));
+vi.mock('../executor/webgpuProbe', () => ({ probeWebGpuDetailed: probeWebGpuDetailedMock }));
 vi.mock('../executor/memoryProbe', () => ({
   HEAVY_WORKLOAD_WASM_MEMORY_BYTES: 2 * 1024 ** 3,
   probeMaxWasmMemoryBytes: () => 4 * 1024 ** 3,
@@ -80,10 +81,15 @@ describe('consent policy (initFlaxiaNode integration)', () => {
     });
     vi.restoreAllMocks();
     vi.useRealTimers();
-    probeWebGpuMock.mockResolvedValue({
-      webgpu: false,
-      gpuArchitecture: undefined,
-      maxStorageBufferBindingSize: undefined,
+    probeWebGpuDetailedMock.mockResolvedValue({
+      capabilities: { webgpu: false },
+      status: 'unsupported',
+      sampledAt: 0,
+      expiresAt: 0,
+      architecture: null,
+      maxStorageBufferBindingSize: null,
+      computeCompletionMs: null,
+      sampleCount: 0,
     });
     (globalThis as any).Worker = MockWorker as any;
     globalThis.WebSocket = vi.fn() as any;

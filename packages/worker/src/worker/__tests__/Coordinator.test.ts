@@ -1264,4 +1264,3 @@ async function connectAndAssign(nodeId: string): Promise<{ task: TaskRecord; nod
 function jsonFrames(node: NodeSocket): any[] {
   return node.frames.filter((f): f is string => typeof f === 'string').map((f) => JSON.parse(f));
 }
-

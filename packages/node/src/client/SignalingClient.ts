@@ -234,10 +234,11 @@ class SignalingClient {
   }
 
   /**
-   * The coordinator settled this task (timeout, a peer failed, the plan was
-   * rejected): stop it now instead of waiting out our own task timeout. The
-   * failure is not reported back — the coordinator may already have requeued
-   * the task for a retry, and an error echo would race that attempt.
+   * The coordinator settled this task (it timed out, the node failed, or a
+   * retry superseded it): stop it now instead of waiting out our own task
+   * timeout. The failure is not reported back — the coordinator may already
+   * have requeued the task for a retry, and an error echo would race that
+   * attempt.
    */
   private handleAbort(data: Record<string, unknown>) {
     const taskId = String(data.taskId ?? '');
@@ -254,9 +255,9 @@ class SignalingClient {
     const report = await collectNodeResourceReport({
       cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
       deviceMemory,
-      // Bounded, TTL-cached WebGPU compute telemetry. It is only a scheduling
-      // hint; a working adapter never authorizes a workload by itself.
-      probeGpu: true,
+      // Opt-in bounded, TTL-cached WebGPU compute telemetry. It is only a
+      // scheduling hint; a working adapter never authorizes a workload.
+      probeGpu: this.config.probeGpu === true,
     });
     if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || getConsentState() !== 'granted') return;
     this.send({

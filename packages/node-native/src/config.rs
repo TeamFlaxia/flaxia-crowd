@@ -18,6 +18,11 @@ pub struct ExecutionConfig {
     pub image_process: bool,
     pub memory_limit_mb: u64,
     pub max_timeout_ms: u64,
+    /// Accepted for one release of upgrade compatibility and ignored. The old
+    /// `[execution.swarm]` table no longer enables anything; operators should
+    /// delete it.
+    #[serde(default, rename = "swarm")]
+    pub legacy_swarm: Option<toml::Value>,
 }
 
 impl Default for ExecutionConfig {
@@ -26,6 +31,7 @@ impl Default for ExecutionConfig {
             image_process: false,
             memory_limit_mb: 512,
             max_timeout_ms: 120_000,
+            legacy_swarm: None,
         }
     }
 }
@@ -38,6 +44,9 @@ impl ExecutionConfig {
             return Err(
                 "execution limits: memory_limit_mb must be 256..2048 and max_timeout_ms 1..600000",
             );
+        }
+        if self.legacy_swarm.is_some() {
+            tracing::warn!("[execution.swarm] is accepted but ignored; delete it from node.toml");
         }
         Ok(())
     }
@@ -109,6 +118,38 @@ mod tests {
         let parsed: Config =
             toml::from_str("orchestrator_url = 'https://example.com'\nsite_id = 'dev'").unwrap();
         assert!(parsed.endpoints().is_err());
+    }
+
+    #[test]
+    fn accepts_a_legacy_swarm_table_but_ignores_it() {
+        let parsed: Config = toml::from_str(
+            "orchestrator_url = 'https://example.com'\n\
+             site_id = 'dev'\n\
+             participate = true\n\
+             [execution]\n\
+             image_process = false\n\
+             [execution.swarm]\n\
+             enabled = true\n\
+             allow_model_download = true\n\
+             runtime = '/opt/deno/bin/deno'\n\
+             helper = '/opt/flaxia/swarm-helper.js'\n\
+             heap_limit_mb = 512\n",
+        )
+        .unwrap();
+        assert!(parsed.execution.legacy_swarm.is_some());
+        // Accepted for one release of upgrade compatibility, never enabled.
+        assert!(parsed.endpoints().is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_execution_fields_other_than_the_legacy_table() {
+        let parsed = toml::from_str::<Config>(
+            "orchestrator_url = 'https://example.com'\n\
+             site_id = 'dev'\n\
+             [execution]\n\
+             imag_process = true\n",
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]
