@@ -90,7 +90,7 @@ export async function generateWithModel(
   if (plamo.generate_stream && onToken) {
     // The vendored wasm export is `generate_stream`. It awaits the callback
     // between tokens, so the worker can throttle, abort and send heartbeats.
-    generated = await plamo.generate_stream(prompt, maxNewTokens, async (token) => {
+    generated = await plamo.generate_stream(prompt, maxNewTokens, async (token: number) => {
       const text = plamo.decode(Uint32Array.from([token]));
       if (text) await onToken(text);
     });
