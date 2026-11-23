@@ -59,6 +59,46 @@ describe('WorkerPool', () => {
     expect(result).toEqual({ output: 'ok' });
   });
 
+  it('preempts a speculative preload instead of queueing a real task behind it', async () => {
+    let handler: Function | undefined;
+    const terminate = vi.fn();
+    class MockWorker {
+      postMessage = vi.fn((message: { id: string; workload: string }) => {
+        // The preload never answers; the foreground task completes immediately.
+        if (message.workload !== 'ai-preload') {
+          setTimeout(
+            () => handler?.({ data: { id: message.id, type: 'done', result: { ok: true } } }),
+            0,
+          );
+        }
+      });
+      terminate = terminate;
+      addEventListener = vi.fn((_event: string, h: Function) => {
+        handler = h;
+      });
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    pool = new WorkerPool();
+
+    const preload = pool.run(
+      'preload-1',
+      'ai-preload' as any,
+      {},
+      60_000,
+      undefined,
+      undefined,
+      undefined,
+      1,
+    );
+    const foreground = pool.run('task-1', 'ai-inference', {}, 100);
+
+    await expect(preload).resolves.toEqual({ preempted: true });
+    await expect(foreground).resolves.toEqual({ ok: true });
+    // Stopping the warm-up is the only way to break a synchronous wasm load.
+    expect(terminate).toHaveBeenCalled();
+  });
+
   it('distinguishes an unobserved CPU load from a measured zero', async () => {
     let handler: Function;
     class MockWorker {

@@ -35,8 +35,8 @@ describe('LightPreloader', () => {
       preload,
     );
     preloader.start();
-    // Non-browser env schedules the idle run via setTimeout fallback.
-    await vi.advanceTimersByTimeAsync(2_000);
+    // Non-browser env schedules the quiet-period run via the setTimeout fallback.
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(preload).toHaveBeenCalledTimes(1);
     expect(preload).toHaveBeenCalledWith({
       task: 'text-generation',
@@ -88,7 +88,23 @@ describe('LightPreloader', () => {
       preload,
     );
     preloader.start();
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(preload).toHaveBeenCalledTimes(1);
+    preloader.stop();
+    vi.useRealTimers();
+  });
+
+  it('honours a custom quiet period before warming', async () => {
+    vi.useFakeTimers();
+    const preload = vi.fn().mockResolvedValue(undefined);
+    const preloader = new LightPreloader(
+      () => 'granted',
+      { hasMemoryHeadroom: () => true, idleDelayMs: 0 },
+      () => false,
+      preload,
+    );
+    preloader.start();
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(preload).toHaveBeenCalledTimes(1);
     preloader.stop();
     vi.useRealTimers();

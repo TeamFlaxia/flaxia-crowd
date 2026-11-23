@@ -821,6 +821,9 @@ class SignalingClient {
       300000,
       undefined,
       { maxCpuLoad: this.effectiveMaxCpuLoad() },
+      undefined,
+      // Speculative: a real task preempts this instead of queueing behind it.
+      1,
     );
   }
 

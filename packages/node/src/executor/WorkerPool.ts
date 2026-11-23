@@ -7,6 +7,8 @@ const log = (...args: unknown[]) => console.log("[flaxia-node]", ...args);
 
 interface ActiveTask {
   id: string;
+  workload: string;
+  priority: number;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -19,7 +21,15 @@ interface QueuedTask {
   id: string;
   job: () => void;
   reject: (error: Error) => void;
+  priority: number;
 }
+
+/**
+ * Workload id used by the local warm-up task. It is not a protocol workload;
+ * it exists so a foreground task can preempt a speculative model load instead
+ * of queueing behind it for tens of seconds.
+ */
+export const PRELOAD_WORKLOAD = 'ai-preload';
 
 /** Swarm tasks exchange control messages and binary frames mid-task. */
 export interface SwarmCallbacks {
@@ -83,8 +93,11 @@ export class WorkerPool {
     onToken?: (token: string) => void,
     config?: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[] },
     swarm?: SwarmCallbacks,
+    /** 0 = foreground, 1 = speculative preload. Preloads yield to foreground. */
+    priority = 0,
   ): Promise<unknown> {
     return new Promise((resolve, reject) => {
+      const queuedAt = performance.now();
       if (!this.worker) {
         reject(new Error('Worker not available'));
         return;
@@ -97,14 +110,42 @@ export class WorkerPool {
         reject(new Error('WorkerPool queue is full; task rejected (retryable)'));
         return;
       }
-      const job = () => this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, swarm);
+      const job = () => this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, swarm, priority, queuedAt);
+      // A foreground task must not wait behind a speculative model warm-up:
+      // terminate that worker (the only way to stop a synchronous wasm load)
+      // and let this task start on a fresh one.
+      if (this.active && priority < this.active.priority) {
+        this.preemptActive(`preempted by ${workload}`);
+      }
       if (!this.active) {
         job();
       } else {
         log(`task queued id=${id} workload=${workload} (active task running)`);
-        this.queue.push({ id, job, reject });
+        const entry: QueuedTask = { id, job, reject, priority };
+        const index = this.queue.findIndex((queued) => queued.priority > priority);
+        if (index === -1) this.queue.push(entry);
+        else this.queue.splice(index, 0, entry);
       }
     });
+  }
+
+  /**
+   * Stop the active task without an error and start from a fresh worker.
+   *
+   * Used only for speculative preloads; the promise resolves with a marker so
+   * the caller can tell that the warm-up did not finish.
+   */
+  private preemptActive(reason: string): boolean {
+    const active = this.active;
+    if (!active) return false;
+    log(`task preempted id=${active.id} workload=${active.workload} reason=${reason}`);
+    this.active = null;
+    clearTimeout(active.timer);
+    active.removeListener();
+    this.pendingControls = this.pendingControls.filter((c) => c.taskId !== active.id);
+    this.cleanupWorker();
+    active.resolve({ preempted: true });
+    return true;
   }
 
   private execute(
@@ -117,6 +158,8 @@ export class WorkerPool {
     resolve: (value: unknown) => void,
     reject: (error: Error) => void,
     swarm?: SwarmCallbacks,
+    priority = 0,
+    queuedAt = performance.now(),
   ) {
     const worker = this.worker;
     if (!worker) {
@@ -128,7 +171,11 @@ export class WorkerPool {
     const timeout = timeoutMs ?? this.defaultTimeoutMs;
     let settled = false;
     const startedAt = performance.now();
-    log(`task start id=${id} workload=${workload} timeoutMs=${timeout}`);
+    const queuedMs = Math.max(0, startedAt - queuedAt);
+    log(`task start id=${id} workload=${workload} timeoutMs=${timeout} queuedMs=${Math.round(queuedMs)}`);
+    if (queuedMs >= 1000) {
+      log(`task queue wait id=${id} workload=${workload} queuedMs=${Math.round(queuedMs)}`);
+    }
 
     const settle = (fn: () => void) => {
       if (settled) return;
@@ -206,7 +253,7 @@ export class WorkerPool {
       settle(() => reject(new Error('TIMEOUT')));
     }, timeout);
 
-    this.active = { id, resolve, reject, timer, worker, removeListener };
+    this.active = { id, workload, priority, resolve, reject, timer, worker, removeListener };
     worker.addEventListener('message', handleMessage);
 
     try {

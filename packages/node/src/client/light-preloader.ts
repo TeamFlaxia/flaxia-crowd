@@ -21,6 +21,12 @@ export interface LightPreloaderOptions {
    * stay idle on constrained devices. Omitted = always allowed.
    */
   hasMemoryHeadroom?: () => boolean;
+  /**
+   * How long to stay quiet after startup before warming. A node that receives a
+   * real task immediately should not spend its first seconds loading a model
+   * nobody asked for (and that a foreground task would preempt anyway).
+   */
+  idleDelayMs?: number;
 }
 
 export type PreloadFn = (request: { task: string; model: string; dtype: string }) => Promise<void>;
@@ -87,10 +93,11 @@ export class LightPreloader {
       this.idleHandle = null;
       void this.preloadNow();
     };
-    if (typeof requestIdleCallback === 'function') {
+    const delay = Math.max(0, this.options.idleDelayMs ?? 10_000);
+    if (typeof requestIdleCallback === 'function' && delay === 0) {
       this.idleHandle = requestIdleCallback(run, { timeout: 2_000 });
     } else {
-      this.timer = setTimeout(run, 1_000);
+      this.timer = setTimeout(run, delay || 1_000);
     }
   }
 
