@@ -1,7 +1,6 @@
 pub mod config;
 pub mod executor;
 pub mod image_process;
-pub mod swarm;
 mod task_session;
 
 use config::{Config, Endpoints};
@@ -57,23 +56,11 @@ async fn register(
     endpoints: &Endpoints,
     site_id: &str,
     runner: Option<&executor::Runner>,
-    swarm: Option<&swarm::SwarmRunner>,
 ) -> Result<Registration, &'static str> {
     let mut body = json!({ "siteId": site_id, "capabilities": [], "fileSources": false });
     if let Some(runner) = runner {
         body["capabilities"] = json!(["image-process"]);
         body["deviceMemory"] = json!(runner.device_memory_gib);
-    }
-    if let Some(swarm) = swarm {
-        let mut capabilities = if runner.is_some() {
-            vec!["image-process"]
-        } else {
-            vec![]
-        };
-        capabilities.push("swarm-inference");
-        body["capabilities"] = json!(capabilities);
-        body["swarm"] = swarm.capabilities.clone();
-        body["deviceMemory"] = json!(swarm.device_memory_gib);
     }
     let mut response = client
         .post(endpoints.register.clone())
@@ -119,9 +106,8 @@ async fn connect(
     endpoints: &Endpoints,
     site_id: &str,
     runner: Option<&executor::Runner>,
-    swarm: Option<&swarm::SwarmRunner>,
 ) -> Result<(Socket, Instant), &'static str> {
-    let registration = register(client, endpoints, site_id, runner, swarm).await?;
+    let registration = register(client, endpoints, site_id, runner).await?;
     let expires =
         Instant::now() + Duration::from_millis(registration.expires_at.saturating_sub(unix_ms()));
     let mut request = endpoints
@@ -138,17 +124,14 @@ async fn connect(
         .parse()
         .map_err(|_| "invalid signal credentials")?,
     );
+    let limit = if runner.is_some() {
+        image_process::MAX_TASK_BYTES
+    } else {
+        MAX_SIGNAL_BYTES
+    };
     let socket_config = WebSocketConfig::default()
-        .max_message_size(Some(if runner.is_some() || swarm.is_some() {
-            image_process::MAX_TASK_BYTES.max(swarm::FRAME_LIMIT)
-        } else {
-            MAX_SIGNAL_BYTES
-        }))
-        .max_frame_size(Some(if runner.is_some() || swarm.is_some() {
-            image_process::MAX_TASK_BYTES.max(swarm::FRAME_LIMIT)
-        } else {
-            MAX_SIGNAL_BYTES
-        }));
+        .max_message_size(Some(limit))
+        .max_frame_size(Some(limit));
     let (socket, response) = timeout(
         IO_TIMEOUT,
         connect_async_with_config(request, Some(socket_config), false),
@@ -165,11 +148,7 @@ async fn connect(
         return Err("server did not negotiate node protocol");
     }
     // Don't log server-supplied fields or errors: these can contain credentials.
-    tracing::info!(
-        image_process = runner.is_some(),
-        swarm = swarm.is_some(),
-        "node connected"
-    );
+    tracing::info!(image_process = runner.is_some(), "node connected");
     Ok((socket, expires))
 }
 
@@ -234,16 +213,6 @@ pub async fn run_with_executable(
     } else {
         None
     };
-    let swarm_runner = if config.execution.swarm.enabled {
-        let prepared = tokio::select! {
-            biased;
-            _ = stop.cancelled() => return Ok(()),
-            prepared = swarm::SwarmRunner::prepare(config.execution.swarm.clone(), config.execution.max_timeout_ms) => prepared?,
-        };
-        Some(Arc::new(prepared))
-    } else {
-        None
-    };
     let client = reqwest::Client::builder()
         .timeout(IO_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -255,12 +224,11 @@ pub async fn run_with_executable(
         let connection = tokio::select! {
             biased;
             _ = stop.cancelled() => break,
-            connection = connect(&client, &endpoints, &config.site_id, runner.as_deref(), swarm_runner.as_deref()) => connection,
+            connection = connect(&client, &endpoints, &config.site_id, runner.as_deref()) => connection,
         };
         let result = match connection {
             Ok((socket, expires)) => {
-                task_session::session(socket, expires, &stop, runner.clone(), swarm_runner.clone())
-                    .await
+                task_session::session(socket, expires, &stop, runner.clone()).await
             }
             Err(error) => Err(error),
         };
@@ -337,7 +305,6 @@ mod tests {
                 socket,
                 Instant::now() + Duration::from_secs(3600),
                 &stop,
-                None,
                 None,
             )
             .await
