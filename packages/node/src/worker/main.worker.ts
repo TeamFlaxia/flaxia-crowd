@@ -226,6 +226,11 @@ async function runWorkload(
       cacheReleasers.set(workload, gemma.releaseCache);
       cacheSnapshotters.set(workload, gemma.getModelCacheSnapshot);
       return await gemma.handleEmbedGemma(payload as any, yieldToThrottle);
+    case 'theia-inference':
+      const theia = await import('../workloads/theia');
+      cacheReleasers.set(workload, theia.releaseCache);
+      cacheSnapshotters.set(workload, theia.getModelCacheSnapshot);
+      return await theia.handleTheiaInference(payload, yieldToThrottle);
     default:
       throw new Error(`Unknown workload type: ${workload}`);
   }
