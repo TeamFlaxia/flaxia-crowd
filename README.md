@@ -24,8 +24,8 @@
 flaxia-crowd/
 ├── packages/
 │   ├── worker/    # Cloudflare Workers オーケストレーター (TaskQueue, Signaling)
-│   ├── node/      # ブラウザノードSDK (ConsentUI, WebRTC, WorkerPool)
-│   ├── node-native/ # Rust製常駐ノード（Linux画像処理・ネイティブWebGPU Swarm推論）
+│   ├── node/      # ブラウザノードSDK (ConsentUI, WorkerPool)
+│   ├── node-native/ # Rust製常駐ノード（Linux画像処理）
 │   └── sdk/       # 依頼者用SDK (Task Submission, Types)
 ```
 
@@ -38,10 +38,10 @@ tarball を直接インストールします（バージョンはリリースに
 
 ```bash
 # 依頼者 (Requester)
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.8.0/flaxia-sdk-0.8.0.tgz
 
 # サイトオーナー (Node Provider)
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.10.0/flaxia-node-0.10.0.tgz
 ```
 
 詳細な利用方法や各コンポーネントの仕様は `docs/` ディレクトリを参照してください。
@@ -94,10 +94,3 @@ npm run test      # 全パッケージのテスト
 
 MIT
 ---
-
-## 生成テスト
-
-Web・デスクトップ共通の実モデル生成基準は **Qwen3.5-2B Q4_0** です。
-`npm run test:generation -- all` で両方を確認できます。
-モデルの用意・GPU条件・合成モデルの回帰試験との区別は
-[生成テストの手順](benchmarks/inference/README.md)を参照してください。

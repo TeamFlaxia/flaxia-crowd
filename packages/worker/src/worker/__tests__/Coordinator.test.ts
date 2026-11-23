@@ -1,11 +1,9 @@
 import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, vi } from 'vitest';
-import type { NodeResourceReport, NodeModelCacheSnapshot, SwarmChainNode, TaskRecord } from '@flaxia/sdk';
-import { encodeSwarmEnvelope, MAX_RESOURCE_CAPACITY_BYTES, verifyCrowdWebhook } from '@flaxia/sdk';
-import type { PeerLinkHistory } from '../peer-link-history';
+import type { NodeResourceReport, NodeModelCacheSnapshot, TaskRecord } from '@flaxia/sdk';
+import { MAX_RESOURCE_CAPACITY_BYTES, verifyCrowdWebhook } from '@flaxia/sdk';
 import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK, resolveWarmModelId } from '../Coordinator';
-import { MAX_SWARM_RELAY_BYTES_PER_TASK, swarmRelayBudgetKey } from '../relay-budget';
-import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
+import { parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
 
 interface NodeRecord {
@@ -144,35 +142,6 @@ describe('Coordinator', () => {
     expect(await withStorage((storage) => storage.getAlarm())).toBe(earlierAlarm);
     node.socket.close();
   });
-
-  it('validates and rate-limits bounded tenant swarm prewarm tasks', async () => {
-    stub = newStub();
-    const makePrewarmTask = (model: string) => makeTask({
-      workload: 'swarm-inference',
-      payload: {
-        model,
-        prompt: 'flaxia model cache warm-up',
-        maxNewTokens: 1,
-        swarm: { minNodes: 2, maxNodes: 4, preferWarm: false },
-      },
-      priority: 0,
-      timeoutMs: 10 * 60 * 1000,
-    });
-    const sendPrewarm = (task: TaskRecord) => stub.fetch(`http://internal/prewarm?tenantId=${TENANT}`, {
-      method: 'POST',
-      body: JSON.stringify(task),
-    });
-
-    expect((await sendPrewarm(makePrewarmTask('external-url-model'))).status).toBe(400);
-    const first = makePrewarmTask('qwen3.5-2b');
-    const second = makePrewarmTask('qwen3.8-27b');
-    const third = makePrewarmTask('qwen3.6-35b-moe');
-    expect((await sendPrewarm(first)).status).toBe(200);
-    expect((await sendPrewarm(second)).status).toBe(200);
-    expect((await sendPrewarm(third)).status).toBe(429);
-    expect(await getTask(first.id)).toMatchObject({ status: 'pending', workload: 'swarm-inference' });
-  });
-
 
   it('stores a submitted task', async () => {
     stub = newStub();
@@ -443,49 +412,23 @@ describe('Coordinator', () => {
     expect(stored.assignedNodeId).toBe('node-ok');
   });
 
-  it('never routes swarm-inference to a node without WebGPU', async () => {
-    stub = newStub();
-    const task = makeTask({ workload: 'swarm-inference', payload: { model: 'qwen3-1.7b', prompt: 'hi' } });
-
-    // One node advertises the swarm capability without a WebGPU adapter; two
-    // real candidates exist, so the session can start without it.
-    const noGpu = await connectNode('node-nogpu', 'capabilities=swarm-inference&wasm=8000000000');
-    await connectNode('node-gpu1', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
-    await connectNode('node-gpu2', 'capabilities=swarm-inference&webgpu=true&wasm=2000000000');
-
-    await seedPending([task], ['node-nogpu', 'node-gpu1', 'node-gpu2']);
-
-    await runAssign();
-
-    const stored = await getTask(task.id);
-    expect(stored.status).toBe('processing');
-    expect(['node-gpu1', 'node-gpu2']).toContain(stored.assignedNodeId);
-    expect(jsonFrames(noGpu).some(f => f.type === 'swarm-init')).toBe(false);
-  });
-
-  it('stores advertised WebGPU and warm-model capabilities', async () => {
+  it('stores advertised warm-model capabilities', async () => {
     stub = newStub();
     const warm = JSON.stringify([{ modelId: 'qwen3-1.7b', layers: [0, 13] }]);
 
     const resp = await stub.fetch(
-      `http://internal/ws?nodeId=node-cap&capabilities=swarm-inference&webgpu=true&gpu=apple%20m1&maxBuffer=134217728&warmModels=${encodeURIComponent(warm)}&site=example.com`,
+      `http://internal/ws?nodeId=node-cap&capabilities=ai-inference&warmModels=${encodeURIComponent(warm)}&site=example.com`,
       { headers: { Upgrade: 'websocket', Connection: 'Upgrade' } },
     );
     expect(resp.status).toBe(101);
 
     interface StoredNode {
-      webgpu?: boolean;
-      gpuArchitecture?: string;
-      maxStorageBufferBindingSize?: number;
       warmModels?: unknown;
       siteId?: string;
     }
 
     await withStorage(async (storage) => {
       const node = await storage.get<StoredNode>('node:node-cap');
-      expect(node?.webgpu).toBe(true);
-      expect(node?.gpuArchitecture).toBe('apple m1');
-      expect(node?.maxStorageBufferBindingSize).toBe(134217728);
       expect(node?.warmModels).toEqual([{ modelId: 'qwen3-1.7b', layers: [0, 13] }]);
       expect(node?.siteId).toBe('example.com');
     });
@@ -886,7 +829,7 @@ describe('Coordinator', () => {
 
   it('stores only fresh bounded resource and executable model snapshots from authenticated heartbeats', async () => {
     stub = newStub();
-    const node = await connectNode('node-resource', 'capabilities=swarm-inference&webgpu=true');
+    const node = await connectNode('node-resource', 'capabilities=ai-inference');
     const now = Date.now();
     const metric = (value: number | string | null, unit: string, source: string, ttl: number) => ({
       value,
@@ -1102,427 +1045,6 @@ describe('Coordinator', () => {
     await runAssign();
     expect((await getTask(task.id)).assignedNodeId).toBe('node-leased');
   });
-});
-
-describe('warm model identity', () => {
-  it('uses the manifest id when the payload carries a public alias', () => {
-    // NudeNet's payload model is '320n'/'640m', never the cache id.
-    expect(resolveWarmModelId('nudenet', '320n')).toBe('deepghs/nudenet_onnx');
-    expect(resolveWarmModelId('nudenet', undefined)).toBe('deepghs/nudenet_onnx');
-    // The advertised embedding id is the ONNX binding, not the manifest id.
-    expect(resolveWarmModelId('vector-embed', 'onnx-community/embeddinggemma-2-ONNX')).toBe(
-      'google/embeddinggemma-2',
-    );
-    expect(resolveWarmModelId('embed-gemma', undefined)).toBe('google/embeddinggemma-2');
-    // The payload model is a public alias, not the pinned manifest id.
-    expect(resolveWarmModelId('theia-inference', 'qwen-dlm-4b')).toBe(
-      'qwen3-0.6b-diffusion-bd3lm',
-    );
-  });
-
-  it('keeps the payload model for workloads that pin a real id', () => {
-    expect(resolveWarmModelId('ai-inference', 'Xenova/distilbert')).toBe('Xenova/distilbert');
-    expect(resolveWarmModelId('ai-inference', undefined)).toBe('');
-    expect(resolveWarmModelId('ai-inference', '')).toBe('');
-  });
-});
-
-describe('node capability parsing', () => {
-  describe('parseSwarmCapabilities', () => {
-    it('accepts a minimal webgpu capability', () => {
-      expect(parseSwarmCapabilities({ webgpu: true })).toEqual({ webgpu: true });
-    });
-
-    it('keeps architecture and buffer limit when present', () => {
-      expect(
-        parseSwarmCapabilities({ webgpu: true, gpuArchitecture: 'apple m1', maxStorageBufferBindingSize: 134217728 }),
-      ).toEqual({ webgpu: true, gpuArchitecture: 'apple m1', maxStorageBufferBindingSize: 134217728 });
-    });
-
-    it('rejects malformed payloads', () => {
-      expect(parseSwarmCapabilities(undefined)).toBeUndefined();
-      expect(parseSwarmCapabilities(null)).toBeUndefined();
-      expect(parseSwarmCapabilities('webgpu')).toBeUndefined();
-      expect(parseSwarmCapabilities({ webgpu: 'yes' })).toBeUndefined();
-      expect(parseSwarmCapabilities({})).toBeUndefined();
-    });
-
-    it('drops non-finite and non-string optional fields', () => {
-      expect(parseSwarmCapabilities({ webgpu: false, gpuArchitecture: 42, maxStorageBufferBindingSize: NaN })).toEqual({
-        webgpu: false,
-      });
-    });
-
-    it('clamps an absurd self-reported buffer size instead of rejecting it', () => {
-      // 1e300 would otherwise win every swarm host election.
-      const parsed = parseSwarmCapabilities({ webgpu: true, maxStorageBufferBindingSize: 1e300 });
-      expect(parsed?.maxStorageBufferBindingSize).toBe(16 * 1024 ** 3);
-    });
-
-    it('clamps an over-long gpuArchitecture instead of signing it into the token', () => {
-      // The architecture is signed into the node token and echoed into a URL
-      // query parameter; a multi-megabyte value would inflate both.
-      const parsed = parseSwarmCapabilities({ webgpu: true, gpuArchitecture: 'x'.repeat(5_000) });
-      expect(parsed?.gpuArchitecture).toBe('x'.repeat(64));
-    });
-  });
-
-  describe('parseWarmModels', () => {
-    it('accepts well-formed ranges', () => {
-      expect(parseWarmModels([{ modelId: 'qwen3-1.7b', layers: [0, 13] }])).toEqual([
-        { modelId: 'qwen3-1.7b', layers: [0, 13] },
-      ]);
-    });
-
-    it('drops malformed entries but keeps valid ones', () => {
-      expect(
-        parseWarmModels([
-          { modelId: 'ok', layers: [2, 9] },
-          { modelId: '', layers: [0, 1] },
-          { modelId: 'reversed', layers: [9, 2] },
-          { modelId: 'negative', layers: [-1, 4] },
-          { modelId: 'floats', layers: [0.5, 4] },
-          { modelId: 'missing-layers' },
-          'nope',
-        ]),
-      ).toEqual([{ modelId: 'ok', layers: [2, 9] }]);
-    });
-
-    it('rejects empty and absurdly deep ranges', () => {
-      // `[0, 0]` is not a span, and `[0, 1e9]` would mark a node warm for any
-      // model at all (and drive the swarm split with a fake capacity).
-      expect(parseWarmModels([{ modelId: 'empty', layers: [0, 0] }])).toBeUndefined();
-      expect(parseWarmModels([{ modelId: 'huge', layers: [0, 1e9] }])).toBeUndefined();
-    });
-
-    it('returns undefined when nothing valid remains', () => {
-      expect(parseWarmModels([])).toBeUndefined();
-      expect(parseWarmModels('nope')).toBeUndefined();
-      expect(parseWarmModels([{ modelId: 'bad' }])).toBeUndefined();
-    });
-
-    it('drops an over-long model id', () => {
-      expect(parseWarmModels([{ modelId: 'm'.repeat(5_000), layers: [0, 4] }])).toBeUndefined();
-    });
-  });
-});
-
-interface SwarmSocket {
-  socket: WebSocket;
-  frames: Array<string | ArrayBuffer>;
-}
-
-async function connectNode(nodeId: string, query: string): Promise<SwarmSocket> {
-  const resp = await stub.fetch(`http://internal/ws?nodeId=${nodeId}&${query}`, {
-    headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
-  });
-  expect(resp.status).toBe(101);
-  const socket = (resp as unknown as { webSocket?: WebSocket }).webSocket!;
-  socket.accept();
-  const frames: Array<string | ArrayBuffer> = [];
-  socket.addEventListener('message', (e: MessageEvent) => frames.push(e.data as string | ArrayBuffer));
-  return { socket, frames };
-}
-
-/** Connect one node and enqueue a task that is immediately delivered to it. */
-async function connectAndAssign(nodeId: string): Promise<{ task: TaskRecord; node: SwarmSocket }> {
-  const node = await connectNode(nodeId, 'capabilities=ai-inference');
-  const task = makeTask();
-  await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
-  await new Promise(r => setTimeout(r, 30));
-  return { task, node };
-}
-
-function jsonFrames(node: SwarmSocket): any[] {
-  return node.frames.filter((f): f is string => typeof f === 'string').map((f) => JSON.parse(f));
-}
-
-function swarmChainFor(init: any): SwarmChainNode[] {
-  const members = init.members as Array<{ nodeId: string }>;
-  const half = 6;
-  return members.map((m, i) => ({
-    nodeId: m.nodeId,
-    role: i === 0 ? 'host' : 'worker',
-    slice:
-      i === 0
-        ? { start: 0, end: half, hasEmbed: true, hasHead: true }
-        : { start: half, end: 8, hasEmbed: false, hasHead: false },
-  }));
-}
-
-describe('Coordinator swarm sessions', () => {
-  async function setup() {
-    stub = newStub();
-    const n1 = await connectNode('n1', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
-    const n2 = await connectNode('n2', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
-    const n3 = await connectNode('n3', 'capabilities=swarm-inference');
-
-    const task = makeTask({ workload: 'swarm-inference', payload: { model: 'qwen3-1.7b', prompt: 'hi' } });
-    await seedPending([task], ['n1', 'n2', 'n3']);
-    await runAssign();
-    return { task, n1, n2, n3 };
-  }
-
-  it('reserves WebGPU nodes for the chain and sends swarm-init to the strongest (host)', async () => {
-    const { task, n1, n2, n3 } = await setup();
-
-    const stored = await getTask(task.id);
-    expect(stored.status).toBe('processing');
-    // n2 has the most capacity, so it becomes the host.
-    expect(stored.assignedNodeId).toBe('n2');
-
-    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init');
-    expect(init).toBeTruthy();
-    expect(init.taskId).toBe(task.id);
-    expect(typeof init.attemptId).toBe('string');
-    expect(init.members.map((m: any) => m.nodeId)).toEqual(['n2', 'n1']);
-    // The non-WebGPU node is not a member, and only the host is asked to plan.
-    expect(jsonFrames(n1).some((f) => f.type === 'swarm-init')).toBe(false);
-    expect(jsonFrames(n3).some((f) => f.type === 'swarm-init')).toBe(false);
-  });
-
-  it('selects a fresh low-RTT peer while retaining the resource-ranked host', async () => {
-    stub = newStub();
-    const n1 = await connectNode('n1', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
-    const n2 = await connectNode('n2', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
-    await connectNode('n3', 'capabilities=swarm-inference&webgpu=true&wasm=6000000000');
-    const now = Date.now();
-    const history: PeerLinkHistory = {
-      'n2>n1': {
-        fromNodeId: 'n2', toNodeId: 'n1', sampledAt: now, expiresAt: now + 60_000,
-        applicationRttMs: 20, webRtcRttMs: null, bandwidthMbps: 100,
-      },
-      'n2>n3': {
-        fromNodeId: 'n2', toNodeId: 'n3', sampledAt: now, expiresAt: now + 60_000,
-        applicationRttMs: 150, webRtcRttMs: null, bandwidthMbps: 1,
-      },
-    };
-    await withStorage((storage) => storage.put('peer-quality:history', history));
-    const task = makeTask({
-      workload: 'swarm-inference',
-      payload: { model: 'qwen3-1.7b', prompt: 'hi', swarm: { minNodes: 2, maxNodes: 2 } },
-    });
-    await seedPending([task], ['n1', 'n2', 'n3']);
-
-    await runAssign();
-
-    const init = jsonFrames(n2).find((frame) => frame.type === 'swarm-init')!;
-    expect(init.members.map((member: { nodeId: string }) => member.nodeId)).toEqual(['n2', 'n1']);
-    expect((await getTask(task.id)).assignedNodeId).toBe('n2');
-  });
-
-  it('leaves a swarm task pending when only one candidate node is available', async () => {
-    stub = newStub();
-    await connectNode('solo', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
-    const task = makeTask({ workload: 'swarm-inference', payload: { model: 'qwen3-1.7b', prompt: 'hi' } });
-    await seedPending([task], ['solo']);
-
-    await runAssign();
-
-    // A single node would own the whole model and see the whole prompt, so the
-    // coordinator refuses to start a "swarm" of one.
-    const stored = await getTask(task.id);
-    expect(stored.status).toBe('pending');
-    expect(stored.assignedNodeId).toBeUndefined();
-  });
-
-  it('hands out slices from the host plan and starts the host when all are ready', async () => {
-    const { task, n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    const chain = swarmChainFor(init);
-
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain }));
-    await new Promise((r) => setTimeout(r, 30));
-
-    const hostSlice = jsonFrames(n2).find((f) => f.type === 'swarm-slice');
-    const workerSlice = jsonFrames(n1).find((f) => f.type === 'swarm-slice');
-    expect(hostSlice).toMatchObject({ index: 0, chainLength: 2, role: 'host', slice: { start: 0, end: 6 } });
-    expect(workerSlice).toMatchObject({ index: 1, chainLength: 2, role: 'worker', slice: { start: 6, end: 8 } });
-
-    // The plan is persisted on the task for frame routing.
-    const stored = await getTask(task.id);
-    expect(stored.swarmSession?.layers).toBe(8);
-    expect(stored.swarmSession?.chain.map((c) => c.nodeId)).toEqual(['n2', 'n1']);
-
-    expect(jsonFrames(n2).some((f) => f.type === 'swarm-start')).toBe(false);
-    n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
-    await new Promise((r) => setTimeout(r, 20));
-    expect(jsonFrames(n2).some((f) => f.type === 'swarm-start')).toBe(false);
-    n2.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
-    await new Promise((r) => setTimeout(r, 20));
-    expect(jsonFrames(n2).some((f) => f.type === 'swarm-start')).toBe(true);
-  });
-
-  it('ignores a non-host plan without allowing a member to fail the task', async () => {
-    const { task, n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-
-    n1.socket.send(JSON.stringify({
-      type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId,
-      chain: [{ nodeId: 'n1', role: 'host', slice: { start: 0, end: 1e9, hasEmbed: true, hasHead: true } }],
-    }));
-    await new Promise((r) => setTimeout(r, 30));
-    expect((await getTask(task.id)).status).toBe('processing');
-    expect(jsonFrames(n2).some((f) => f.type === 'swarm-error')).toBe(false);
-
-    // The authenticated host can still submit the valid plan after the attack.
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
-    await new Promise((r) => setTimeout(r, 30));
-    expect((await getTask(task.id)).swarmSession?.chain.map((entry) => entry.nodeId)).toEqual(['n2', 'n1']);
-  });
-
-  it('rejects a plan whose slice exceeds the layer bounds instead of crashing a node', async () => {
-    const { task, n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-
-    // A malicious host assigning a real volunteer the whole model (and more):
-    // `end: 1e9` would make the node expand the model into GPU memory and OOM.
-    const hostile: SwarmChainNode[] = [
-      { nodeId: 'n2', role: 'host', slice: { start: 0, end: 6, hasEmbed: true, hasHead: true } },
-      { nodeId: 'n1', role: 'worker', slice: { start: 6, end: 1e9, hasEmbed: false, hasHead: false } },
-    ];
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: hostile }));
-    await new Promise((r) => setTimeout(r, 50));
-
-    const errors = jsonFrames(n2).filter((f) => f.type === 'swarm-error');
-    expect(errors.length).toBeGreaterThan(0);
-    expect(jsonFrames(n1).some((f) => f.type === 'swarm-slice')).toBe(false);
-
-    // The plan is derived from the model metadata, so it is failed for good
-    // rather than retried into the same crash.
-    const stored = await getTask(task.id);
-    expect(stored.status).toBe('failed');
-  });
-
-  it('relays a binary hidden frame to the next hop', async () => {
-    const { n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
-    await new Promise((r) => setTimeout(r, 30));
-
-    // Host (n2, index 0) sends a hidden frame; it should reach n1 (index 1)
-    // byte-for-byte (the coordinator never rewrites a frame).
-    const envelope = encodeSwarmEnvelope(init.sessionId, new ArrayBuffer(16));
-    n2.socket.send(envelope);
-    await new Promise((r) => setTimeout(r, 30));
-    expect(n1.frames.some((f) => typeof f !== 'string' && (f as ArrayBuffer).byteLength === envelope.byteLength)).toBe(
-      true,
-    );
-  });
-
-  it('hands every member distinct per-hop frame keys', async () => {
-    const { n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
-    await new Promise((r) => setTimeout(r, 30));
-
-    // n2 is the host (index 0), n1 the worker (index 1). Each member gets the
-    // key for the edge it sends on and the key for the edge it receives on, so
-    // one member cannot sign a frame as another hop.
-    const hostSlice = jsonFrames(n2).find((f) => f.type === 'swarm-slice')!;
-    const workerSlice = jsonFrames(n1).find((f) => f.type === 'swarm-slice')!;
-    expect(typeof hostSlice.outboundKey).toBe('string');
-    expect(typeof workerSlice.outboundKey).toBe('string');
-    expect(hostSlice.outboundKey).not.toBe(workerSlice.outboundKey);
-    expect(workerSlice.inboundKey).toBe(hostSlice.outboundKey);
-    expect(hostSlice.inboundKey).toBe(workerSlice.outboundKey);
-    // 32 random bytes, base64url without padding.
-    expect(hostSlice.outboundKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
-  });
-
-  it('accepts only the host result and releases every member', async () => {
-    const { task, n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
-    await new Promise((r) => setTimeout(r, 30));
-
-    // A worker's result is ignored, even with the session id and attempt id.
-    n1.socket.send(JSON.stringify({
-      type: 'result', taskId: task.id, sessionId: init.sessionId, payload: { output: 'wrong' }, attemptId: init.attemptId,
-    }));
-    await new Promise((r) => setTimeout(r, 20));
-    let stored = await getTask(task.id);
-    expect(stored.status).toBe('processing');
-
-    // The host completes the task.
-    n2.socket.send(JSON.stringify({
-      type: 'result', taskId: task.id, sessionId: init.sessionId, payload: { output: 'ok', tokens: [1] }, attemptId: init.attemptId,
-    }));
-    await new Promise((r) => setTimeout(r, 20));
-    stored = await getTask(task.id);
-    expect(stored.status).toBe('done');
-    expect(stored.result).toEqual({ output: 'ok', tokens: [1] });
-
-    await withStorage(async (storage) => {
-      const a = await storage.get<any>('node:n1');
-      const b = await storage.get<any>('node:n2');
-      expect(a.status).toBe('idle');
-      expect(b.status).toBe('idle');
-      expect(await storage.get(`swarm:${task.id}`)).toBeUndefined();
-    });
-  });
-
-  it('does not let a member fail another member\'s task', async () => {
-    const { task, n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
-    await new Promise((r) => setTimeout(r, 30));
-
-    // The worker reports a failure. It must not settle the task; the host owns
-    // the session and is told instead.
-    n1.socket.send(JSON.stringify({ type: 'error', taskId: task.id, sessionId: init.sessionId, error: 'member blew up' }));
-    await new Promise((r) => setTimeout(r, 50));
-
-    let stored = await getTask(task.id);
-    expect(stored.status).toBe('processing');
-    expect(stored.retryCount).toBe(0);
-    const relayed = jsonFrames(n2).filter((f) => f.type === 'swarm-error');
-    expect(relayed.length).toBeGreaterThan(0);
-    expect(relayed[0]).toMatchObject({ taskId: task.id, sessionId: init.sessionId, error: 'member blew up' });
-
-    // The host failing the session settles it: every member is stopped and the
-    // task burns one retry instead of hanging until the timeout.
-    n2.socket.send(JSON.stringify({ type: 'error', taskId: task.id, sessionId: init.sessionId, error: 'host gave up', attemptId: init.attemptId }));
-    await new Promise((r) => setTimeout(r, 50));
-
-    for (const node of [n1, n2]) {
-      const aborts = jsonFrames(node).filter((f) => f.type === 'abort');
-      expect(aborts.length).toBeGreaterThan(0);
-      expect(aborts[0]).toMatchObject({ taskId: task.id, error: 'host gave up' });
-    }
-
-    stored = await getTask(task.id);
-    expect(stored.retryCount).toBe(1);
-    expect(['pending', 'processing']).toContain(stored.status);
-  });
-
-  it('ignores swarm-token and swarm-done from a member', async () => {
-    const { task, n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((f) => f.type === 'swarm-init')!;
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
-    await new Promise((r) => setTimeout(r, 30));
-
-    const subscriber = await stub.fetch(`http://internal/subscribe?taskId=${task.id}&tenantId=${TENANT}`, {
-      headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
-    });
-    const subSocket = (subscriber as unknown as { webSocket?: WebSocket }).webSocket!;
-    subSocket.accept();
-    const subFrames: string[] = [];
-    subSocket.addEventListener('message', (e: MessageEvent) => subFrames.push(String(e.data)));
-    await new Promise((r) => setTimeout(r, 20));
-
-    // A member must not be able to inject tokens into the requester's stream.
-    n1.socket.send(JSON.stringify({ type: 'swarm-token', sessionId: init.sessionId, token: 'injected', attemptId: init.attemptId }));
-    n1.socket.send(JSON.stringify({ type: 'swarm-done', sessionId: init.sessionId, attemptId: init.attemptId }));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(subFrames.some((f) => f.includes('injected'))).toBe(false);
-
-    // The host may stream tokens (it owns the generation loop).
-    n2.socket.send(JSON.stringify({ type: 'swarm-token', sessionId: init.sessionId, token: 'hello', attemptId: init.attemptId }));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(subFrames.some((f) => f.includes('hello'))).toBe(true);
-  });
-
   it('rejects an oversized or over-rate progress token', async () => {
     stub = newStub();
     const { task, node } = await connectAndAssign('node-1');
@@ -1647,263 +1169,98 @@ describe('Coordinator swarm sessions', () => {
     expect(subFrames.some((f) => f.includes('from-other'))).toBe(false);
   });
 
-  it.each(['n1', 'n2'])('restarts the whole swarm when %s reconnects', async (nodeId) => {
-    const { task, n1, n2 } = await setup();
-    const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
-    await new Promise(r => setTimeout(r, 20));
-    const replacement = await connectNode(nodeId,
-      `capabilities=swarm-inference&webgpu=true&wasm=${nodeId === 'n2' ? 8000000000 : 4000000000}`);
-    await new Promise(r => setTimeout(r, 30));
-    const host = nodeId === 'n2' ? replacement : n2;
-    const worker = nodeId === 'n1' ? replacement : n1;
-    const inits = jsonFrames(host).filter(f => f.type === 'swarm-init');
-    const next = inits[inits.length - 1];
-    expect(next.sessionId).not.toBe(init.sessionId);
-    for (const member of [host, worker]) {
-      expect(jsonFrames(member)).toContainEqual(expect.objectContaining({
-        type: 'abort', taskId: task.id, sessionId: init.sessionId,
-      }));
-      expect(jsonFrames(member).some(f => f.type === 'task')).toBe(false);
-    }
-    await withStorage(async storage => {
-      for (const id of ['n1', 'n2']) {
-        expect(await storage.get(`node:${id}`)).toMatchObject({ status: 'busy', currentTaskId: task.id });
-      }
-    });
-    expect(await getTask(task.id)).toMatchObject({
-      status: 'processing', retryCount: 1,
-    });
+});
+
+describe('warm model identity', () => {
+  it('uses the manifest id when the payload carries a public alias', () => {
+    // NudeNet's payload model is '320n'/'640m', never the cache id.
+    expect(resolveWarmModelId('nudenet', '320n')).toBe('deepghs/nudenet_onnx');
+    expect(resolveWarmModelId('nudenet', undefined)).toBe('deepghs/nudenet_onnx');
+    // The advertised embedding id is the ONNX binding, not the manifest id.
+    expect(resolveWarmModelId('vector-embed', 'onnx-community/embeddinggemma-2-ONNX')).toBe(
+      'google/embeddinggemma-2',
+    );
+    expect(resolveWarmModelId('embed-gemma', undefined)).toBe('google/embeddinggemma-2');
+    // The payload model is a public alias, not the pinned manifest id.
+    expect(resolveWarmModelId('theia-inference', 'qwen-dlm-4b')).toBe(
+      'qwen3-0.6b-diffusion-bd3lm',
+    );
   });
 
-  it('re-prefills on a fresh swarm attempt after peer loss and rejects the old host result', async () => {
-    const { task, n1, n2 } = await setup();
-    const backup = await connectNode('n4', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
-    const firstInit = jsonFrames(n2).find((frame) => frame.type === 'swarm-init')!;
-
-    // The dropped member closes without sending a protocol-level error.
-    n1.socket.close();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    const retry = await getTask(task.id);
-    expect(retry).toMatchObject({ status: 'processing', retryCount: 1, assignedNodeId: 'n2' });
-    const inits = jsonFrames(n2).filter((frame) => frame.type === 'swarm-init');
-    const nextInit = inits[inits.length - 1];
-    expect(nextInit.sessionId).not.toBe(firstInit.sessionId);
-    expect(nextInit.attemptId).not.toBe(firstInit.attemptId);
-    expect(nextInit.prompt).toEqual((task.payload as { prompt: string }).prompt);
-
-    n2.socket.send(JSON.stringify({
-      type: 'result', taskId: task.id, sessionId: firstInit.sessionId,
-      payload: { output: 'stale' }, attemptId: firstInit.attemptId,
-    }));
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect((await getTask(task.id)).status).toBe('processing');
-
-    n2.socket.send(JSON.stringify({
-      type: 'result', taskId: task.id, sessionId: nextInit.sessionId,
-      payload: { output: 'recovered' }, attemptId: nextInit.attemptId,
-    }));
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(await getTask(task.id)).toMatchObject({ status: 'done', result: { output: 'recovered' } });
-    await withStorage(async (storage) => {
-      for (const nodeId of ['n2', 'n4']) {
-        expect(await storage.get<NodeRecord>(`node:${nodeId}`)).toMatchObject({ status: 'idle' });
-        expect((await storage.get<NodeRecord>(`node:${nodeId}`))?.reservation).toBeUndefined();
-      }
-      expect((await storage.get<NodeRecord>('node:n1'))?.reservation).toBeUndefined();
-    });
-    expect(backup.frames.some((frame) => typeof frame === 'string' && JSON.parse(frame).type === 'swarm-init')).toBe(false);
-  });
-
-  it('ignores stale attempts and errors from non-members', async () => {
-    const { task, n1, n2, n3 } = await setup();
-    const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
-    const chain = swarmChainFor(init);
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: 'old-session', chain }));
-    await new Promise(r => setTimeout(r, 20));
-    expect(jsonFrames(n1).some(f => f.type === 'swarm-slice')).toBe(false);
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain }));
-    await new Promise(r => setTimeout(r, 20));
-    n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: 'old-session' }));
-    n2.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
-    n2.socket.send(JSON.stringify({ type: 'result', taskId: task.id, sessionId: 'old-session', payload: {}, attemptId: init.attemptId }));
-    n1.socket.send(JSON.stringify({ type: 'error', taskId: task.id, sessionId: 'old-session', error: 'old' }));
-    n3.socket.send(JSON.stringify({ type: 'error', taskId: task.id, sessionId: init.sessionId, error: 'unrelated' }));
-    n2.socket.send(encodeSwarmEnvelope('old-session', new ArrayBuffer(16)));
-    await new Promise(r => setTimeout(r, 30));
-    expect(jsonFrames(n2).some(f => f.type === 'swarm-start')).toBe(false);
-    expect(n1.frames.some(f => typeof f !== 'string')).toBe(false);
-    expect(await getTask(task.id)).toMatchObject({
-      status: 'processing', retryCount: 0,
-    });
-    n1.socket.send(JSON.stringify({ type: 'swarm-ready', sessionId: init.sessionId }));
-    await new Promise(r => setTimeout(r, 20));
-    expect(jsonFrames(n2).some(f => f.type === 'swarm-start')).toBe(true);
-  });
-
-  it('fails a swarm when its cumulative Coordinator relay byte budget is exceeded', async () => {
-    const { task, n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((frame) => frame.type === 'swarm-init');
-    n2.socket.send(JSON.stringify({
-      type: 'swarm-plan',
-      sessionId: init.sessionId,
-      attemptId: init.attemptId,
-      chain: swarmChainFor(init),
-    }));
-    await new Promise((resolve) => setTimeout(resolve, 30));
-
-    const frame = encodeSwarmEnvelope(init.sessionId, new ArrayBuffer(16));
-    await withStorage(async (storage) => {
-      await storage.put(
-        swarmRelayBudgetKey(task.id),
-        MAX_SWARM_RELAY_BYTES_PER_TASK - frame.byteLength + 1,
-      );
-    });
-    const relayedBefore = n2.frames.filter((value) => value instanceof ArrayBuffer).length;
-    n1.socket.send(frame);
-    await new Promise((resolve) => setTimeout(resolve, 60));
-
-    expect(await getTask(task.id)).toMatchObject({
-      status: 'failed',
-      error: 'Coordinator swarm relay byte budget exceeded',
-    });
-    expect(n2.frames.filter((value) => value instanceof ArrayBuffer)).toHaveLength(relayedBefore);
-    expect(jsonFrames(n1).some((value) => value.type === 'abort')).toBe(true);
-    expect(await withStorage((storage) => storage.get(swarmRelayBudgetKey(task.id)))).toBeUndefined();
-  });
-
-  it('records large adjacent peer RTT disagreements as advisory diagnostics only', async () => {
-    const { task, n1, n2 } = await setup();
-    const init = jsonFrames(n2).find((frame) => frame.type === 'swarm-init');
-    n2.socket.send(JSON.stringify({
-      type: 'swarm-plan',
-      sessionId: init.sessionId,
-      attemptId: init.attemptId,
-      chain: swarmChainFor(init),
-    }));
-    await new Promise((resolve) => setTimeout(resolve, 30));
-
-    const now = Date.now();
-    const metric = (value: number | null, sampleCount = value === null ? 0 : 5) => ({
-      value, sampledAt: now, sampleCount,
-    });
-    const values = (rttMs: number) => ({
-      rttMs: metric(rttMs),
-      jitterMs: metric(null),
-      sendMbps: metric(null),
-      receiveMbps: metric(null),
-    });
-    n2.socket.send(JSON.stringify({
-      type: 'swarm-peer-quality',
-      taskId: task.id,
-      sessionId: init.sessionId,
-      attemptId: init.attemptId,
-      reports: [{
-        version: 1,
-        peerNodeId: 'n1',
-        sampledAt: now,
-        expiresAt: now + 30_000,
-        webRtc: values(50),
-        application: values(2_500),
-      }],
-    }));
-    await new Promise((resolve) => setTimeout(resolve, 30));
-
-    const diagnostics = await withStorage(async (storage) =>
-      storage.get<any[]>('trust:peer-quality-anomalies'));
-    expect(diagnostics).toHaveLength(1);
-    expect(diagnostics?.[0]).toMatchObject({
-      reporterNodeId: 'n2',
-      peerNodeId: 'n1',
-      webRtcRttMs: 50,
-      applicationRttMs: 2_500,
-      differenceMs: 2_450,
-    });
-    expect(await withStorage(async (storage) => storage.get('trust:protocol-faults'))).toBeUndefined();
-    expect(await getTask(task.id)).toMatchObject({ status: 'processing' });
-    expect(jsonFrames(n1).some((frame) => frame.type === 'swarm-error')).toBe(false);
-  });
-
-  it('relays bounded peer signaling only between current adjacent members', async () => {
-    const { task, n1, n2, n3 } = await setup();
-    const init = jsonFrames(n2).find(f => f.type === 'swarm-init');
-    n2.socket.send(JSON.stringify({ type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: swarmChainFor(init) }));
-    await new Promise(r => setTimeout(r, 30));
-
-    const hostSlice = jsonFrames(n2).find(f => f.type === 'swarm-slice');
-    const workerSlice = jsonFrames(n1).find(f => f.type === 'swarm-slice');
-    expect(hostSlice).toMatchObject({ attemptId: init.attemptId, previousNodeId: 'n1', nextNodeId: 'n1' });
-    expect(workerSlice).toMatchObject({ attemptId: init.attemptId, previousNodeId: 'n2', nextNodeId: 'n2' });
-
-    const offer = {
-      type: 'swarm-peer-signal', taskId: task.id, sessionId: init.sessionId,
-      attemptId: init.attemptId, toNodeId: 'n1',
-      signal: { kind: 'description', description: { type: 'offer', sdp: 'v=0' } },
-    };
-    n2.socket.send(JSON.stringify(offer));
-    await new Promise(r => setTimeout(r, 25));
-    expect(jsonFrames(n1).some(f => f.type === 'swarm-peer-signal' && f.fromNodeId === 'n2')).toBe(true);
-
-    const before = jsonFrames(n1).filter(f => f.type === 'swarm-peer-signal').length;
-    n2.socket.send(JSON.stringify({ ...offer, attemptId: 'retired-attempt' }));
-    n2.socket.send(JSON.stringify({ ...offer, toNodeId: 'n3' }));
-    n2.socket.send(JSON.stringify({
-      ...offer,
-      signal: { kind: 'description', description: { type: 'offer', sdp: 'x'.repeat(24 * 1024 + 1) } },
-    }));
-    n3.socket.send(JSON.stringify({ ...offer, toNodeId: 'n2' }));
-    await new Promise(r => setTimeout(r, 25));
-    expect(jsonFrames(n1).filter(f => f.type === 'swarm-peer-signal')).toHaveLength(before);
+  it('keeps the payload model for workloads that pin a real id', () => {
+    expect(resolveWarmModelId('ai-inference', 'Xenova/distilbert')).toBe('Xenova/distilbert');
+    expect(resolveWarmModelId('ai-inference', undefined)).toBe('');
+    expect(resolveWarmModelId('ai-inference', '')).toBe('');
   });
 });
 
+describe('node capability parsing', () => {
+  describe('parseWarmModels', () => {
+    it('accepts well-formed ranges', () => {
+      expect(parseWarmModels([{ modelId: 'qwen3-1.7b', layers: [0, 13] }])).toEqual([
+        { modelId: 'qwen3-1.7b', layers: [0, 13] },
+      ]);
+    });
 
-    
-describe('swarm protocol quarantine', () => {
-  it('ignores wrong attempts, quarantines repeated malformed plans, and excludes the host from new swarms', async () => {
-    stub = newStub();
-    const worker = await connectNode('trust-worker', 'capabilities=swarm-inference&webgpu=true&wasm=4000000000');
-    const host = await connectNode('trust-host', 'capabilities=swarm-inference&webgpu=true&wasm=8000000000');
-    const createdAt = Date.now();
-    const tasks = Array.from({ length: 4 }, (_, index) => makeTask({
-      createdAt: createdAt + index,
-      workload: 'swarm-inference',
-      payload: { model: 'qwen3-1.7b', prompt: 'hi' },
-    }));
-    await seedPending(tasks, ['trust-worker', 'trust-host']);
-    await runAssign();
+    it('drops malformed entries but keeps valid ones', () => {
+      expect(
+        parseWarmModels([
+          { modelId: 'ok', layers: [2, 9] },
+          { modelId: '', layers: [0, 1] },
+          { modelId: 'reversed', layers: [9, 2] },
+          { modelId: 'negative', layers: [-1, 4] },
+          { modelId: 'floats', layers: [0.5, 4] },
+          { modelId: 'missing-layers' },
+          'nope',
+        ]),
+      ).toEqual([{ modelId: 'ok', layers: [2, 9] }]);
+    });
 
-    for (let index = 0; index < 3; index++) {
-      const task = tasks[index];
-      await vi.waitFor(() => expect(jsonFrames(host).some((frame) => frame.type === 'swarm-init' && frame.taskId === task.id)).toBe(true));
-      const init = jsonFrames(host).find((frame) => frame.type === 'swarm-init' && frame.taskId === task.id);
+    it('rejects empty and absurdly deep ranges', () => {
+      // `[0, 0]` is not a span, and `[0, 1e9]` would mark a node warm for any
+      // model at all.
+      expect(parseWarmModels([{ modelId: 'empty', layers: [0, 0] }])).toBeUndefined();
+      expect(parseWarmModels([{ modelId: 'huge', layers: [0, 1e9] }])).toBeUndefined();
+    });
 
-      // A matching session with the wrong attempt must not add a strike or
-      // settle the task.
-      host.socket.send(JSON.stringify({
-        type: 'swarm-plan', sessionId: init.sessionId, attemptId: 'wrong-attempt', chain: [],
-      }));
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      await withStorage(async (storage) => {
-        const trust = await storage.get<any>('trust:protocol-faults');
-        expect(trust?.['trust-host']?.faults ?? []).toHaveLength(index);
-      });
+    it('returns undefined when nothing valid remains', () => {
+      expect(parseWarmModels([])).toBeUndefined();
+      expect(parseWarmModels('nope')).toBeUndefined();
+      expect(parseWarmModels([{ modelId: 'bad' }])).toBeUndefined();
+    });
 
-      // The currently authenticated host attempt submits a malformed plan.
-      host.socket.send(JSON.stringify({
-        type: 'swarm-plan', sessionId: init.sessionId, attemptId: init.attemptId, chain: [],
-      }));
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(await getTask(task.id)).toMatchObject({ status: 'failed' });
-    }
-
-    const trust = await withStorage(async (storage) => storage.get<any>('trust:protocol-faults'));
-    expect(trust?.['trust-host']?.faults).toHaveLength(3);
-    expect(trust['trust-host'].quarantineUntil).toBeGreaterThan(Date.now());
-    // With the only host quarantined, one remaining candidate cannot form a
-    // swarm; the fourth task stays queued without reserving the worker.
-    expect(await getTask(tasks[3].id)).toMatchObject({ status: 'pending' });
-    expect(jsonFrames(worker).some((frame) => frame.type === 'swarm-init' && frame.taskId === tasks[3].id)).toBe(false);
+    it('drops an over-long model id', () => {
+      expect(parseWarmModels([{ modelId: 'm'.repeat(5_000), layers: [0, 4] }])).toBeUndefined();
+    });
   });
 });
+
+interface NodeSocket {
+  socket: WebSocket;
+  frames: Array<string | ArrayBuffer>;
+}
+
+async function connectNode(nodeId: string, query: string): Promise<NodeSocket> {
+  const resp = await stub.fetch(`http://internal/ws?nodeId=${nodeId}&${query}`, {
+    headers: { Upgrade: 'websocket', Connection: 'Upgrade' },
+  });
+  expect(resp.status).toBe(101);
+  const socket = (resp as unknown as { webSocket?: WebSocket }).webSocket!;
+  socket.accept();
+  const frames: Array<string | ArrayBuffer> = [];
+  socket.addEventListener('message', (e: MessageEvent) => frames.push(e.data as string | ArrayBuffer));
+  return { socket, frames };
+}
+
+/** Connect one node and enqueue a task that is immediately delivered to it. */
+async function connectAndAssign(nodeId: string): Promise<{ task: TaskRecord; node: NodeSocket }> {
+  const node = await connectNode(nodeId, 'capabilities=ai-inference');
+  const task = makeTask();
+  await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+  await new Promise(r => setTimeout(r, 30));
+  return { task, node };
+}
+
+function jsonFrames(node: NodeSocket): any[] {
+  return node.frames.filter((f): f is string => typeof f === 'string').map((f) => JSON.parse(f));
+}

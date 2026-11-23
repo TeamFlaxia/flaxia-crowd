@@ -7,7 +7,7 @@
 npm レジストリでは配布していません。GitHub Releases の tarball を直接インストールします。
 
 ```bash
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.10.0/flaxia-node-0.10.0.tgz
 ```
 
 `@flaxia/node` は `@flaxia/sdk` に依存するため、レジストリを使わずに解決するには
@@ -15,8 +15,8 @@ SDK の tarball も同時に指定してください。
 
 ```bash
 npm install \
-  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz \
-  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
+  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.10.0/flaxia-node-0.10.0.tgz \
+  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.8.0/flaxia-sdk-0.8.0.tgz
 ```
 
 ## 基本設定
@@ -58,6 +58,7 @@ initFlaxiaNode({
 
 - `cc-extract` はブラウザから Common Crawl を直接取得できないため、**署名付き range proxy の origin を `ccRangeOrigins` に設定しない限り広告されません**。proxy は `Content-Range` を `Access-Control-Expose-Headers` で公開し、リダイレクトしないでください。
 - `embed-gemma` は初回にモデル（約 300〜500 MB）をダウンロードします。ノードの回線・ストレージ・バッテリーへの影響を考慮して有効化してください。
+- `probeGpu: true` を指定すると、小さなWebGPU compute probeの結果を配置ヒントとして送信します。既定は無効です。
 
 ## 開発時の注意点
 - サイト側のコンテンツセキュリティポリシー (CSP) で `connect-src` にオーケストレーターのドメインを追加してください。`cc-extract` を使う場合は range proxy の origin、`embed-gemma` を使う場合は `https://huggingface.co` も追加が必要です。

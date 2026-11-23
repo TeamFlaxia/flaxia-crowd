@@ -8,7 +8,7 @@
 npm レジストリでは配布していません。GitHub Releases の tarball を直接インストールします。
 
 ```bash
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.10.0/flaxia-node-0.10.0.tgz
 ```
 
 `@flaxia/node` は `@flaxia/sdk` に依存するため、レジストリを使わずに解決するには
@@ -16,8 +16,8 @@ SDK の tarball も同時に指定してください。
 
 ```bash
 npm install \
-  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz \
-  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
+  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.10.0/flaxia-node-0.10.0.tgz \
+  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.8.0/flaxia-sdk-0.8.0.tgz
 ```
 
 このリポジトリ内（workspace）では `@flaxia/sdk` はそのまま workspace として解決されます。

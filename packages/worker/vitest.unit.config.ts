@@ -4,13 +4,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
-      'src/worker/__tests__/peer-quality.test.ts',
-      'src/worker/__tests__/relay-budget.test.ts',
-      'src/worker/__tests__/mesh-planner.test.ts',
       'src/worker/__tests__/scheduler.test.ts',
       'src/worker/__tests__/queue-scheduler.test.ts',
-      'src/worker/__tests__/protocol-trust.test.ts',
-      'src/worker/__tests__/peer-quality-anomalies.test.ts',
     ],
     environment: 'node',
     pool: 'forks',

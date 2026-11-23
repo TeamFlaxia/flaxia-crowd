@@ -4,7 +4,7 @@
 
 ## 主な役割
 - **タスクキュー**: `TaskQueue` Durable Object でタスクの永続化とステータス管理。
-- **Signaling**: WebRTC接続のためのシグナリングサーバー機能。
+- **Signaling**: ノードのWebSocket接続認証・維持とJSONタスク配信。
 - **ノード管理**: ノードの接続監視とマッチング。
 
 ## 開発・デプロイ設定 (wrangler.toml)
@@ -23,7 +23,7 @@ new_classes = ["TaskQueue"]
 ## タスクのライフサイクル
 1. **PENDING**: SDKから投入され、キューに入る。
 2. **ASSIGNING**: オーケストレーターがノードへ割り当てを開始。
-3. **PROCESSING**: ノードがWebRTC DataChannel経由でタスクを実行中。
+3. **PROCESSING**: ノードがWebSocket経由でタスクを実行中。
 4. **DONE/FAILED**: 結果の確定、またはエラー処理。
 
 ## 冗長化方針

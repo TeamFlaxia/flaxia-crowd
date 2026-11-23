@@ -15,7 +15,6 @@ export const WORKLOAD_TYPES = [
   'vector-query',
   'moe-inference',
   'nudenet',
-  'swarm-inference',
   'cc-extract',
   'embed-gemma',
   'theia-inference',
@@ -36,7 +35,6 @@ export const ROUTABLE_WORKLOADS = [
   'vector-store',
   'vector-query',
   'nudenet',
-  'swarm-inference',
   'cc-extract',
   'embed-gemma',
   'theia-inference',
@@ -46,7 +44,6 @@ export const ROUTABLE_WORKLOADS = [
  * Heavy WebAssembly workloads that can exhaust memory on constrained devices.
  * The orchestrator must not route these to low-memory nodes, and nodes gate
  * them behind a real `WebAssembly.Memory` probe before advertising support.
- * `swarm-inference` is included because a node may hold GBs of layer weights.
  */
 export const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set<WorkloadType>([
   'ai-inference',
@@ -56,7 +53,6 @@ export const HEAVY_WORKLOADS: ReadonlySet<WorkloadType> = new Set<WorkloadType>(
   'vector-store',
   'vector-query',
   'nudenet',
-  'swarm-inference',
   'embed-gemma',
   // A Theia node holds dLLM weights and runs iterative denoising, so it must
   // never be placed on a low-memory device once the executor lands.
@@ -74,16 +70,13 @@ export const DEFAULT_WORKLOAD_TIMEOUT_MS: Readonly<Record<WorkloadType, number>>
   'vector-query': 60_000,
   'moe-inference': 600_000,
   nudenet: 120_000,
-  // Swarm jobs include a cold-download/load phase before generation, so they
-  // need far more headroom than single-node inference.
-  'swarm-inference': 1_800_000,
   // A handful of WARC range fetches plus HTML parsing. The node uses a tighter
   // per-record timeout internally.
   'cc-extract': 60_000,
   // EmbeddingGemma 2 text-only: model load plus a bounded batch.
   'embed-gemma': 120_000,
   // Diffusion inference needs the cold model load plus expertCount × denoise
-  // steps. Mirrors swarm-inference headroom until the executor is measured.
+  // steps, so it gets a larger budget until the executor is measured.
   'theia-inference': 1_800_000,
 };
 

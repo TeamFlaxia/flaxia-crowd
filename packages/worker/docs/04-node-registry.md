@@ -107,5 +107,3 @@ Sec-WebSocket-Protocol: flaxia-node-v1, bearer.<token>
 - `@flaxia/node` 初期化時に `/crowd/nodes/register` を叩いてトークンを取得
 - トークンの有効期限は 2 時間。`localStorage` には保存せずメモリのみ保持し、
   ページ再読み込みや再接続のたびに再登録（＝ローテーション）する。
-- ホスト選出はクランプ後の容量順だが、**異なる候補が 2 台以上**必要。
-  1 台だけでは swarm を開始しない。

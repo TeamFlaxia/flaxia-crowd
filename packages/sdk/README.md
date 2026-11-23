@@ -7,7 +7,7 @@ Flaxia Crowd の**タスク依頼者向けSDK**。型定義は全パッケージ
 npm レジストリでは配布していません。GitHub Releases の tarball を直接インストールします。
 
 ```bash
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.7.1/flaxia-sdk-0.7.1.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.8.0/flaxia-sdk-0.8.0.tgz
 ```
 
 依存関係はゼロ（`fetch` のみ使用）。
@@ -109,4 +109,4 @@ import {
 | `parseCrowdWebhook` / `extractCallbackOutput` | Webhook ボディの検証と結果抽出 |
 | `resolveNsfwTags` | NudeNet 検出結果からコンテンツタグへの変換 |
 
-`moe-inference` と `theia-inference` はプロトコル型として宣言済みですが、ノード実装が無いため `ROUTABLE_WORKLOADS` には含まれません。`swarm-inference` は複数ノードでモデルのレイヤーを分割して1件の生成ジョブを処理するワークロードで、WebGPU と（`NodeConfig.allowModelDownload` による）モデル重みのダウンロード同意が前提です。`theia-inference` の契約は [docs/theia-integration.md](../../docs/theia-integration.md) を参照してください。
+`moe-inference` はプロトコル型として宣言済みですが、ノード実装が無いため `ROUTABLE_WORKLOADS` には含まれません。`theia-inference` の契約は [docs/theia-integration.md](../../docs/theia-integration.md) を参照してください。

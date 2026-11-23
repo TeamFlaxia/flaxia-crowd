@@ -1,13 +1,11 @@
 import { Hono } from 'hono'
 import { originMatchesPattern } from '../origin'
 import type { Env } from '../index'
-import type { SwarmNodeCapabilities, TaskRecord, WarmModelRange, WorkloadType } from '@flaxia/sdk'
+import type { TaskRecord, WarmModelRange, WorkloadType } from '@flaxia/sdk'
 import { isTaskPriority, TASK_PRIORITY_DEFAULT } from '../worker/queue-scheduler'
 import {
   isRoutableWorkload,
   defaultTimeoutFor,
-  MIN_SWARM_NODES,
-  MAX_SWARM_NODES,
   MAX_CC_EXTRACT_RECORDS,
   MAX_CC_EXTRACT_RECORD_BYTES,
   MAX_CC_EXTRACT_TOTAL_BYTES,
@@ -24,7 +22,6 @@ import {
   NODE_SIGNAL_PROTOCOL,
   SUBSCRIBE_PROTOCOL,
   parseBearerSubprotocol,
-  isSupportedSwarmModelId,
 } from '@flaxia/sdk'
 import {
   createNodeToken,
@@ -74,8 +71,6 @@ const MAX_SITE_ID_CHARS = 128
 const MAX_NODE_CAPABILITIES = 32
 /** Upper bound on a single capability string. */
 const MAX_CAPABILITY_CHARS = 64
-/** Upper bound on the self-reported GPU architecture string (it is signed). */
-const MAX_GPU_ARCHITECTURE_CHARS = 64
 /** Upper bound on a warm-model repository id. */
 const MAX_WARM_MODEL_ID_CHARS = 128
 
@@ -106,25 +101,6 @@ function validatePayloadSize(env: Env, body: string): boolean {
   return new TextEncoder().encode(body).byteLength <= max
 }
 
-/** Validate a node's advertised WebGPU capabilities; returns undefined when absent/invalid. */
-export function parseSwarmCapabilities(value: unknown): SwarmNodeCapabilities | undefined {
-  if (!value || typeof value !== 'object') return undefined
-  const record = value as Record<string, unknown>
-  if (typeof record.webgpu !== 'boolean') return undefined
-  const swarm: SwarmNodeCapabilities = { webgpu: record.webgpu }
-  if (typeof record.gpuArchitecture === 'string') {
-    // Self-reported and signed into the node token, then echoed into a URL
-    // query parameter: clamp it so a multi-megabyte value cannot inflate the
-    // token, the WebSocket upgrade, or the DO request.
-    swarm.gpuArchitecture = record.gpuArchitecture.slice(0, MAX_GPU_ARCHITECTURE_CHARS)
-  }
-  // Self-reported: clamp it, otherwise `maxStorageBufferBindingSize: 1e300` would
-  // be enough to win every swarm host election.
-  const maxBuffer = clampByteCapacity(record.maxStorageBufferBindingSize)
-  if (maxBuffer !== undefined) swarm.maxStorageBufferBindingSize = maxBuffer
-  return swarm
-}
-
 /** Validate a node's warm model layer ranges; drops malformed entries. */
 export function parseWarmModels(value: unknown): WarmModelRange[] | undefined {
   if (!Array.isArray(value)) return undefined
@@ -145,59 +121,6 @@ export function parseWarmModels(value: unknown): WarmModelRange[] | undefined {
     ranges.push({ modelId: record.modelId, layers: [start, end] })
   }
   return ranges.length > 0 ? ranges : undefined
-}
-
-/**
- * Validate a `swarm-inference` payload at the API boundary.
- *
- * The scheduler tolerates unusable `swarm` options by falling back to defaults,
- * but silently reinterpreting a request means the client never learns its
- * options were dropped. Rejecting at submit time keeps a bad payload out of the
- * queue entirely. Returns an error message, or null when the payload is valid.
- */
-export function validateSwarmPayload(payload: unknown): string | null {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return 'payload must be an object'
-  }
-  const body = payload as Record<string, unknown>
-
-  if (body.maxNewTokens !== undefined && body.maxNewTokens !== null) {
-    const maxNewTokens = body.maxNewTokens
-    if (typeof maxNewTokens !== 'number' || !Number.isInteger(maxNewTokens) || maxNewTokens < 1) {
-      return 'payload.maxNewTokens must be a positive integer'
-    }
-  }
-
-  if (body.swarm === undefined || body.swarm === null) return null
-  if (typeof body.swarm !== 'object' || Array.isArray(body.swarm)) {
-    return 'payload.swarm must be an object'
-  }
-  const swarm = body.swarm as Record<string, unknown>
-
-  const asCount = (key: 'minNodes' | 'maxNodes'): string | null => {
-    const value = swarm[key]
-    if (value === undefined || value === null) return null
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
-      return `payload.swarm.${key} must be an integer >= 1`
-    }
-    if (value > MAX_SWARM_NODES) {
-      return `payload.swarm.${key} must be <= ${MAX_SWARM_NODES}`
-    }
-    return null
-  }
-  const minError = asCount('minNodes')
-  if (minError) return minError
-  const maxError = asCount('maxNodes')
-  if (maxError) return maxError
-
-  const { minNodes, maxNodes } = swarm as { minNodes?: number; maxNodes?: number }
-  if (minNodes !== undefined && maxNodes !== undefined && maxNodes < minNodes) {
-    return 'payload.swarm.maxNodes must be >= payload.swarm.minNodes'
-  }
-  if (swarm.preferWarm !== undefined && swarm.preferWarm !== null && typeof swarm.preferWarm !== 'boolean') {
-    return 'payload.swarm.preferWarm must be a boolean'
-  }
-  return null
 }
 
 /**
@@ -535,7 +458,6 @@ app.post('/nodes/register', async (c) => {
     fileSources?: boolean
     deviceMemory?: number | null
     wasmMemoryBytes?: number
-    swarm?: unknown
     warmModels?: unknown
   }
   try {
@@ -590,10 +512,9 @@ app.post('/nodes/register', async (c) => {
   // A `null`/undefined deviceMemory means a mobile WebView or unknown device.
   const deviceMemory = typeof body.deviceMemory === 'number' ? body.deviceMemory : null
   // Self-reported and only used to order candidates, so clamp it to a sane
-  // ceiling: a node claiming 1e300 bytes must not dominate host election.
+  // ceiling: a node claiming 1e300 bytes must not dominate capacity ranking.
   const wasmMemoryBytes = clampByteCapacity(body.wasmMemoryBytes)
 
-  const swarm = parseSwarmCapabilities(body.swarm)
   const warmModels = parseWarmModels(body.warmModels)
 
   const exp = Date.now() + NODE_TOKEN_TTL_MS
@@ -604,7 +525,6 @@ app.post('/nodes/register', async (c) => {
     fileSources,
     deviceMemory,
     wasmMemoryBytes,
-    swarm,
     warmModels,
     exp,
   })
@@ -647,13 +567,6 @@ app.get('/signal', async (c) => {
   url.searchParams.set('lowMemory', String(isLowMemoryNode(payload.wasmMemoryBytes, payload.deviceMemory)))
   if (typeof payload.wasmMemoryBytes === 'number') {
     url.searchParams.set('wasm', String(payload.wasmMemoryBytes))
-  }
-  if (payload.swarm?.webgpu) {
-    url.searchParams.set('webgpu', 'true')
-    if (payload.swarm.gpuArchitecture) url.searchParams.set('gpu', payload.swarm.gpuArchitecture)
-    if (payload.swarm.maxStorageBufferBindingSize !== undefined) {
-      url.searchParams.set('maxBuffer', String(payload.swarm.maxStorageBufferBindingSize))
-    }
   }
   if (payload.warmModels?.length) {
     try {
@@ -737,10 +650,6 @@ app.post('/tasks', async (c) => {
     return c.json({ error: 'priority must be an integer between 0 and 3' }, 400)
   }
 
-  if (body.workload === 'swarm-inference') {
-    const swarmError = validateSwarmPayload(body.payload)
-    if (swarmError) return c.json({ error: swarmError }, 400)
-  }
   if (body.workload === 'cc-extract') {
     const extractError = validateCcExtractPayload(body.payload)
     if (extractError) return c.json({ error: extractError }, 400)
@@ -848,80 +757,6 @@ app.get('/queue/stats', async (c) => {
   const stub = getCoordinator(c)
   const resp = await stub.fetch(`http://internal/queue-stats?tenantId=${encodeURIComponent(tenantId)}`)
   return new Response(resp.body, { status: resp.status, headers: resp.headers })
-})
-
-/**
- * Warm supported model weight ranges with a real one-token swarm run. Nodes
- * advertise swarm capability only after explicit allowModelDownload opt-in.
- */
-app.post('/swarm/prewarm', async (c) => {
-  const tenantId = await resolveCallerTenant(c.env, c.req.header('Authorization'))
-  if (!tenantId) return c.json({ error: 'Unauthorized' }, 401)
-  const rawBody = await c.req.text()
-  if (!validatePayloadSize(c.env, rawBody)) return c.json({ error: 'Payload too large' }, 413)
-  let body: { model?: unknown; minNodes?: unknown; maxNodes?: unknown }
-  try {
-    body = JSON.parse(rawBody)
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400)
-  }
-  if (!body || typeof body !== 'object') return c.json({ error: 'Invalid request body' }, 400)
-  if (!isSupportedSwarmModelId(body.model)) {
-    return c.json({ error: 'model is not in the supported swarm model list' }, 400)
-  }
-  const minNodes = body.minNodes === undefined ? MIN_SWARM_NODES : body.minNodes
-  const maxNodes = body.maxNodes === undefined
-    ? (typeof minNodes === 'number' ? Math.max(minNodes, 4) : 4)
-    : body.maxNodes
-  if (typeof minNodes !== 'number' || !Number.isInteger(minNodes) || minNodes < MIN_SWARM_NODES || minNodes > MAX_SWARM_NODES ||
-      typeof maxNodes !== 'number' || !Number.isInteger(maxNodes) || maxNodes < minNodes || maxNodes > MAX_SWARM_NODES) {
-    return c.json({ error: `minNodes/maxNodes must be integers between ${MIN_SWARM_NODES} and ${MAX_SWARM_NODES}` }, 400)
-  }
-
-  const taskId = crypto.randomUUID()
-  const createdAt = Date.now()
-  const task: TaskRecord = {
-    id: taskId,
-    status: 'pending',
-    workload: 'swarm-inference',
-    payload: {
-      model: body.model,
-      prompt: 'flaxia model cache warm-up',
-      maxNewTokens: 1,
-      swarm: { minNodes, maxNodes, preferWarm: false },
-    },
-    createdAt,
-    queuedAt: createdAt,
-    tenantId,
-    priority: 0,
-    retryCount: 0,
-    timeoutMs: 10 * 60 * 1000,
-  }
-  const stub = getCoordinator(c)
-  const resp = await stub.fetch(new Request(`http://internal/prewarm?tenantId=${encodeURIComponent(tenantId)}`, {
-    method: 'POST',
-    body: JSON.stringify(task),
-  }))
-  if (!resp.ok) {
-    const detail = await resp.json().catch(() => null) as { error?: string } | null
-    return c.json({ error: detail?.error ?? 'Prewarm request rejected' }, resp.status === 429 ? 429 : 502)
-  }
-  const subscribeToken = c.env.SUBSCRIBE_TOKEN_SECRET
-    ? await createSubscribeToken(c.env.SUBSCRIBE_TOKEN_SECRET, {
-        tenantId,
-        taskId,
-        exp: Date.now() + SUBSCRIBE_TOKEN_TTL_MS,
-      })
-    : undefined
-  return c.json({
-    message: 'Swarm model prewarm task submitted',
-    taskId,
-    id: taskId,
-    status: task.status,
-    createdAt,
-    subscribeToken,
-    subscribeTokenExpiresAt: subscribeToken ? Date.now() + SUBSCRIBE_TOKEN_TTL_MS : undefined,
-  })
 })
 
 app.get('/tasks/:id', async (c) => {

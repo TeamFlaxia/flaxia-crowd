@@ -14,7 +14,6 @@ export type WorkloadType =
   | 'vector-query'
   | 'moe-inference'
   | 'nudenet'
-  | 'swarm-inference'
   | 'cc-extract'
   | 'embed-gemma'
   | 'theia-inference';
@@ -230,91 +229,6 @@ export interface MoENodeConfig {
   modelId?: string;
 }
 
-// --- Swarm Inference (multi-node, layer-sharded generation) ---
-
-/** Room-sizing and scheduling hints for a swarm inference job. */
-export interface SwarmOptions {
-  /** Minimum nodes the job needs before it may start (default: 2, max: 16). */
-  minNodes?: number;
-  /** Maximum nodes the coordinator may reserve (default: 4, max: 16). */
-  maxNodes?: number;
-  /** Prefer nodes whose layer range is already cached (default: true). */
-  preferWarm?: boolean;
-}
-
-export interface SwarmInferencePayload {
-  /**
-   * Model identifier understood by the swarm engine (e.g. 'qwen3-1.7b').
-   * The engine resolves it to a GGUF source and layer plan.
-   */
-  model: string;
-  /** Prompt text for a base model, or a single user turn for an instruct model. */
-  prompt: string | string[];
-  /** Maximum number of tokens to generate (default: 128). */
-  maxNewTokens?: number;
-  /** Sampling temperature (default: greedy / 0). */
-  temperature?: number;
-  /** Top-p nucleus sampling threshold. */
-  topP?: number;
-  /** Top-k sampling threshold. */
-  topK?: number;
-  /** Optional room sizing / scheduling hints. */
-  swarm?: SwarmOptions;
-}
-
-/** One node's role in a completed swarm session, surfaced in the result. */
-export interface SwarmInferenceNodeInfo {
-  /** Assigned contiguous transformer layer range `[start, end)` (end exclusive, as in {@link SwarmSlice}). */
-  layers: [number, number];
-  /** Whether this node ran the host duties (tokenizer, embed, LM head, sampling). */
-  host: boolean;
-  /**
-   * Whether the node served its layer range from a warm cache. Only set for a
-   * node that can observe its own cache (the reporter); the other members'
-   * warmth is not part of the protocol, so it is omitted rather than guessed.
-   */
-  warm?: boolean;
-  /** Per-node load duration in milliseconds, when reported. */
-  loadMs?: number;
-}
-
-export interface SwarmInferenceResult {
-  output: string;
-  tokens: string[];
-  nodes: SwarmInferenceNodeInfo[];
-  durationMs: number;
-  prefillMs?: number;
-  tokensPerSecond?: number;
-}
-
-/** A node's role in a swarm session: the host drives generation, workers run a slice. */
-export type SwarmRole = 'host' | 'worker';
-
-/** One node's contiguous transformer layer slice. `end` is exclusive. */
-export interface SwarmSlice {
-  start: number;
-  end: number;
-  hasEmbed: boolean;
-  hasHead: boolean;
-}
-
-export interface SwarmChainNode {
-  nodeId: string;
-  role: SwarmRole;
-  slice: SwarmSlice;
-}
-
-/** The layer placement and ordered node chain for one swarm inference session. */
-export interface SwarmSessionPlan {
-  sessionId: string;
-  taskId: string;
-  model: string;
-  /** Total number of trunk layers in the model. */
-  layers: number;
-  /** Ordered chain; index 0 is the host and owns the generation loop. */
-  chain: SwarmChainNode[];
-}
-
 // --- Theia distributed diffusion inference ---
 //
 // `theia-inference` is the Theia chat service's workload. It is declared here
@@ -323,7 +237,7 @@ export interface SwarmSessionPlan {
 // ROUTABLE_WORKLOADS until a node can execute a denoise step.
 //
 // Theia is a star topology: the host owns the canvas and submits normal tasks
-// for each expert. There is no peer transport, layer split or swarm session.
+// for each expert. There is no peer transport or layer split.
 
 export interface TheiaChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -770,7 +684,6 @@ export type TaskPayload = (
   | VectorQueryPayload
   | MoEInferencePayload
   | NudeNetPayload
-  | SwarmInferencePayload
   | CcExtractPayload
   | EmbedGemmaPayload
   | TheiaInferencePayload
@@ -817,8 +730,6 @@ export interface TaskRecord {
   retryCount: number;
   timeoutMs: number;
   callbackUrl?: string;
-  /** Set for `swarm-inference` tasks once the coordinator has assembled a chain. */
-  swarmSession?: SwarmSessionPlan;
   result?: unknown;
   error?: string;
   /** Node that produced the accepted result (audit trail). */
@@ -874,8 +785,6 @@ export interface TaskQueueStats {
 export interface AbortMessage {
   type: 'abort';
   taskId: string;
-  /** Required for swarm tasks: identifies the attempt being stopped. */
-  sessionId?: string;
   error: string;
 }
 
@@ -965,6 +874,13 @@ export interface NodeConfig {
   consent: ConsentConfig;
   maxCpuLoad?: number;
   capabilities?: WorkloadType[];
+  /**
+   * Opt in to the bounded WebGPU compute probe used as resource telemetry.
+   * Disabled by default: the probe creates a temporary device and submits a
+   * few tiny compute passes, so hosts must ask for it explicitly. It is only a
+   * scheduling hint and never authorizes a workload.
+   */
+  probeGpu?: boolean;
   /** Exact HTTPS origins allowed to serve executable container WASM images. */
   containerImageOrigins?: string[];
   /** Exact HTTPS origins from which signed container file sources may be fetched. */
@@ -972,24 +888,6 @@ export interface NodeConfig {
   /** Exact HTTPS origins allowed to serve signed Common Crawl byte ranges. */
   ccRangeOrigins?: string[];
   moe?: MoENodeConfig;
-  /**
-   * Opt in to downloading model layer weights for swarm inference. Swarm jobs
-   * can pull multi-GB byte spans into the browser cache, so hosts must ask for
-   * this explicitly rather than inheriting it from the general node consent.
-   */
-  allowModelDownload?: boolean;
-}
-
-/**
- * GPU capability a node advertises to the orchestrator. Only nodes with
- * `webgpu: true` are eligible for `swarm-inference` routing.
- */
-export interface SwarmNodeCapabilities {
-  webgpu: boolean;
-  /** Adapter vendor/architecture string, when the browser exposes one. */
-  gpuArchitecture?: string;
-  /** Adapter max storage-buffer binding size in bytes, when reported. */
-  maxStorageBufferBindingSize?: number;
 }
 
 /** How a resource value was obtained. Unknown values are always represented by null. */
@@ -1074,8 +972,6 @@ export interface NodeRegisterRequest {
    * order candidate nodes, never as a trust decision.
    */
   wasmMemoryBytes?: number;
-  /** WebGPU capabilities, when the node has been probed for swarm inference. */
-  swarm?: SwarmNodeCapabilities;
   /** Warm model layer ranges the node can serve without a download. */
   warmModels?: WarmModelRange[];
 }

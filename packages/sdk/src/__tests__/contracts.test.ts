@@ -26,7 +26,6 @@ describe('workloads', () => {
     expect(WORKLOAD_TYPES).toContain('nudenet');
     expect(WORKLOAD_TYPES).toContain('vector-embed');
     expect(WORKLOAD_TYPES).toContain('moe-inference');
-    expect(WORKLOAD_TYPES).toContain('swarm-inference');
     expect(WORKLOAD_TYPES).toContain('cc-extract');
     expect(WORKLOAD_TYPES).toContain('embed-gemma');
     expect(WORKLOAD_TYPES).toContain('theia-inference');
@@ -36,7 +35,6 @@ describe('workloads', () => {
   it('narrows untrusted values', () => {
     expect(isWorkloadType('nudenet')).toBe(true);
     expect(isWorkloadType('moe-inference')).toBe(true);
-    expect(isWorkloadType('swarm-inference')).toBe(true);
     expect(isWorkloadType('theia-inference')).toBe(true);
     expect(isWorkloadType('not-a-workload')).toBe(false);
     expect(isWorkloadType(42)).toBe(false);
@@ -45,18 +43,15 @@ describe('workloads', () => {
   it('only treats implemented workloads as routable', () => {
     expect(ROUTABLE_WORKLOADS).not.toContain('moe-inference');
     expect(ROUTABLE_WORKLOADS).toContain('theia-inference');
-    expect(ROUTABLE_WORKLOADS).toContain('swarm-inference');
     expect(isRoutableWorkload('nudenet')).toBe(true);
     expect(isRoutableWorkload('moe-inference')).toBe(false);
     expect(isRoutableWorkload('theia-inference')).toBe(true);
-    expect(isRoutableWorkload('swarm-inference')).toBe(true);
     expect(isRoutableWorkload('cc-extract')).toBe(true);
     expect(isRoutableWorkload('embed-gemma')).toBe(true);
   });
 
   it('classifies heavy workloads', () => {
     expect(isHeavyWorkload('nudenet')).toBe(true);
-    expect(isHeavyWorkload('swarm-inference')).toBe(true);
     // The node-local HNSW index holds up to MAX_HNSW_NODES vectors in memory,
     // so both the store and the query path need the heavy-memory gate.
     expect(isHeavyWorkload('vector-store')).toBe(true);
@@ -117,9 +112,6 @@ describe('workloads', () => {
     expect(ccWarcPathMatchesCrawl(42, 'CC-MAIN-2026-43')).toBe(false);
   });
 
-  it('gives swarm inference room for a cold model download', () => {
-    expect(defaultTimeoutFor('swarm-inference')).toBeGreaterThan(defaultTimeoutFor('ai-inference'));
-  });
 });
 
 describe('webhook', () => {

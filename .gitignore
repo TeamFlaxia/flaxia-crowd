@@ -50,6 +50,3 @@ yarn-error.log*
 # system
 .DS_Store
 Thumbs.db
-
-# Native WebGPU helper bundle
-packages/node-native/dist/

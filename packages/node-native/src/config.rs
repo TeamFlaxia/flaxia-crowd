@@ -16,18 +16,22 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct ExecutionConfig {
     pub image_process: bool,
-    pub swarm: crate::swarm::SwarmConfig,
     pub memory_limit_mb: u64,
     pub max_timeout_ms: u64,
+    /// Accepted for one release of upgrade compatibility and ignored. The old
+    /// `[execution.swarm]` table no longer enables anything; operators should
+    /// delete it.
+    #[serde(default, rename = "swarm")]
+    pub legacy_swarm: Option<toml::Value>,
 }
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
             image_process: false,
-            swarm: Default::default(),
             memory_limit_mb: 512,
             max_timeout_ms: 120_000,
+            legacy_swarm: None,
         }
     }
 }
@@ -41,7 +45,10 @@ impl ExecutionConfig {
                 "execution limits: memory_limit_mb must be 256..2048 and max_timeout_ms 1..600000",
             );
         }
-        self.swarm.validate()
+        if self.legacy_swarm.is_some() {
+            tracing::warn!("[execution.swarm] is accepted but ignored; delete it from node.toml");
+        }
+        Ok(())
     }
 }
 
@@ -114,18 +121,35 @@ mod tests {
     }
 
     #[test]
-    fn swarm_needs_explicit_download_consent_and_absolute_trusted_runtime_paths() {
-        let mut cfg = config("https://example.com");
-        cfg.execution.swarm.enabled = true;
-        assert!(cfg.endpoints().is_err());
-        cfg.execution.swarm.allow_model_download = true;
-        cfg.execution.swarm.runtime = "deno".into();
-        cfg.execution.swarm.helper = "/opt/flaxia/swarm-helper.js".into();
-        assert!(cfg.endpoints().is_err());
-        cfg.execution.swarm.runtime = "/opt/deno/bin/deno".into();
-        assert!(cfg.endpoints().is_ok());
-        cfg.execution.swarm.heap_limit_mb = Some(0);
-        assert!(cfg.endpoints().is_err());
+    fn accepts_a_legacy_swarm_table_but_ignores_it() {
+        let parsed: Config = toml::from_str(
+            "orchestrator_url = 'https://example.com'\n\
+             site_id = 'dev'\n\
+             participate = true\n\
+             [execution]\n\
+             image_process = false\n\
+             [execution.swarm]\n\
+             enabled = true\n\
+             allow_model_download = true\n\
+             runtime = '/opt/deno/bin/deno'\n\
+             helper = '/opt/flaxia/swarm-helper.js'\n\
+             heap_limit_mb = 512\n",
+        )
+        .unwrap();
+        assert!(parsed.execution.legacy_swarm.is_some());
+        // Accepted for one release of upgrade compatibility, never enabled.
+        assert!(parsed.endpoints().is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_execution_fields_other_than_the_legacy_table() {
+        let parsed = toml::from_str::<Config>(
+            "orchestrator_url = 'https://example.com'\n\
+             site_id = 'dev'\n\
+             [execution]\n\
+             imag_process = true\n",
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]

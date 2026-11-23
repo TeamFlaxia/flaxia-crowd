@@ -1,12 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initFlaxiaNode } from '../SignalingClient';
-import {
-  decodeSwarmEnvelope,
-  encodeSwarmEnvelope,
-  encodeSwarmFrame,
-  signSwarmEnvelope,
-  verifySwarmEnvelope,
-} from '@flaxia/sdk';
 import { __consentTestHooks } from '../../consent/storage';
 import { setFlaxiaNodeHostManagedConsent } from '../../index';
 
@@ -183,62 +176,6 @@ describe('SignalingClient', () => {
     expect(body.fileSources).toBe(true);
   });
 
-  it('advertises swarm-inference with WebGPU details when the host opts in', async () => {
-    globalThis.WebSocket = vi.fn() as any;
-    mockFetchToken();
-    seedGrantedConsent();
-    collectNodeResourceReportMock.mockResolvedValue({
-      gpu: {
-        status: 'available',
-        architecture: { value: 'apple m1' },
-        maxStorageBufferBindingSize: { value: 134217728 },
-      },
-    });
-
-    initFlaxiaNode({
-      orchestratorUrl: 'https://flaxia.app',
-      siteId: 'test-site',
-      consent: { brandName: 'Test', position: 'bottom-right' },
-      capabilities: ['ai-inference', 'swarm-inference'],
-      allowModelDownload: true,
-    });
-    await flush();
-    await flush();
-
-    const [, init] = (global.fetch as any).mock.calls[0];
-    const body = JSON.parse(init.body);
-    expect(body.capabilities).toEqual(['ai-inference', 'swarm-inference']);
-    expect(body.swarm).toEqual({
-      webgpu: true,
-      gpuArchitecture: 'apple m1',
-      maxStorageBufferBindingSize: 134217728,
-    });
-  });
-
-  it('drops swarm-inference when the device has no WebGPU adapter', async () => {
-    globalThis.WebSocket = vi.fn() as any;
-    mockFetchToken();
-    seedGrantedConsent();
-    collectNodeResourceReportMock.mockResolvedValue({
-      gpu: { status: 'unsupported', architecture: { value: null }, maxStorageBufferBindingSize: { value: null } },
-    });
-
-    initFlaxiaNode({
-      orchestratorUrl: 'https://flaxia.app',
-      siteId: 'test-site',
-      consent: { brandName: 'Test', position: 'bottom-right' },
-      capabilities: ['ai-inference', 'swarm-inference'],
-      allowModelDownload: true,
-    });
-    await flush();
-    await flush();
-
-    const [, init] = (global.fetch as any).mock.calls[0];
-    const body = JSON.parse(init.body);
-    expect(body.capabilities).toEqual(['ai-inference']);
-    expect(body.swarm).toBeUndefined();
-  });
-
   it('sends fresh resource telemetry on connect and each coordinator heartbeat', async () => {
     const send = vi.fn();
     let wsInstance: any;
@@ -282,27 +219,47 @@ describe('SignalingClient', () => {
     expect(pongs[0].resources).toEqual(resourceReport);
     expect(pongs[1].resources).toEqual(resourceReport);
     expect(collectNodeResourceReportMock).toHaveBeenCalledTimes(2);
+    // The GPU probe is opt-in; an omitted config value must stay off.
+    for (const [options] of collectNodeResourceReportMock.mock.calls) {
+      expect(options).toMatchObject({ probeGpu: false });
+    }
   });
 
-  it('never probes WebGPU without the model-download opt-in', async () => {
-    globalThis.WebSocket = vi.fn() as any;
+  it('passes the explicit probeGpu opt-in to the resource reporter', async () => {
+    let wsInstance: any;
+    class MockWebSocket {
+      readyState = 1;
+      binaryType = 'arraybuffer';
+      onopen?: () => void;
+      close = vi.fn();
+      send = vi.fn();
+      constructor() { wsInstance = this; }
+    }
+    globalThis.WebSocket = MockWebSocket as any;
+    (globalThis.WebSocket as any).OPEN = 1;
     mockFetchToken();
     seedGrantedConsent();
+    collectNodeResourceReportMock.mockResolvedValue({
+      version: 1,
+      sampledAt: Date.now(),
+      expiresAt: Date.now() + 90_000,
+      gpu: { status: 'unknown' },
+    });
 
     initFlaxiaNode({
       orchestratorUrl: 'https://flaxia.app',
       siteId: 'test-site',
       consent: { brandName: 'Test', position: 'bottom-right' },
-      capabilities: ['ai-inference', 'swarm-inference'],
+      probeGpu: true,
     });
     await flush();
     await flush();
+    wsInstance.onopen();
+    await flush();
 
-    const [, init] = (global.fetch as any).mock.calls[0];
-    const body = JSON.parse(init.body);
-    expect(body.capabilities).toEqual(['ai-inference']);
-    expect(body.swarm).toBeUndefined();
-    expect(collectNodeResourceReportMock).not.toHaveBeenCalled();
+    expect(collectNodeResourceReportMock).toHaveBeenCalledWith(
+      expect.objectContaining({ probeGpu: true }),
+    );
   });
 
   it('should create consent container with correct id', () => {
@@ -740,8 +697,6 @@ describe('SignalingClient', () => {
         workerHandler!({ data: { id, type, error } }),
       workerTokens: (id: string, token: string) =>
         workerHandler!({ data: { id, type: 'token', token } }),
-      workerFrames: (id: string, frame: ArrayBuffer) =>
-        workerHandler!({ data: { id, type: 'swarm-frame', frame } }),
       sentRaw: () => send.mock.calls.map(([m]) => m),
       sent: () =>
         send.mock.calls
@@ -863,95 +818,4 @@ describe('SignalingClient', () => {
     );
   });
 
-  it('signs swarm frames per hop and drops unsigned or tampered inbound frames', async () => {
-    const { coordinator, onmessage, postMessage, sentRaw, workerFrames } = await bootNode();
-
-    // A two-node session where this node is the host (index 0).
-    coordinator({
-      type: 'swarm-init',
-      taskId: 'swarm-mac',
-      sessionId: 'sess-mac',
-      model: 'm',
-      members: [],
-      timeoutMs: 1000,
-    });
-    coordinator({
-      type: 'swarm-slice',
-      taskId: 'swarm-mac',
-      sessionId: 'sess-mac',
-      index: 0,
-      chainLength: 2,
-      role: 'host',
-      slice: { start: 0, end: 4, hasEmbed: true, hasHead: true },
-      inboundKey: 'in-key',
-      outboundKey: 'out-key',
-    });
-    await flush();
-
-    // Outbound: what the engine hands over is signed with the outbound hop key.
-    const outboundFrame = encodeSwarmFrame({ requestId: 1, pos: 1, tokens: 1 }, new Uint8Array(8));
-    workerFrames('sess-mac', outboundFrame);
-    // WebCrypto completes outside the timer/microtask queue. Wait for the
-    // signed frame itself instead of assuming two event-loop turns suffice.
-    await vi.waitFor(() => expect(sentRaw().some((m) => typeof m !== 'string')).toBe(true));
-
-    const binary = sentRaw().find((m) => typeof m !== 'string') as ArrayBuffer | undefined;
-    expect(binary).toBeDefined();
-    const envelope = decodeSwarmEnvelope(binary!);
-    expect(envelope?.sessionId).toBe('sess-mac');
-    expect(envelope?.mac).not.toBeNull();
-    expect(await verifySwarmEnvelope('out-key', 'sess-mac', envelope!.frame, envelope!.mac!)).toBe(true);
-
-    // Inbound: a frame signed with our inbound key reaches the engine...
-    const inboundFrame = encodeSwarmFrame({ requestId: 2, pos: 2, tokens: 1 }, new Uint8Array(8));
-    onmessage({ data: await signSwarmEnvelope('in-key', 'sess-mac', inboundFrame) } as MessageEvent);
-    await flush();
-    await flush();
-    await vi.waitFor(() => expect(postMessage.mock.calls.some(([m]) => m?.type === 'swarm-frame' && m?.id === 'sess-mac')).toBe(true));
-
-    // ...an unsigned frame is dropped...
-    postMessage.mockClear();
-    onmessage({ data: encodeSwarmEnvelope('sess-mac', inboundFrame) } as MessageEvent);
-    await flush();
-    await flush();
-    expect(postMessage).not.toHaveBeenCalled();
-
-    // ...and so is a frame signed with the wrong key.
-    postMessage.mockClear();
-    onmessage({
-      data: encodeSwarmEnvelope('sess-mac', inboundFrame, new Uint8Array(16).fill(9)),
-    } as MessageEvent);
-    await flush();
-    await flush();
-    expect(postMessage).not.toHaveBeenCalled();
-  });
-
-  it('queues a fresh session behind an abort and ignores the retired attempt', async () => {
-    const { coordinator, postMessage, workerReports, onmessage, sent } = await bootNode();
-    const initial = { type: 'swarm-init', taskId: 'swarm-task', sessionId: 'old', model: 'm', members: [] };
-    coordinator(initial);
-    coordinator({ type: 'abort', taskId: 'swarm-task', sessionId: 'old', error: 'reconnect' });
-    coordinator({ ...initial, sessionId: 'new' });
-    expect(postMessage.mock.calls.filter(([m]) => m.workload)).toHaveLength(1);
-    expect(postMessage).toHaveBeenCalledWith({ id: 'old', type: 'abort', reason: 'reconnect' });
-
-    workerReports('old', 'error', 'reconnect');
-    await flush();
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 'new', workload: 'swarm-inference' }));
-    expect(sent().some(m => m.type === 'error')).toBe(false);
-    postMessage.mockClear();
-    coordinator({ type: 'swarm-start', taskId: 'swarm-task', sessionId: 'old' });
-    coordinator({ type: 'abort', taskId: 'swarm-task', sessionId: 'old', error: 'late' });
-    coordinator({ ...initial, type: 'swarm-slice' });
-    onmessage({ data: encodeSwarmEnvelope('old', new ArrayBuffer(16)) } as MessageEvent);
-    expect(postMessage).not.toHaveBeenCalled();
-
-    coordinator({ type: 'swarm-start', taskId: 'swarm-task', sessionId: 'new' });
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'new', type: 'swarm-control', message: expect.objectContaining({ sessionId: 'new', taskId: 'swarm-task' }),
-    }), []);
-    workerReports('new', 'done', '');
-    await flush();
-    expect(sent()).toContainEqual(expect.objectContaining({ type: 'result', taskId: 'swarm-task', sessionId: 'new' }));
-  });
 });
