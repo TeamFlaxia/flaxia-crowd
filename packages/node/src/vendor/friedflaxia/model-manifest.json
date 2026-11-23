@@ -54,6 +54,17 @@
       "url": "https://huggingface.co/RemydreScarlet/nudenet-gguf/resolve/d83e0d9f17edfb32fe3c62874620ccc21f12c68d/nudenet-320n-f32.gguf",
       "sha256": "f1d215fde4a0c17d763e39901f176632f898630939e0be7e1420fcadb553ca60",
       "maxBytes": 16777216
+    },
+    "dllm": {
+      "modelId": "qwen3-0.6b-diffusion-bd3lm",
+      "repo": "RemydreScarlet/qwen3-0.6b-diffusion-bd3lm-GGUF",
+      "revision": "567c6892c922d43ab995def96796c70cbfeff9d4",
+      "file": "qwen3-bd3lm-q4_0.gguf",
+      "url": "https://huggingface.co/RemydreScarlet/qwen3-0.6b-diffusion-bd3lm-GGUF/resolve/567c6892c922d43ab995def96796c70cbfeff9d4/qwen3-bd3lm-q4_0.gguf",
+      "sha256": "fde85413e94a93bb7dd8f1c738395ef82359a3c59b9ef286b2ff87c9805460a3",
+      "maxBytes": 402653184,
+      "blocks": 28,
+      "blockSize": 32
     }
   },
   "preprocess": {
