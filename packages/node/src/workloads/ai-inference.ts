@@ -2,6 +2,7 @@ import type {
   AiInferencePayload,
   AiInferenceResult,
   ModelCacheBackend,
+  ModelCacheEntryStatus,
   NodeModelCacheSnapshot,
 } from '@flaxia/sdk';
 import {
@@ -16,6 +17,7 @@ import {
   loadFriedFlaxiaPlamo,
   releaseCache as releaseFriedFlaxiaTextGeneration,
 } from './friedflaxia/text-generation';
+import { FRIEDFLAXIA_D1, FRIEDFLAXIA_PLAMO } from './friedflaxia/model-registry';
 
 export {
   DEFAULT_AI_MODEL_MAX_BYTES,
@@ -57,11 +59,34 @@ export const isAiModelPreloaded = (model: string | AiModelCacheIdentity): boolea
 
 export const getModelCacheSnapshot = (): NodeModelCacheSnapshot => {
   const sampledAt = Date.now();
+  const entries: ModelCacheEntryStatus[] = [];
+  // Without these entries the coordinator cannot see that a node is already
+  // warm, so every task is placed on a cold node and pays the full model load.
+  if (isPlamoLoaded()) {
+    entries.push({
+      modelId: FRIEDFLAXIA_PLAMO.modelId,
+      revision: FRIEDFLAXIA_PLAMO.revision,
+      dtype: LIGHT_INFERENCE_PLAMO_TRANSLATE_DTYPE,
+      backend: 'wasm',
+      state: 'ready',
+      referenceCount: 1,
+    });
+  }
+  if (isD1Loaded()) {
+    entries.push({
+      modelId: FRIEDFLAXIA_D1.modelId,
+      revision: FRIEDFLAXIA_D1.revision,
+      dtype: 'q8_0',
+      backend: 'wasm',
+      state: 'ready',
+      referenceCount: 1,
+    });
+  }
   return {
     version: 1,
     sampledAt,
     expiresAt: sampledAt + 60_000,
-    entries: [],
+    entries,
   };
 };
 

@@ -1,4 +1,5 @@
-import type { VectorEmbedPayload, VectorEmbedResult } from '@flaxia/sdk';
+import type { VectorEmbedPayload, VectorEmbedResult, NodeModelCacheSnapshot } from '@flaxia/sdk';
+import { MAX_EMBED_GEMMA_TOKENS } from '@flaxia/sdk';
 import { fetchGuarded } from '../../executor/egress-guard';
 import {
   EMBEDDING_GEMMA_AUDIO_SAMPLE_RATE,
@@ -42,14 +43,27 @@ let modelLoad: Promise<MultimodalWasmModel> | null = null;
 export async function loadFriedFlaxiaMultimodalModel(): Promise<MultimodalWasmModel> {
   if (model) return model;
   if (modelLoad) return modelLoad;
+  const loadStartedAt = performance.now();
   modelLoad = (async () => {
+    const wasmStartedAt = performance.now();
     await initFriedFlaxiaWasm();
+    const wasmMs = performance.now() - wasmStartedAt;
+    const downloadStartedAt = performance.now();
     const [textBytes, mmprojBytes] = await Promise.all([
       downloadPinnedModel(FRIEDFLAXIA_EMBED_GEMMA),
       downloadPinnedModel(FRIEDFLAXIA_EMBED_GEMMA_MMPROJ),
     ]);
+    const downloadMs = performance.now() - downloadStartedAt;
+    const constructStartedAt = performance.now();
     const { MultimodalModel } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
     const loaded: MultimodalWasmModel = new MultimodalModel(textBytes, mmprojBytes);
+    const constructMs = performance.now() - constructStartedAt;
+    console.log(
+      `[flaxia-node:worker] multimodal load modelId=${FRIEDFLAXIA_EMBED_GEMMA.modelId} ` +
+        `textBytes=${textBytes.byteLength} mmprojBytes=${mmprojBytes.byteLength} ` +
+        `wasmMs=${Math.round(wasmMs)} downloadMs=${Math.round(downloadMs)} constructMs=${Math.round(constructMs)} ` +
+        `totalMs=${Math.round(performance.now() - loadStartedAt)}`,
+    );
     model = loaded;
     return loaded;
   })().catch((error) => {
@@ -67,6 +81,31 @@ export const releaseCache = (): void => {
     current?.free();
   } catch {}
 };
+
+/** Whether the multimodal encoder (text + mmproj) is resident. */
+export const isMultimodalLoaded = (): boolean => model !== null;
+
+/** Cache snapshot entry for the resident multimodal encoder. */
+export function getMultimodalCacheSnapshot(): NodeModelCacheSnapshot {
+  const sampledAt = Date.now();
+  return {
+    version: 1,
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+    entries: isMultimodalLoaded()
+      ? [
+          {
+            modelId: FRIEDFLAXIA_EMBED_GEMMA.modelId,
+            revision: FRIEDFLAXIA_EMBED_GEMMA.revision,
+            dtype: 'q8_0',
+            backend: 'wasm',
+            state: 'ready',
+            referenceCount: 1,
+          },
+        ]
+      : [],
+  };
+}
 
 interface MediaFeatures {
   rows: number;
@@ -183,6 +222,8 @@ export function buildMultimodalTokenIds(
   }
   const ids: number[] = [bos];
   const indices = { image: 0, audio: 0, video: 0 };
+  /** `[start, end)` of each media soft-token block, so truncation never splits one. */
+  const mediaRanges: Array<[number, number]> = [];
   const pattern = /<\|(image|audio|video)\|>/g;
   let cursor = 0;
   for (const match of text.matchAll(pattern)) {
@@ -194,6 +235,7 @@ export function buildMultimodalTokenIds(
       throw new Error(`vector-embed: missing ${modality} media for placeholder`);
     }
     indices[modality] += 1;
+    const blockStart = ids.length;
     if (modality === 'audio') {
       ids.push(BOA_TOKEN);
       for (let index = 0; index < (count as number); index += 1) ids.push(AUDIO_TOKEN);
@@ -210,15 +252,28 @@ export function buildMultimodalTokenIds(
       for (let index = 0; index < (count as number); index += 1) ids.push(IMAGE_TOKEN);
       ids.push(EOI_TOKEN);
     }
+    mediaRanges.push([blockStart, ids.length]);
     cursor = start + match[0].length;
   }
   ids.push(...loaded.encode(text.slice(cursor), false));
-  ids.push(eos);
   for (const modality of ['image', 'audio', 'video'] as const) {
     if (indices[modality] !== counts[modality].length) {
       throw new Error(`vector-embed: ${modality} media count does not match placeholders`);
     }
   }
+  // Bound the sequence before EOS. Media blocks are atomic; a block that does
+  // not fit is dropped whole, and the Rust side ignores its unused feature rows.
+  if (ids.length > MAX_EMBED_GEMMA_TOKENS) {
+    let cut = MAX_EMBED_GEMMA_TOKENS - 1;
+    for (const [start, end] of mediaRanges) {
+      if (start < cut && cut < end) {
+        cut = start;
+        break;
+      }
+    }
+    ids.length = Math.max(0, cut);
+  }
+  ids.push(eos);
   return Uint32Array.from(ids);
 }
 
@@ -236,6 +291,7 @@ export async function handleFriedFlaxiaVectorEmbed(
 ): Promise<FriedFlaxiaVectorEmbedResult> {
   const startedAt = performance.now();
   const loaded = await loadFriedFlaxiaMultimodalModel();
+  const preprocessStartedAt = performance.now();
 
   const images: MediaFeatures[] = [];
   for (const url of imageUrls) images.push(await fetchImageFeatures(loaded, url));
@@ -247,6 +303,7 @@ export async function handleFriedFlaxiaVectorEmbed(
     videos.push(...videoFeatures.frames);
     videoCounts.push({ tokens: videoFeatures.rows, frames: videoFeatures.frames.length });
   }
+  const preprocessMs = performance.now() - preprocessStartedAt;
 
   const counts = {
     image: images.map((image) => image.rows),
@@ -257,7 +314,14 @@ export async function handleFriedFlaxiaVectorEmbed(
   const imageData = concatFeatures(images);
   const videoData = concatFeatures(videos);
   const audioData = audio?.data ?? new Float32Array(0);
+  const forwardStartedAt = performance.now();
   const embedding = loaded.embed(ids, imageData, videoData, audioData);
+  const forwardMs = performance.now() - forwardStartedAt;
+  console.log(
+    `[flaxia-node:worker] vector-embed tokens=${ids.length} images=${images.length} ` +
+      `audio=${audio ? 1 : 0} videoFrames=${videos.length} preprocessMs=${Math.round(preprocessMs)} ` +
+      `forwardMs=${Math.round(forwardMs)} totalMs=${Math.round(performance.now() - startedAt)}`,
+  );
   // Matryoshka truncation to the public dimension and L2 re-normalization.
   const vector = Array.from(embedding.slice(0, 768));
   let norm = 0;

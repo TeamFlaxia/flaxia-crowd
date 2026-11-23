@@ -145,6 +145,25 @@ function taskNeedsFileSources(task: TaskRecord): boolean {
   );
 }
 
+/**
+ * Model a workload loads even though its payload has no `model` field.
+ *
+ * Placement otherwise only sees a warm match for `ai-inference`/`swarm`, so a
+ * node that already holds the embedding encoder or the detector never wins its
+ * own follow-up tasks. These ids mirror `model-manifest.json`.
+ */
+function implicitWarmModelId(workload: string): string {
+  switch (workload) {
+    case 'embed-gemma':
+    case 'vector-embed':
+      return 'google/embeddinggemma-2';
+    case 'nudenet':
+      return 'deepghs/nudenet_onnx';
+    default:
+      return '';
+  }
+}
+
 /** Coordinator-side state for one swarm session, keyed by task id. */
 interface SwarmRecord {
   sessionId: string;
@@ -1712,7 +1731,9 @@ export class Coordinator extends DurableObject<Env> {
           ? cpuMetric.value
           : now - node.lastPongAt <= STALE_NODE_MS ? loadBucket(node.cpuLoad) : null;
         const payload = task.payload as { model?: unknown; options?: { dtype?: unknown; device?: unknown } } | null;
-        const model = typeof payload?.model === "string" ? payload.model : "";
+        const model = typeof payload?.model === "string" && payload.model
+          ? payload.model
+          : implicitWarmModelId(task.workload);
         const wantDtype = typeof payload?.options?.dtype === "string" ? payload.options.dtype : undefined;
         const wantBackend = typeof payload?.options?.device === "string" ? payload.options.device : undefined;
         candidates.push({

@@ -1,9 +1,12 @@
 import type { NudeNetDetection, NudeNetPayload, NudeNetResult } from '@flaxia/sdk';
 import { fetchGuarded } from '../executor/egress-guard';
 import {
+  getModelCacheSnapshot,
   handleFriedFlaxiaNudeNet,
   releaseCache as releaseFriedFlaxiaNudeNet,
 } from './friedflaxia/nudenet';
+
+export { getModelCacheSnapshot };
 
 const IMG_SIZE = 320;
 

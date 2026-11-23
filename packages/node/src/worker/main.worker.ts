@@ -194,6 +194,7 @@ async function runWorkload(
     case 'vector-embed':
       const embed = await import('../workloads/vector-embed');
       cacheReleasers.set(workload, embed.releaseCache);
+      cacheSnapshotters.set(workload, embed.getModelCacheSnapshot);
       return await embed.handleVectorEmbed(payload as any);
     case 'vector-store':
       const store = await import('../workloads/vector-store');
@@ -206,6 +207,7 @@ async function runWorkload(
     case 'nudenet':
       const nudenet = await import('../workloads/nudenet');
       cacheReleasers.set(workload, nudenet.releaseCache);
+      cacheSnapshotters.set(workload, nudenet.getModelCacheSnapshot);
       return await nudenet.handleNudeNet(payload as any);
     case 'cc-extract':
       const cc = await import('../workloads/cc-extract');
@@ -213,6 +215,7 @@ async function runWorkload(
     case 'embed-gemma':
       const gemma = await import('../workloads/embed-gemma');
       cacheReleasers.set(workload, gemma.releaseCache);
+      cacheSnapshotters.set(workload, gemma.getModelCacheSnapshot);
       return await gemma.handleEmbedGemma(payload as any, yieldToThrottle);
     default:
       throw new Error(`Unknown workload type: ${workload}`);

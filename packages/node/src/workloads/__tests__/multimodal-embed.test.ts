@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MAX_EMBED_GEMMA_TOKENS } from '@flaxia/sdk';
 import { buildMultimodalTokenIds, type MultimodalWasmModel } from '../friedflaxia/multimodal-embed';
 
 function fakeModel(): MultimodalWasmModel {
@@ -55,5 +56,28 @@ describe('multimodal token construction', () => {
     expect(() =>
       buildMultimodalTokenIds(fakeModel(), 'x', { image: [1], audio: [], video: [] }),
     ).toThrow(/image media count/);
+  });
+
+  it('bounds the sequence and drops a media block that does not fit', () => {
+    const ids = buildMultimodalTokenIds(fakeModel(), `${'x'.repeat(3_000)}<|image|>y`, {
+      image: [280],
+      audio: [],
+      video: [],
+    });
+    expect(ids.length).toBe(MAX_EMBED_GEMMA_TOKENS);
+    expect(ids[ids.length - 1]).toBe(1);
+    // The image block starts past the budget, so it is dropped whole.
+    expect(Array.from(ids).filter((id) => id === 258880)).toHaveLength(0);
+  });
+
+  it('keeps a media block that fits and cuts only trailing text', () => {
+    const ids = buildMultimodalTokenIds(fakeModel(), `a<|image|>${'y'.repeat(3_000)}`, {
+      image: [280],
+      audio: [],
+      video: [],
+    });
+    expect(ids.length).toBe(MAX_EMBED_GEMMA_TOKENS);
+    expect(ids[ids.length - 1]).toBe(1);
+    expect(Array.from(ids).filter((id) => id === 258880)).toHaveLength(280);
   });
 });

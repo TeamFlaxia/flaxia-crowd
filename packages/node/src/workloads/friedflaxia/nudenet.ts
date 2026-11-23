@@ -1,4 +1,9 @@
-import type { NudeNetDetection, NudeNetPayload, NudeNetResult } from '@flaxia/sdk';
+import type {
+  NodeModelCacheSnapshot,
+  NudeNetDetection,
+  NudeNetPayload,
+  NudeNetResult,
+} from '@flaxia/sdk';
 import { FRIEDFLAXIA_NUDENET, downloadPinnedModel } from './model-registry';
 import { NUDENET_LABELS } from '../nudenet-labels';
 import { initFriedFlaxiaWasm } from '../../vendor/friedflaxia/init';
@@ -32,6 +37,29 @@ export const releaseCache = (): void => {
     current?.free();
   } catch {}
 };
+
+/** Cache snapshot entry for the resident detector (empty when cold). */
+export function getModelCacheSnapshot(): NodeModelCacheSnapshot {
+  const sampledAt = Date.now();
+  return {
+    version: 1,
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+    entries:
+      model !== null
+        ? [
+            {
+              modelId: FRIEDFLAXIA_NUDENET.modelId,
+              revision: FRIEDFLAXIA_NUDENET.revision,
+              dtype: 'f32',
+              backend: 'wasm',
+              state: 'ready',
+              referenceCount: 1,
+            },
+          ]
+        : [],
+  };
+}
 
 /**
  * Convert the wasm flat rows `[x1, y1, x2, y2, score, labelIndex]` to the

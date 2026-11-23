@@ -1,6 +1,11 @@
-import type { VectorEmbedPayload, VectorEmbedResult } from '@flaxia/sdk';
-import { handleFriedFlaxiaEmbedGemma, releaseCache as releaseEmbedGemma } from './friedflaxia/embed-gemma';
+import type { VectorEmbedPayload, VectorEmbedResult, NodeModelCacheSnapshot } from '@flaxia/sdk';
 import {
+  getEmbedGemmaCacheSnapshot,
+  handleFriedFlaxiaEmbedGemma,
+  releaseCache as releaseEmbedGemma,
+} from './friedflaxia/embed-gemma';
+import {
+  getMultimodalCacheSnapshot,
   handleFriedFlaxiaVectorEmbed,
   releaseCache as releaseMultimodal,
 } from './friedflaxia/multimodal-embed';
@@ -33,6 +38,25 @@ export const releaseCache = (): void => {
   releaseEmbedGemma();
   releaseMultimodal();
 };
+
+/** Combine the text and multimodal encoders into one warm-model snapshot. */
+export function getModelCacheSnapshot(): NodeModelCacheSnapshot {
+  const text = getEmbedGemmaCacheSnapshot();
+  const multimodal = getMultimodalCacheSnapshot();
+  const sampledAt = Date.now();
+  const seen = new Set<string>();
+  const entries = [...text.entries, ...multimodal.entries].filter((entry) => {
+    if (seen.has(entry.modelId)) return false;
+    seen.add(entry.modelId);
+    return true;
+  });
+  return {
+    version: 1,
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+    entries: entries.slice(0, 8),
+  };
+}
 
 function assertMultimodalPayload(payload: VectorEmbedPayload): {
   text: string;
