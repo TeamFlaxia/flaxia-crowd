@@ -1,4 +1,4 @@
-import type { WorkloadType, SwarmInitMessage, SwarmSliceMessage, NodeModelCacheSnapshot } from '@flaxia/sdk';
+import type { WorkloadType, NodeModelCacheSnapshot } from '@flaxia/sdk';
 import { HEAVY_WORKLOADS } from '@flaxia/sdk';
 import { CpuThrottle, DEFAULT_WAIT_SLOT_MS, ThrottleBusyError } from '../executor/throttle';
 import { MAX_TASK_RESULT_BYTES, isResultWithinLimit } from '../executor/resultLimits';
@@ -7,9 +7,6 @@ import {
   hasEnoughWasmMemoryForHeavy,
   probeMaxWasmMemoryBytes,
 } from '../executor/memoryProbe';
-import { SwarmController } from '../swarm/controller';
-import { createSwarmRuntime, getSwarmModelCacheSnapshot } from '../swarm/runtime';
-import { isSwarmControlEnvelope } from '../swarm/messages';
 import { hasWasmSimd } from '../vendor/friedflaxia/init';
 
 let throttle: CpuThrottle | null = null;
@@ -54,11 +51,7 @@ function waitForTokenFlow(id: string): Promise<void> {
   });
 }
 
-// The active swarm session, if any. One task at a time, so a single slot is
-// enough; control messages and frames from the main thread route here.
-let activeSwarm: SwarmController | null = null;
-let activeSwarmTaskId: string | null = null;
-/** The task this worker is executing right now, if any (tasks are serialized). */
+// The task this worker is executing right now, if any (tasks are serialized).
 let activeTaskId: string | null = null;
 
 const IDLE_EVICT_MS = 60_000;
@@ -131,7 +124,6 @@ function hasEnoughMemoryForHeavyWorkload(): boolean {
 // period instead of pinning hundreds of MB for the life of the worker.
 const cacheReleasers = new Map<string, () => void>();
 const cacheSnapshotters = new Map<string, () => NodeModelCacheSnapshot>();
-cacheSnapshotters.set('swarm-inference', getSwarmModelCacheSnapshot);
 let idleEvictTimer: ReturnType<typeof setTimeout> | null = null;
 
 function releaseLoadedCaches(): void {
@@ -140,14 +132,13 @@ function releaseLoadedCaches(): void {
   }
   cacheReleasers.clear();
   cacheSnapshotters.clear();
-  cacheSnapshotters.set('swarm-inference', getSwarmModelCacheSnapshot);
 }
 
 function getModelCacheSnapshot(): NodeModelCacheSnapshot {
   const sampledAt = Date.now();
   // Dedupe after flatMap on the full cache identity: the text and multimodal
   // snapshotters can report the same manifest id, while a different dtype or
-  // backend is a distinct download. The 8-entry budget is shared with swarm.
+  // backend is a distinct download.
   const seen = new Set<string>();
   const entries = [...cacheSnapshotters.values()].flatMap((snapshot) => {
     try { return snapshot().entries; } catch { return []; }
@@ -236,36 +227,6 @@ async function runWorkload(
   }
 }
 
-/** Start a swarm session and resolve when it finishes or fails. */
-function startSwarmTask(id: string, initial: SwarmInitMessage | SwarmSliceMessage, emitToken: (token: string) => Promise<void>): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const controller = new SwarmController({
-      initial,
-      runtime: createSwarmRuntime(),
-      sendControl: (message) => (self as any).postMessage({ id, type: 'swarm-message', message }),
-      sendFrame: (frame) => (self as any).postMessage({ id, type: 'swarm-frame', frame }, [frame]),
-      emitToken,
-      onDone: (result) => {
-        if (activeSwarm === controller) {
-          activeSwarm = null;
-          activeSwarmTaskId = null;
-        }
-        resolve(result);
-      },
-      onError: (error) => {
-        if (activeSwarm === controller) {
-          activeSwarm = null;
-          activeSwarmTaskId = null;
-        }
-        reject(new Error(error));
-      },
-    });
-    activeSwarm = controller;
-    activeSwarmTaskId = id;
-    void controller.start();
-  });
-}
-
 self.onmessage = async (e: MessageEvent) => {
   const data = e.data;
 
@@ -278,36 +239,11 @@ self.onmessage = async (e: MessageEvent) => {
     return;
   }
 
-  if (data?.type === 'swarm-control') {
-    // The main thread forwards whatever the coordinator sent; it is untrusted
-    // input. Only a well-formed control envelope reaches the session, so a
-    // malformed message cannot make the controller act on a bogus slice/plan.
-    if (!isSwarmControlEnvelope(data)) {
-      console.warn('[flaxia-node:worker] dropped malformed swarm-control message');
-      return;
-    }
-    if (activeSwarm) {
-      void activeSwarm.handleControl(data.message);
-    }
-    return;
-  }
-  if (data?.type === 'swarm-frame') {
-    if (data.frame instanceof ArrayBuffer) {
-      activeSwarm?.handleFrame(data.frame);
-    } else {
-      console.warn('[flaxia-node:worker] dropped malformed swarm-frame message');
-    }
-    return;
-  }
   if (data?.type === 'abort') {
     const id = data.id as string;
     const reason = typeof data.reason === 'string' && data.reason ? data.reason : 'aborted by the coordinator';
     releaseTokenFlow(id);
-    if (activeSwarm && activeSwarmTaskId === id) {
-      // Settling the controller posts the error this pool needs to release the
-      // slot; nothing waits on this message's reply.
-      activeSwarm.abort(reason);
-    } else if (activeTaskId === id) {
+    if (activeTaskId === id) {
       // Only a task we are actually running can be cancelled; an abort that
       // races its completion would otherwise leave an entry behind forever.
       cancelRequested.set(id, reason);
@@ -363,17 +299,15 @@ self.onmessage = async (e: MessageEvent) => {
       const ccRangeOrigins = Array.isArray(config?.ccRangeOrigins)
         ? config.ccRangeOrigins.filter((origin: unknown): origin is string => typeof origin === 'string')
         : [];
-      const result = workload === 'swarm-inference'
-        ? await startSwarmTask(id, payload as SwarmInitMessage | SwarmSliceMessage, emitToken)
-        : await runWorkload(
-            workload as WorkloadType,
-            payload,
-            emitToken,
-            { fileSourceOrigins, containerImageOrigins, ccRangeOrigins },
-            async () => {
-              await throttle?.yieldIfOverloaded();
-            },
-          );
+      const result = await runWorkload(
+        workload as WorkloadType,
+        payload,
+        emitToken,
+        { fileSourceOrigins, containerImageOrigins, ccRangeOrigins },
+        async () => {
+          await throttle?.yieldIfOverloaded();
+        },
+      );
 
       if (!isResultWithinLimit(result)) {
         throw new Error(

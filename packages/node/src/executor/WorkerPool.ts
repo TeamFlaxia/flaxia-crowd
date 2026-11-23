@@ -32,12 +32,6 @@ interface QueuedTask {
  */
 export const PRELOAD_WORKLOAD = 'ai-preload';
 
-/** Swarm tasks exchange control messages and binary frames mid-task. */
-export interface SwarmCallbacks {
-  onFrame?: (frame: ArrayBuffer) => void;
-  onMessage?: (message: unknown) => void;
-}
-
 /**
  * Executes tasks against a single Web Worker.
  *
@@ -55,9 +49,6 @@ export class WorkerPool {
   private workerUrl: string;
   private queue: QueuedTask[] = [];
   private active: ActiveTask | null = null;
-  /** Control messages that arrived for a task that has not started yet. */
-  private pendingControls: Array<{ taskId: string; message: unknown }> = [];
-  private static readonly MAX_PENDING_CONTROLS = 64;
   /**
    * Bound on queued tasks. Each queued entry closes over its payload (up to a
    * 16 MB base64 image), so an unbounded queue is a memory-amplification
@@ -93,7 +84,6 @@ export class WorkerPool {
     timeoutMs?: number,
     onToken?: (token: string) => void,
     config?: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[] },
-    swarm?: SwarmCallbacks,
     /** 0 = foreground, 1 = speculative preload. Preloads yield to foreground. */
     priority = 0,
   ): Promise<unknown> {
@@ -115,7 +105,7 @@ export class WorkerPool {
         return;
       }
       const job: () => void = () =>
-        this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, swarm, priority, queuedAt, job);
+        this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, priority, queuedAt, job);
       // A foreground task must not wait behind a speculative model warm-up:
       // terminate that worker (the only way to stop a synchronous wasm load)
       // and let this task start on a fresh one.
@@ -148,7 +138,6 @@ export class WorkerPool {
     this.active = null;
     clearTimeout(active.timer);
     active.removeListener();
-    this.pendingControls = this.pendingControls.filter((c) => c.taskId !== active.id);
     try {
       this.cleanupWorker();
     } catch (err) {
@@ -175,7 +164,6 @@ export class WorkerPool {
     config: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[] } | undefined,
     resolve: (value: unknown) => void,
     reject: (error: Error) => void,
-    swarm?: SwarmCallbacks,
     priority = 0,
     queuedAt = performance.now(),
     job?: () => void,
@@ -205,8 +193,6 @@ export class WorkerPool {
         active.removeListener();
       }
       this.active = null;
-      // Whatever was still queued for this task can never be delivered.
-      this.pendingControls = this.pendingControls.filter((c) => c.taskId !== id);
       fn();
       this.dequeue();
     };
@@ -228,14 +214,6 @@ export class WorkerPool {
           this._lastCpuLoad = Math.min(1, Math.max(0, cpuLoad));
           this._hasCpuLoadSample = true;
         }
-        return;
-      }
-      if (type === 'swarm-frame') {
-        swarm?.onFrame?.(event.data.frame as ArrayBuffer);
-        return;
-      }
-      if (type === 'swarm-message') {
-        swarm?.onMessage?.(event.data.message);
         return;
       }
       if (type === 'done') {
@@ -277,23 +255,14 @@ export class WorkerPool {
 
     try {
       worker.postMessage({ id, workload, payload, timeoutMs: timeout, config });
-      this.flushControls();
     } catch (err) {
       settle(() => reject(err instanceof Error ? err : new Error(String(err))));
     }
   }
 
-  /** Hand over the control messages that were waiting for this task to start. */
-  private flushControls() {
-    if (this.pendingControls.length === 0) return;
-    const mine = this.pendingControls.filter((c) => c.taskId === this.active?.id);
-    this.pendingControls = this.pendingControls.filter((c) => c.taskId !== this.active?.id);
-    for (const c of mine) this.postToActive({ type: 'swarm-control', message: c.message });
-  }
-
   /**
    * Post a message to the active task's worker. Used by the signaling client to
-   * push swarm control messages and hidden-state frames into a running session.
+   * pause or resume a running task's token stream.
    */
   private postToActive(payload: Record<string, unknown>, transfer?: Transferable[]): boolean {
     if (!this.worker || !this.active) return false;
@@ -303,27 +272,6 @@ export class WorkerPool {
     } catch {
       return false;
     }
-  }
-
-  /**
-   * Deliver a swarm control message to the task it names. A message that
-   * arrives while that task is still queued is held until it starts; posting it
-   * into whichever task happens to be running would hand it to the wrong
-   * session (and drop the intended one).
-   */
-  sendControl(message: unknown, executionId?: string): boolean {
-    const taskId = executionId ?? (message as { taskId?: unknown } | null)?.taskId;
-    if (typeof taskId === 'string' && taskId !== this.active?.id) {
-      if (!this.worker) return false;
-      this.pendingControls.push({ taskId, message });
-      if (this.pendingControls.length > WorkerPool.MAX_PENDING_CONTROLS) this.pendingControls.shift();
-      return false;
-    }
-    return this.postToActive({ type: 'swarm-control', message });
-  }
-
-  sendFrame(frame: ArrayBuffer): boolean {
-    return this.postToActive({ type: 'swarm-frame', frame }, [frame]);
   }
 
   /** Pause or resume a normal workload's asynchronous token sink. */
@@ -344,7 +292,6 @@ export class WorkerPool {
     const queued = this.queue.findIndex((task) => task.id === id);
     if (queued >= 0) {
       const [dropped] = this.queue.splice(queued, 1);
-      this.pendingControls = this.pendingControls.filter((c) => c.taskId !== id);
       log(`task aborted before start id=${id} reason=${reason}`);
       dropped.reject(new Error(reason));
       return true;
@@ -390,7 +337,6 @@ export class WorkerPool {
     // awaiting a task that will never run.
     const queued = this.queue;
     this.queue = [];
-    this.pendingControls = [];
     for (const task of queued) task.reject(new Error('TERMINATED'));
     if (this.active) {
       clearTimeout(this.active.timer);

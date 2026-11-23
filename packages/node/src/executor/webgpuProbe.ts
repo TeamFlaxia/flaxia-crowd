@@ -1,4 +1,4 @@
-import type { GpuProbeStatus, SwarmNodeCapabilities } from '@flaxia/sdk';
+import type { GpuProbeStatus } from '@flaxia/sdk';
 
 const COMPUTE_SAMPLES = 3;
 const COMPUTE_TIMEOUT_MS = 750;
@@ -64,8 +64,20 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
+/**
+ * Local summary of the probed adapter. Resource telemetry is self-reported and
+ * only used as a scheduling hint; it is never a trust decision.
+ */
+export interface GpuCapabilities {
+  webgpu: boolean;
+  /** Adapter vendor/architecture string, when the browser exposes one. */
+  gpuArchitecture?: string;
+  /** Adapter max storage-buffer binding size in bytes, when reported. */
+  maxStorageBufferBindingSize?: number;
+}
+
 export interface WebGpuProbeResult {
-  capabilities: SwarmNodeCapabilities;
+  capabilities: GpuCapabilities;
   status: GpuProbeStatus;
   sampledAt: number;
   expiresAt: number;
@@ -178,7 +190,7 @@ export async function probeWebGpuDetailed(): Promise<WebGpuProbeResult> {
 
     durations.sort((a, b) => a - b);
     const median = durations[Math.floor(durations.length / 2)];
-    const capabilities: SwarmNodeCapabilities = { webgpu: true };
+    const capabilities: GpuCapabilities = { webgpu: true };
     if (rawArchitecture) capabilities.gpuArchitecture = rawArchitecture;
     if (maxStorageBufferBindingSize !== null) {
       capabilities.maxStorageBufferBindingSize = maxStorageBufferBindingSize;
@@ -201,6 +213,6 @@ export async function probeWebGpuDetailed(): Promise<WebGpuProbeResult> {
 }
 
 /** Backwards-compatible capability probe; eligibility requires a working device. */
-export async function probeWebGpu(): Promise<SwarmNodeCapabilities> {
+export async function probeWebGpu(): Promise<GpuCapabilities> {
   return (await probeWebGpuDetailed()).capabilities;
 }

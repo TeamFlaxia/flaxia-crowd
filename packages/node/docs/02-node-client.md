@@ -11,7 +11,7 @@ WebRTC（DataChannel / offer / answer / ICE）は使用しない。
 ## 接続フロー
 
 ```
-1. POST /crowd/nodes/register { siteId, capabilities, wasmMemoryBytes, swarm }
+1. POST /crowd/nodes/register { siteId, capabilities, wasmMemoryBytes }
    → { token, nodeId, expiresAt }（nodeId はサーバー発行。リクエストの nodeId は無視される）
 2. WS /crowd/signal
    Sec-WebSocket-Protocol: flaxia-node-v1, bearer.<token>
@@ -69,13 +69,12 @@ class SignalingClient {
 | `result` | 送信 | 実行結果 |
 | `error` | 送信 | 実行失敗（中断タスクでは送信しない） |
 | `abort` | 受信 | 協調側からのタスク中断指示 |
-| `swarm-init` / `swarm-slice` / `swarm-start` / `swarm-error` | 双方向 | swarm-inference のセッション制御 |
 
 ## 配信試行（attemptId）は必須（Issue #4）
 
 コーディネーターは配信ごとに新しい `attemptId` を発行し、現在の ID と配信を受けた
 ソケットから届くメッセージだけを受理する。欠落・旧試行の `result` / `progress` / `error`
-は状態を変えずに破棄される。swarm 制御メッセージもセッションの attempt に束縛される。
+は状態を変えずに破棄される。
 
 ## エラーハンドリング
 

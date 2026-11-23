@@ -10,7 +10,7 @@
 
 WebGPU対応端末ではadapterからdeviceを作成し、バッファを確保しない小さなcomputeを3回送信して中央値の完了時間を記録します。各送信は750 msで打ち切り、deviceは必ず破棄します。adapter制限の `maxStorageBufferBindingSize` は1つのstorage bufferの上限であり、総VRAMや空きVRAMではありません。ブラウザが総VRAMを公開しないため `gpu.memoryBytes` はunknownのままです。
 
-`unsupported` はAPIまたはadapterがない場合、`unavailable` はdevice作成・計測失敗、`device-lost` は計測中のdevice喪失です。device-lost等の新しい報告はswarm候補から一時的に外すためのヒントになり、後続の成功した計測で候補に戻れます。
+`unsupported` はAPIまたはadapterがない場合、`unavailable` はdevice作成・計測失敗、`device-lost` は計測中のdevice喪失です。device-lost等の新しい報告は配置候補から一時的に外すためのヒントになり、後続の成功した計測で候補に戻れます。
 
 ## メモリ予算と縮退
 

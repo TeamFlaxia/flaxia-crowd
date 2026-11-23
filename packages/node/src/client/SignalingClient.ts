@@ -14,7 +14,6 @@ import { PRELOAD_WORKLOAD, WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, getAdvertisedWasmMemoryBytes, hasEnoughWasmMemoryForHeavy } from '../executor/memoryProbe';
 import { collectNodeResourceReport } from '../executor/resourceReporter';
 import { assertPublicUrl } from '../executor/egress-guard';
-import { isCurrentSwarmPeerSignal, SwarmPeerTransport } from '../swarm/peer-transport';
 import { evaluateMobileLifecycle } from './mobile-lifecycle';
 import { LightPreloader } from './light-preloader';
 import {
@@ -26,13 +25,9 @@ import {
   HEAVY_WORKLOADS,
   buildNodeSignalProtocols,
   buildWsUrl,
-  decodeSwarmEnvelope,
-  encodeSwarmEnvelope,
-  signSwarmEnvelope,
-  verifySwarmEnvelope,
 } from '@flaxia/sdk';
 
-import type { ConsentState, FlaxiaNodeController, NodeConfig, SwarmNodeCapabilities, WorkloadType } from '@flaxia/sdk';
+import type { ConsentState, FlaxiaNodeController, NodeConfig, WorkloadType } from '@flaxia/sdk';
 import type { AiInferencePayload, AiInferenceResult } from '@flaxia/sdk';
 import { OndeviceUnavailableError } from '@flaxia/sdk';
 
@@ -98,20 +93,6 @@ class SignalingClient {
   private abortedTasks = new Set<string>();
   private lightPreloader: LightPreloader | null = null;
   private preloaderTask: string | null = null;
-  private swarmSessions = new Map<string, string>();
-  private retiredSwarmSessions = new Set<string>();
-  /**
-   * Per-hop frame keys handed out with `swarm-slice`. A member signs what it
-   * forwards with `outboundKey` and only accepts frames signed with
-   * `inboundKey`, so one member cannot inject or rewrite a frame as another hop.
-   */
-  private swarmHopKeys = new Map<string, { inboundKey?: string; outboundKey?: string; chainLength: number }>();
-  private swarmPeerTransports = new Map<string, SwarmPeerTransport>();
-  private swarmPeerMetadata = new Map<string, { taskId: string; attemptId: string; peers: string[] }>();
-  private swarmFailureReported = new Set<string>();
-  /** Frame handling is serialized: HMAC verification and signing are async. */
-  private swarmInboundChain: Promise<void> = Promise.resolve();
-  private swarmOutboundChain: Promise<void> = Promise.resolve();
   /** Delivery attempt ids per task, echoed back so the coordinator can bind results. */
   private attempts = new Map<string, string>();
   /**
@@ -119,86 +100,6 @@ class SignalingClient {
    * which also rotates the token and keeps the server-issued node id current.
    */
   private cachedToken: NodeToken | null = null;
-
-  private receiveSwarmEnvelope(buffer: ArrayBuffer) {
-    const envelope = decodeSwarmEnvelope(buffer);
-    if (!envelope || ![...this.swarmSessions.values()].includes(envelope.sessionId)) return;
-    this.swarmInboundChain = this.swarmInboundChain
-      .then(async () => {
-        const keys = this.swarmHopKeys.get(envelope.sessionId);
-        if (keys && keys.chainLength > 1) {
-          if (!envelope.mac || !keys.inboundKey) return;
-          const valid = await verifySwarmEnvelope(
-            keys.inboundKey,
-            envelope.sessionId,
-            envelope.frame,
-            envelope.mac,
-          );
-          if (!valid) {
-            logError(`swarm frame rejected: bad hop MAC sessionId=${envelope.sessionId}`);
-            return;
-          }
-        }
-        this.workerPool.sendFrame(envelope.frame);
-      })
-      .catch(() => {});
-  }
-
-  private ensureSwarmPeerTransport(data: Record<string, unknown>) {
-    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-    const taskId = typeof data.taskId === 'string' ? data.taskId : '';
-    const attemptId = typeof data.attemptId === 'string' ? data.attemptId : '';
-    if (!sessionId || !taskId || !attemptId || this.swarmPeerTransports.has(sessionId)) return;
-    const previousNodeId = typeof data.previousNodeId === 'string' ? data.previousNodeId : undefined;
-    const nextNodeId = typeof data.nextNodeId === 'string' ? data.nextNodeId : undefined;
-    const peers = [...new Set([previousNodeId, nextNodeId].filter((id): id is string => !!id))];
-    this.swarmPeerMetadata.set(sessionId, { taskId, attemptId, peers });
-    const transport = new SwarmPeerTransport({
-      sessionId,
-      taskId,
-      attemptId,
-      nodeId: this.nodeId,
-      previousNodeId,
-      nextNodeId,
-      onSignal: (toNodeId, signal) => this.send({
-        type: 'swarm-peer-signal', taskId, sessionId, attemptId, toNodeId, signal,
-      }),
-      onFrame: (frame) => this.receiveSwarmEnvelope(frame),
-      onQuality: (reports) => this.send({
-        type: 'swarm-peer-quality', taskId, sessionId, attemptId, reports,
-      }),
-      onFailure: (error) => {
-        this.swarmFailureReported.add(sessionId);
-        this.send({ type: 'swarm-error', taskId, sessionId, attemptId, error: error.message });
-      },
-    });
-    this.swarmPeerTransports.set(sessionId, transport);
-    void transport.start();
-  }
-
-  private handleSwarmPeerSignal(data: Record<string, unknown>) {
-    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-    const metadata = this.swarmPeerMetadata.get(sessionId);
-    const transport = this.swarmPeerTransports.get(sessionId);
-    if (!metadata || !transport || !isCurrentSwarmPeerSignal(data, {
-      ...metadata,
-      sessionId,
-      nodeId: this.nodeId,
-    })) return;
-    void transport.handleSignal(data.fromNodeId as string, data.signal);
-  }
-
-  private retireSwarmSession(sessionId: string) {
-    this.swarmHopKeys.delete(sessionId);
-    this.swarmPeerTransports.get(sessionId)?.close();
-    this.swarmPeerTransports.delete(sessionId);
-    this.swarmPeerMetadata.delete(sessionId);
-    this.swarmFailureReported.delete(sessionId);
-    this.retiredSwarmSessions.add(sessionId);
-    if (this.retiredSwarmSessions.size > 64) {
-      this.retiredSwarmSessions.delete(this.retiredSwarmSessions.values().next().value!);
-    }
-  }
 
   constructor(
     private config: NodeConfig,
@@ -260,12 +161,9 @@ class SignalingClient {
 
     ws.onmessage = async (event) => {
       if (this.ws !== ws) return;
-      // Binary frames are swarm hidden states; hand them to the running worker
-      // after checking their session envelope.
-      if (typeof event.data !== 'string') {
-        this.receiveSwarmEnvelope(event.data as ArrayBuffer);
-        return;
-      }
+      // The node protocol is JSON-only. Ignore binary frames rather than
+      // letting an unexpected payload reach task handling.
+      if (typeof event.data !== 'string') return;
 
       let data: Record<string, unknown>;
       try {
@@ -303,76 +201,11 @@ class SignalingClient {
         }
         return;
       }
-      if (data.type === 'swarm-init' || data.type === 'swarm-slice') {
-        const taskId = String(data.taskId ?? '');
-        if (!taskId) return;
-        if (typeof data.sessionId !== 'string' || this.retiredSwarmSessions.has(data.sessionId)) return;
-        if (data.type === 'swarm-slice') {
-          this.ensureSwarmPeerTransport(data);
-          this.swarmHopKeys.set(data.sessionId, {
-            inboundKey: typeof data.inboundKey === 'string' ? data.inboundKey : undefined,
-            outboundKey: typeof data.outboundKey === 'string' ? data.outboundKey : undefined,
-            chainLength: typeof data.chainLength === 'number' ? data.chainLength : 1,
-          });
-        }
-        // Only the host receives swarm-init, and only that delivery carries the
-        // attempt id it must echo back when it settles the session.
-        if (typeof data.attemptId === 'string') this.attempts.set(taskId, data.attemptId);
-        // The host starts on swarm-init and a worker on its first swarm-slice;
-        // a host's later slice just reaches the already-running worker.
-        if (this.swarmSessions.get(taskId) === data.sessionId) {
-          this.workerPool.sendControl(data, data.sessionId);
-          return;
-        }
-        void this.startSwarm(taskId, data);
-        return;
-      }
-      if (data.type === 'swarm-peer-signal') {
-        this.handleSwarmPeerSignal(data);
-        return;
-      }
-      if (data.type === 'swarm-transport') {
-        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-        const metadata = this.swarmPeerMetadata.get(sessionId);
-        const transport = this.swarmPeerTransports.get(sessionId);
-        if (
-          metadata && transport &&
-          data.taskId === metadata.taskId &&
-          data.attemptId === metadata.attemptId &&
-          (data.mode === 'peer' || data.mode === 'relay')
-        ) transport.selectMode(data.mode);
-        return;
-      }
-      if (data.type === 'swarm-flow') {
-        const taskId = typeof data.taskId === 'string' ? data.taskId : '';
-        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-        const attemptId = typeof data.attemptId === 'string' ? data.attemptId : '';
-        if (
-          taskId && sessionId && this.swarmSessions.get(taskId) === sessionId &&
-          this.attempts.get(taskId) === attemptId && typeof data.paused === 'boolean'
-        ) this.workerPool.sendControl(data, sessionId);
-        return;
-      }
       if (data.type === 'task-flow') {
         const taskId = typeof data.taskId === 'string' ? data.taskId : '';
         const attemptId = typeof data.attemptId === 'string' ? data.attemptId : '';
         if (taskId && this.attempts.get(taskId) === attemptId && typeof data.paused === 'boolean') {
           this.workerPool.setTokenFlow(taskId, data.paused);
-        }
-        return;
-      }
-      if (data.type === 'swarm-start') {
-        if (this.swarmSessions.get(String(data.taskId)) === data.sessionId) {
-          this.workerPool.sendControl(data, data.sessionId as string);
-        }
-        return;
-      }
-      if (data.type === 'swarm-error') {
-        // The coordinator rejected the session: fail it locally too, so this
-        // node releases its slot instead of waiting out the task timeout.
-        const taskId = String(data.taskId ?? '');
-        if (taskId && this.swarmSessions.get(taskId) === data.sessionId) {
-          this.workerPool.sendControl(data, data.sessionId as string);
         }
         return;
       }
@@ -411,23 +244,19 @@ class SignalingClient {
     if (!taskId || !this.inflightTasks.has(taskId)) return;
     const error =
       typeof data.error === 'string' && data.error ? data.error : 'aborted by the coordinator';
-    const sessionId = this.swarmSessions.get(taskId);
-    if (sessionId && sessionId !== data.sessionId) return;
-    const executionId = sessionId ?? taskId;
-    if (sessionId) this.retireSwarmSession(sessionId);
-    if (this.workerPool.abort(executionId, error)) this.abortedTasks.add(executionId);
+    if (this.workerPool.abort(taskId, error)) this.abortedTasks.add(taskId);
     log(`task abort received taskId=${taskId} error=${error}`);
   }
 
   private async sendHeartbeat(ws: WebSocket) {
     if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || getConsentState() !== 'granted') return;
-    const requested = this.config.capabilities ?? ['ai-inference', 'image-process'];
-    const probeGpu = requested.includes('swarm-inference') && this.config.allowModelDownload === true;
     const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
     const report = await collectNodeResourceReport({
       cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
       deviceMemory,
-      probeGpu,
+      // Bounded, TTL-cached WebGPU compute telemetry. It is only a scheduling
+      // hint; a working adapter never authorizes a workload by itself.
+      probeGpu: true,
     });
     if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || getConsentState() !== 'granted') return;
     this.send({
@@ -457,15 +286,12 @@ class SignalingClient {
       this.ws?.close();
     } catch {}
     this.ws = null;
-    for (const transport of this.swarmPeerTransports.values()) transport.close();
-    this.swarmPeerTransports.clear();
-    this.swarmPeerMetadata.clear();
     try {
       delete (window as any)[INIT_FLAG];
     } catch {}
     // Kill the Web Worker we own. Without this, a re-init (common on mobile
     // Chrome where the embed script re-executes) leaves the previous worker
-    // running forever, and they accumulate into a huge worker swarm.
+    // running forever, and they accumulate into a pile of workers.
     try {
       this.workerPool.terminate();
     } catch {}
@@ -533,32 +359,8 @@ class SignalingClient {
         capabilities = capabilities.filter((cap) => cap !== 'cc-extract');
       }
 
-      // Swarm inference additionally needs a working WebGPU device and an
-      // explicit opt-in to download model layer weights. The resource report
-      // includes a tiny bounded compute sample and is reused by heartbeats.
-      let swarm: SwarmNodeCapabilities | undefined;
-      if (capable && requested.includes('swarm-inference') && this.config.allowModelDownload === true) {
-        const report = await collectNodeResourceReport({
-          cpuLoad: this.workerPool.hasCpuLoadSample ? this.workerPool.lastCpuLoad : null,
-          deviceMemory: (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
-          probeGpu: true,
-        });
-        if (!consentStillGranted()) return null;
-        if (report.gpu.status === 'available') {
-          swarm = { webgpu: true };
-          if (report.gpu.architecture.value) swarm.gpuArchitecture = report.gpu.architecture.value;
-          if (report.gpu.maxStorageBufferBindingSize.value !== null) {
-            swarm.maxStorageBufferBindingSize = report.gpu.maxStorageBufferBindingSize.value;
-          }
-        } else {
-          capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
-        }
-      } else {
-        capabilities = capabilities.filter(cap => cap !== 'swarm-inference');
-      }
-
       log(
-        `register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)} webgpu=${swarm?.webgpu ?? false}`,
+        `register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)}`,
       );
 
       const base = this.config.orchestratorUrl.replace(/\/+$/, '');
@@ -584,7 +386,6 @@ class SignalingClient {
             typeof (navigator as Navigator & { deviceMemory?: number }).deviceMemory === 'number'
               ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory
               : null,
-          swarm,
         }),
       });
       if (!consentStillGranted()) return null;
@@ -616,119 +417,6 @@ class SignalingClient {
   private send(message: Record<string, unknown>) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
-    }
-  }
-
-  private sendBinary(frame: ArrayBuffer) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(frame);
-    }
-  }
-
-  /**
-   * Sign an engine frame for the next hop and send it, in order. A multi-node
-   * session without hop keys cannot produce a frame its neighbour would accept,
-   * so it is dropped here instead of being sent unsigned.
-   */
-  private queueSwarmFrame(sessionId: string, frame: ArrayBuffer) {
-    this.swarmOutboundChain = this.swarmOutboundChain
-      .then(async () => {
-        const keys = this.swarmHopKeys.get(sessionId);
-        if (keys && keys.chainLength > 1) {
-          if (!keys.outboundKey) {
-            logError(`swarm frame not sent: no hop key sessionId=${sessionId}`);
-            return;
-          }
-          const envelope = await signSwarmEnvelope(keys.outboundKey, sessionId, frame);
-          const transport = this.swarmPeerTransports.get(sessionId);
-          if (!transport || !await transport.sendFrame(envelope)) this.sendBinary(envelope);
-          return;
-        }
-        const envelope = encodeSwarmEnvelope(sessionId, frame);
-        const transport = this.swarmPeerTransports.get(sessionId);
-        if (!transport || !await transport.sendFrame(envelope)) this.sendBinary(envelope);
-      })
-      .catch((error) => {
-        const metadata = this.swarmPeerMetadata.get(sessionId);
-        if (!metadata || this.swarmFailureReported.has(sessionId)) return;
-        this.swarmFailureReported.add(sessionId);
-        this.send({
-          type: 'swarm-error',
-          taskId: metadata.taskId,
-          sessionId,
-          attemptId: metadata.attemptId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-  }
-
-  /**
-   * Start a swarm session in the worker. The first control message is the task
-   * payload; later control messages and binary frames are forwarded into the
-   * running worker. The host's final result completes the task.
-   */
-  private async startSwarm(taskId: string, initial: Record<string, unknown>) {
-    const sessionId = initial.sessionId;
-    if (typeof sessionId !== 'string' || !sessionId) return;
-    if (this.swarmSessions.get(taskId) === sessionId) return;
-    this.swarmSessions.set(taskId, sessionId);
-    this.inflightTasks.add(taskId);
-    const startedAt = performance.now();
-    const timeoutMs = typeof initial.timeoutMs === 'number' ? initial.timeoutMs + 30000 : undefined;
-    const attemptId = this.attempts.get(taskId);
-
-    try {
-      const result = await this.workerPool.run(
-        sessionId,
-        'swarm-inference',
-        initial,
-        timeoutMs,
-        (token: string) => {
-          this.send({ type: 'progress', taskId, sessionId, token, attemptId });
-        },
-        { maxCpuLoad: this.effectiveMaxCpuLoad() },
-        {
-          onFrame: (frame) => this.queueSwarmFrame(sessionId, frame),
-          // Attempt ids are transport metadata owned by this client, so stamp
-          // them onto the engine's control messages (swarm-token / swarm-done):
-          // the coordinator only accepts session messages from the host attempt.
-          onMessage: (message) => {
-            const outgoing = message && typeof message === 'object' && !('attemptId' in message)
-              ? { ...message, attemptId }
-              : (message as Record<string, unknown>);
-            if (outgoing?.type === 'swarm-ready') {
-              const transport = this.swarmPeerTransports.get(sessionId);
-              void (async () => {
-                const peerReady = transport ? await transport.waitUntilReady() : false;
-                this.send({ ...outgoing, peerReady });
-              })();
-              return;
-            }
-            this.send(outgoing);
-          },
-        },
-      );
-      if (!this.abortedTasks.delete(sessionId)) {
-        this.send({ type: 'result', taskId, sessionId, payload: result, attemptId });
-      }
-      log(
-        `swarm result sent taskId=${taskId} durationMs=${Math.round(performance.now() - startedAt)}`,
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (this.abortedTasks.delete(sessionId)) {
-        log(`swarm stopped on coordinator abort taskId=${taskId} error=${message}`);
-      } else {
-        logError(`swarm failed taskId=${taskId} error=${message}`);
-        this.send({ type: 'error', taskId, sessionId, error: message, attemptId });
-      }
-    } finally {
-      this.retireSwarmSession(sessionId);
-      if (this.swarmSessions.get(taskId) === sessionId) {
-        this.swarmSessions.delete(taskId);
-        this.inflightTasks.delete(taskId);
-        this.attempts.delete(taskId);
-      }
     }
   }
 
@@ -821,7 +509,6 @@ class SignalingClient {
       300000,
       undefined,
       { maxCpuLoad: this.effectiveMaxCpuLoad() },
-      undefined,
       // Speculative: a real task preempts this instead of queueing behind it.
       1,
     );
