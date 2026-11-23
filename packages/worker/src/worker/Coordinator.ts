@@ -516,7 +516,9 @@ export class Coordinator extends DurableObject<Env> {
     if (!attemptId) return;
 
     if (isError) {
-      await this.failTask(taskId, error, nodeId);
+      // The node marks validation/capability failures permanent so they are
+      // reported immediately instead of being re-placed on every retry.
+      await this.failTask(taskId, error, nodeId, true, data.permanent === true);
     } else {
       await this.completeTask(taskId, data.payload, nodeId, attemptId);
     }

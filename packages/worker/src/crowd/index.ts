@@ -17,6 +17,7 @@ import {
   MAX_EMBED_GEMMA_TEXT_CHARS,
   isEmbedGemmaDimensions,
   isTheiaInferencePayload,
+  MAX_THEIA_CANVAS_CHARS,
   CC_CRAWL_PATTERN,
   ccWarcPathMatchesCrawl,
   NODE_SIGNAL_PROTOCOL,
@@ -669,8 +670,16 @@ app.post('/tasks', async (c) => {
     if (embedError) return c.json({ error: embedError }, 400)
   }
 
-  if (body.workload === 'theia-inference' && !isTheiaInferencePayload(body.payload)) {
-    return c.json({ error: 'Invalid theia-inference payload' }, 400)
+  if (body.workload === 'theia-inference') {
+    if (!isTheiaInferencePayload(body.payload)) {
+      return c.json({ error: 'Invalid theia-inference payload' }, 400)
+    }
+    // The executor tokenizes the canvas; reject an oversized one here instead
+    // of placing it on a warm node that will fail after downloading the model.
+    const canvas = (body.payload as { canvas?: { text?: unknown } }).canvas
+    if (typeof canvas?.text === 'string' && canvas.text.length > MAX_THEIA_CANVAS_CHARS) {
+      return c.json({ error: 'theia-inference canvas exceeds the executor limit' }, 400)
+    }
   }
 
   const { sites: allowedSites, error: sitesError } = parseAllowedSites(body.payload)

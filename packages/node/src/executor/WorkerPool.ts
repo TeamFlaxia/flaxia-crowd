@@ -2,6 +2,7 @@ import { isNodeModelCacheSnapshot } from "@flaxia/sdk";
 import type { NodeModelCacheSnapshot, WorkloadType } from "@flaxia/sdk";
 import { FlaxiaError } from "@flaxia/sdk";
 import { MAX_TASK_RESULT_BYTES, isResultWithinLimit } from "./resultLimits";
+import { PermanentTaskError } from "./errors";
 
 const log = (...args: unknown[]) => console.log("[flaxia-node]", ...args);
 
@@ -219,8 +220,9 @@ export class WorkerPool {
       if (type === 'done') {
         log(`task done id=${id} workload=${workload} durationMs=${Math.round(performance.now() - startedAt)}`);
         if (!isResultWithinLimit(result)) {
-          settle(() => reject(new Error(
+          settle(() => reject(new PermanentTaskError(
             `task result exceeds the ${MAX_TASK_RESULT_BYTES} byte limit; refused on the main thread`,
+            'RESULT_TOO_LARGE',
           )));
           return;
         }
@@ -232,6 +234,9 @@ export class WorkerPool {
         const err = new FlaxiaError(String(error), code, status);
         if (typeof event.data.detail === 'string') {
           (err as unknown as { detail?: string }).detail = event.data.detail;
+        }
+        if (event.data.permanent === true) {
+          (err as unknown as { permanent?: boolean }).permanent = true;
         }
         settle(() => reject(err));
       } else {

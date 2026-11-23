@@ -192,11 +192,13 @@ class SignalingClient {
             return;
           }
           logError(`task failed taskId=${msg.taskId} workload=${msg.workload} error=${message}`);
+          const permanent = (err as { permanent?: unknown }).permanent === true;
           this.send({
             type: 'error',
             taskId: String(data.taskId ?? ''),
             error: message,
             attemptId,
+            ...(permanent ? { permanent: true } : {}),
           });
         }
         return;

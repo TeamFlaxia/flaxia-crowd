@@ -1,6 +1,7 @@
 import type { WorkloadType, NodeModelCacheSnapshot } from '@flaxia/sdk';
 import { HEAVY_WORKLOADS } from '@flaxia/sdk';
 import { CpuThrottle, DEFAULT_WAIT_SLOT_MS, ThrottleBusyError } from '../executor/throttle';
+import { PermanentTaskError, isPermanentTaskError } from '../executor/errors';
 import { MAX_TASK_RESULT_BYTES, isResultWithinLimit } from '../executor/resultLimits';
 import {
   HEAVY_WORKLOAD_WASM_MEMORY_BYTES,
@@ -268,7 +269,10 @@ self.onmessage = async (e: MessageEvent) => {
     // here before any model is loaded so the device is never killed. Light
     // workloads (e.g. cc-extract) remain runnable on low-memory devices.
     if (HEAVY_EXECUTION.has(workload as WorkloadType) && !hasEnoughMemoryForHeavyWorkload()) {
-      throw new Error(`${workload}: node incapable: insufficient WASM memory (${WASM_MEMORY_BYTES} bytes < ${HEAVY_WORKLOAD_WASM_MEMORY_BYTES})`);
+      throw new PermanentTaskError(
+        `${workload}: node incapable: insufficient WASM memory (${WASM_MEMORY_BYTES} bytes < ${HEAVY_WORKLOAD_WASM_MEMORY_BYTES})`,
+        'NODE_INCAPABLE',
+      );
     }
 
     await waitForCpuSlot();
@@ -332,9 +336,10 @@ self.onmessage = async (e: MessageEvent) => {
     const errorCode = typeof errRec?.code === 'string' ? errRec.code : undefined;
     const errorStatus = typeof errRec?.status === 'number' ? errRec.status : undefined;
     const detail = typeof errRec?.detail === 'string' ? errRec.detail : undefined;
-    console.error(`[flaxia-node:worker] task error id=${id} workload=${workload} error=${error}`);
+    const permanent = isPermanentTaskError(err);
+    console.error(`[flaxia-node:worker] task error id=${id} workload=${workload} error=${error} permanent=${permanent}`);
     if (activeTaskId === id) activeTaskId = null;
     releaseTokenFlow(id);
-    self.postMessage({ id, type: 'error', error, errorCode, errorStatus, detail, modelCache: getModelCacheSnapshot() });
+    self.postMessage({ id, type: 'error', error, errorCode, errorStatus, permanent, detail, modelCache: getModelCacheSnapshot() });
   }
 };

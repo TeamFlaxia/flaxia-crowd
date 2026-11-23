@@ -81,6 +81,19 @@ describe('POST /tasks payload validation', () => {
     expect(body.error).toBeTruthy();
   });
 
+  it('rejects a theia canvas above the node executor limit', async () => {
+    const payload = {
+      messages: [{ role: 'user', content: 'hi' }],
+      model: 'qwen3-0.6b-diffusion-bd3lm',
+      phase: 'denoise',
+      canvas: { version: 1, text: 'x'.repeat(16_001), spans: [] },
+    };
+    const res = await submit(payload, 'theia-inference');
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toBeTruthy();
+  });
+
   it('still rejects an unroutable workload before payload validation', async () => {
     const res = await submit({ task: 'text-generation' }, 'moe-inference');
     expect(res.status).toBe(400);

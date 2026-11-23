@@ -17,8 +17,13 @@ import type {
   TheiaPhase,
 } from './types';
 
-/** Bound the canvas text before it is copied into a task payload. */
-export const MAX_THEIA_CANVAS_CHARS = 64_000;
+/**
+ * Bound the canvas text before it is copied into a task payload.
+ *
+ * This must not exceed the node executor's `THEIA_MAX_CANVAS_CHARS` (16_000):
+ * accepting a larger canvas here only makes the task fail after placement.
+ */
+export const MAX_THEIA_CANVAS_CHARS = 16_000;
 /** Bound the number of span slots one canvas may carry. */
 export const MAX_THEIA_SPANS = 512;
 /** Bound one delta's edit count. */

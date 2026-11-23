@@ -16,7 +16,8 @@
     "build": "rm -f tsconfig.tsbuildinfo && vite build && tsc -b",
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "test": "vitest"
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "^0.4.2",

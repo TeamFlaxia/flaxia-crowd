@@ -232,9 +232,9 @@ export interface MoENodeConfig {
 // --- Theia distributed diffusion inference ---
 //
 // `theia-inference` is the Theia chat service's workload. It is declared here
-// so hosts and the coordinator can share one contract before the node executor
-// lands (the same staging as `moe-inference`). It is deliberately absent from
-// ROUTABLE_WORKLOADS until a node can execute a denoise step.
+// so hosts, the coordinator and the node executor share one contract. The
+// workload is routable once a node can execute a denoise step; see
+// ROUTABLE_WORKLOADS in workloads.ts.
 //
 // Theia is a star topology: the host owns the canvas and submits normal tasks
 // for each expert. There is no peer transport or layer split.

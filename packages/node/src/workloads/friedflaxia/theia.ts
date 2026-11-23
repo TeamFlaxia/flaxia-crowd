@@ -13,6 +13,7 @@ import {
   isTheiaDelta,
 } from '@flaxia/sdk';
 import type { DllmModel } from '../../vendor/friedflaxia/types';
+import { PermanentTaskError } from '../../executor/errors';
 
 /**
  * Theia's masked-diffusion executor.
@@ -127,8 +128,9 @@ export function buildChatTokens(
  */
 export function tokenizeCanvas(model: DllmModel, canvas: TheiaCanvas): TheiaCanvasTokens {
   if (canvas.text.length > THEIA_MAX_CANVAS_CHARS) {
-    throw new Error(
+    throw new PermanentTaskError(
       `theia-inference: canvas text exceeds ${THEIA_MAX_CANVAS_CHARS} characters`,
+      'INVALID_PAYLOAD',
     );
   }
   assertNoControlTokens(canvas.text, 'canvas text');

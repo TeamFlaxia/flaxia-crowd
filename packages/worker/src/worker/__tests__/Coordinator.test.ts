@@ -1149,6 +1149,27 @@ describe('Coordinator', () => {
     expect(nextAttemptId).not.toBe(initialAttemptId);
   });
 
+  it('fails a permanent node error immediately without retrying', async () => {
+    stub = newStub();
+    const { task, node } = await connectAndAssign('node-permanent');
+    const attemptId = jsonFrames(node).find(frame => frame.type === 'task')!.attemptId as string;
+
+    node.socket.send(JSON.stringify({
+      type: 'error',
+      taskId: task.id,
+      error: 'theia-inference: invalid payload',
+      attemptId,
+      permanent: true,
+    }));
+
+    await vi.waitFor(async () => {
+      const failed = await getTask(task.id);
+      expect(failed.status).toBe('failed');
+      expect(String(failed.error)).toContain('invalid payload');
+    });
+    expect(jsonFrames(node).filter(frame => frame.type === 'task')).toHaveLength(1);
+  });
+
   it('ignores progress from a node that does not own the task', async () => {
     stub = newStub();
     const { task, node } = await connectAndAssign('node-1');

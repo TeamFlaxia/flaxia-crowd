@@ -18,6 +18,7 @@ import {
   releaseCache as releaseFriedFlaxiaTextGeneration,
 } from './friedflaxia/text-generation';
 import { FRIEDFLAXIA_D1, FRIEDFLAXIA_PLAMO } from './friedflaxia/model-registry';
+import { PermanentTaskError } from '../executor/errors';
 
 export {
   DEFAULT_AI_MODEL_MAX_BYTES,
@@ -130,5 +131,5 @@ export const preloadAiModel = async (request: {
     await loadFriedFlaxiaD1();
     return;
   }
-  throw new Error(`ai-preload: unsupported task ${request.task}`);
+  throw new PermanentTaskError(`ai-preload: unsupported task ${request.task}`, 'UNSUPPORTED_WORKLOAD');
 };

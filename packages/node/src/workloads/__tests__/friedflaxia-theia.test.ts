@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TheiaCanvas, TheiaInferencePayload } from '@flaxia/sdk';
-import { MAX_THEIA_RESULT_DELTAS, THEIA_DLLM_MODEL_ID } from '@flaxia/sdk';
+import { MAX_THEIA_CANVAS_CHARS, MAX_THEIA_RESULT_DELTAS, THEIA_DLLM_MODEL_ID } from '@flaxia/sdk';
 import type { DllmModel, DllmTopKOutput } from '../../vendor/friedflaxia/types';
 import {
+  THEIA_MAX_CANVAS_CHARS,
   THEIA_MAX_CONTEXT_TOKENS,
   buildChatTokens,
   decodeSpan,
@@ -129,6 +130,10 @@ function payload(overrides: Partial<TheiaInferencePayload> = {}): TheiaInference
 describe('theia model pinning', () => {
   it('keeps the SDK warm id and the manifest id identical', () => {
     expect(DLLM_MODEL_ID).toBe(THEIA_DLLM_MODEL_ID);
+  });
+
+  it('keeps the SDK canvas bound equal to the executor bound', () => {
+    expect(MAX_THEIA_CANVAS_CHARS).toBe(THEIA_MAX_CANVAS_CHARS);
   });
 });
 
