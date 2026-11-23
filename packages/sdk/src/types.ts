@@ -328,6 +328,9 @@ export interface SwarmSessionPlan {
 export interface TheiaChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  /** Optional consumer fields; the node ignores them. */
+  id?: string;
+  createdAt?: number;
 }
 
 export type TheiaMergeRule =
@@ -413,20 +416,21 @@ export interface TheiaInferencePayload {
   maxSteps?: number;
   /** Self-Repulsion strength λ (default: 64). */
   strength?: number;
-  /** Softmax temperature (default: 0.6). */
+  /** Node-side denoise sampling temperature (default: 0.6). */
   temperature?: number;
   /** Distribution merge rule applied by the host reducer (generate mode). */
   mergeRule?: TheiaMergeRule;
-  /** Optional room sizing / scheduling hints. */
+  /**
+   * Scheduling hints. Task placement is independent (star topology); there is
+   * no room/session record in the coordinator.
+   */
   theia?: {
-    minNodes?: number;
-    maxNodes?: number;
     preferWarm?: boolean;
   };
 }
 
-/** One node's contribution to a Theia response. */
-export interface TheiaSwarmNodeInfo {
+/** One node's contribution to a host aggregate (not a per-task field). */
+export interface TheiaNodeInfo {
   nodeId: string;
   /** LoRA expert served by this node. */
   expert?: string;
@@ -436,8 +440,6 @@ export interface TheiaSwarmNodeInfo {
   steps: number;
   /** Deltas accepted from this node. */
   deltaCount?: number;
-  /** Deltas that were superseded by a later commit. */
-  revertCount?: number;
   /** Staleness in rounds when this node's proposal was merged. */
   ageSteps?: number;
 }
@@ -457,9 +459,11 @@ export interface TheiaInferenceResult {
   expert?: string;
   phase?: TheiaPhase;
   tokens?: string[];
+  /** Host-side fan-out width K (number of expert tasks), not a node request. */
   paths?: number;
   mergeRule?: TheiaMergeRule;
-  nodes?: TheiaSwarmNodeInfo[];
+  /** Host aggregate; a single node task does not populate this. */
+  nodes?: TheiaNodeInfo[];
   durationMs: number;
 }
 
