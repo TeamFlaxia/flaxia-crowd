@@ -24,7 +24,7 @@
 flaxia-crowd/
 ├── packages/
 │   ├── worker/    # Cloudflare Workers オーケストレーター (TaskQueue, Signaling)
-│   ├── node/      # ブラウザノードSDK (ConsentUI, WebRTC, WorkerPool)
+│   ├── node/      # ブラウザノードSDK (ConsentUI, WorkerPool)
 │   ├── node-native/ # Rust製常駐ノード（Linux画像処理）
 │   └── sdk/       # 依頼者用SDK (Task Submission, Types)
 ```
@@ -41,7 +41,7 @@ tarball を直接インストールします（バージョンはリリースに
 npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.8.0/flaxia-sdk-0.8.0.tgz
 
 # サイトオーナー (Node Provider)
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.10.0/flaxia-node-0.10.0.tgz
 ```
 
 詳細な利用方法や各コンポーネントの仕様は `docs/` ディレクトリを参照してください。

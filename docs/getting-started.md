@@ -21,7 +21,7 @@ npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.
 
 ### サイトオーナー (Node Provider)
 ```bash
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.10.0/flaxia-node-0.10.0.tgz
 ```
 
 `@flaxia/node` の実行時コードは `@flaxia/sdk` を同梱していますが、型定義
@@ -30,7 +30,7 @@ tarball も入れてください（レジストリからの解決は行いませ
 
 ```bash
 npm install \
-  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.9.1/flaxia-node-0.9.1.tgz \
+  https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.10.0/flaxia-node-0.10.0.tgz \
   https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.8.0/flaxia-sdk-0.8.0.tgz
 ```
 
