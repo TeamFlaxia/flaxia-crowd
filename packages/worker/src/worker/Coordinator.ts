@@ -146,13 +146,13 @@ function taskNeedsFileSources(task: TaskRecord): boolean {
 }
 
 /**
- * Model a workload loads even though its payload has no `model` field.
+ * Model a workload loads even though its payload has no reusable `model` field.
  *
  * Placement otherwise only sees a warm match for `ai-inference`/`swarm`, so a
  * node that already holds the embedding encoder or the detector never wins its
  * own follow-up tasks. These ids mirror `model-manifest.json`.
  */
-function implicitWarmModelId(workload: string): string {
+export function implicitWarmModelId(workload: string): string {
   switch (workload) {
     case 'embed-gemma':
     case 'vector-embed':
@@ -162,6 +162,20 @@ function implicitWarmModelId(workload: string): string {
     default:
       return '';
   }
+}
+
+/**
+ * The cache identity a task will actually warm.
+ *
+ * `embed-gemma`/`vector-embed`/`nudenet` accept a public alias in
+ * `payload.model` (`'320n'`, `'onnx-community/embeddinggemma-2-ONNX'`), never
+ * the manifest id the node reports in its heartbeat. Prefer the workload
+ * identity for those, otherwise warm placement silently never matches.
+ */
+export function resolveWarmModelId(workload: string, payloadModel: unknown): string {
+  const implicit = implicitWarmModelId(workload);
+  if (implicit) return implicit;
+  return typeof payloadModel === 'string' && payloadModel ? payloadModel : '';
 }
 
 /** Coordinator-side state for one swarm session, keyed by task id. */
@@ -1731,9 +1745,7 @@ export class Coordinator extends DurableObject<Env> {
           ? cpuMetric.value
           : now - node.lastPongAt <= STALE_NODE_MS ? loadBucket(node.cpuLoad) : null;
         const payload = task.payload as { model?: unknown; options?: { dtype?: unknown; device?: unknown } } | null;
-        const model = typeof payload?.model === "string" && payload.model
-          ? payload.model
-          : implicitWarmModelId(task.workload);
+        const model = resolveWarmModelId(task.workload, payload?.model);
         const wantDtype = typeof payload?.options?.dtype === "string" ? payload.options.dtype : undefined;
         const wantBackend = typeof payload?.options?.device === "string" ? payload.options.device : undefined;
         candidates.push({
