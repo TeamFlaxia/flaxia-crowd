@@ -145,14 +145,16 @@ function releaseLoadedCaches(): void {
 
 function getModelCacheSnapshot(): NodeModelCacheSnapshot {
   const sampledAt = Date.now();
-  // Dedupe after flatMap: the text and multimodal snapshotters can both report
-  // the same manifest id, and the 8-entry budget is shared with swarm.
+  // Dedupe after flatMap on the full cache identity: the text and multimodal
+  // snapshotters can report the same manifest id, while a different dtype or
+  // backend is a distinct download. The 8-entry budget is shared with swarm.
   const seen = new Set<string>();
   const entries = [...cacheSnapshotters.values()].flatMap((snapshot) => {
     try { return snapshot().entries; } catch { return []; }
   }).filter((entry) => {
-    if (seen.has(entry.modelId)) return false;
-    seen.add(entry.modelId);
+    const key = `${entry.modelId}\u0000${entry.dtype}\u0000${entry.backend}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   }).slice(0, 8);
   return { version: 1, sampledAt, expiresAt: sampledAt + 60_000, entries };
