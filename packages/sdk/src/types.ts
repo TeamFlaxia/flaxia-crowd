@@ -414,6 +414,8 @@ export interface TheiaInferencePayload {
   steps?: number;
   /** Maximum denoising steps per response (default: 128). */
   maxSteps?: number;
+  /** Response token budget for `phase: 'generate'` (default 64, max 256). */
+  maxNewTokens?: number;
   /** Self-Repulsion strength λ (default: 64). */
   strength?: number;
   /** Node-side denoise sampling temperature (default: 0.6). */

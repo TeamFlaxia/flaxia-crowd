@@ -56,3 +56,29 @@ export type MultimodalWasmModel = Pick<
 >;
 
 export type NudeNetModel = Pick<Model, 'detect' | 'free'>;
+
+/** Top-k candidates returned by the dLLM denoise step. */
+export interface DllmTopKOutput {
+  positions: Uint32Array | number[];
+  /** Row-major `[positions.len()][topK]`. */
+  tokenIds: Uint32Array | number[];
+  /** Softmax probabilities aligned with `tokenIds`. */
+  probabilities: Float32Array | number[];
+  confidence: Float32Array | number[];
+  vocabSize: number;
+  topK: number;
+}
+
+export type DllmModel = Pick<
+  Model,
+  'encode' | 'decode' | 'token_id' | 'eos_token_id' | 'free' | 'loraRank' | 'loraExpert'
+> & {
+  /** The wasm binding returns a plain object, so its d.ts type is `any`. */
+  denoise_topk(
+    tokens: Uint32Array | number[],
+    positions: Uint32Array | number[],
+    blockStart: number,
+    blockEnd: number,
+    topK: number,
+  ): DllmTopKOutput;
+};

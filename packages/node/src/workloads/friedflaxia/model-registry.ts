@@ -16,6 +16,7 @@ export const FRIEDFLAXIA_PLAMO = models.plamo;
 export const FRIEDFLAXIA_D1 = models.d1;
 export const FRIEDFLAXIA_D1_MMPROJ = models.d1Mmproj;
 export const FRIEDFLAXIA_NUDENET = models.nudenet;
+export const FRIEDFLAXIA_DLLM = models.dllm;
 
 export interface PinnedModel {
   url: string;

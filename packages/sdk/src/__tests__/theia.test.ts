@@ -270,6 +270,9 @@ describe('theia payload guard', () => {
     expect(isTheiaInferencePayload(payload({ model: 'x'.repeat(129) }))).toBe(false);
     expect(isTheiaInferencePayload(payload({ maxSteps: 0 }))).toBe(false);
     expect(isTheiaInferencePayload(payload({ maxSteps: 5000 }))).toBe(false);
+    expect(isTheiaInferencePayload(payload({ maxNewTokens: 0 }))).toBe(false);
+    expect(isTheiaInferencePayload(payload({ maxNewTokens: 257 }))).toBe(false);
+    expect(isTheiaInferencePayload(payload({ maxNewTokens: 256 }))).toBe(true);
   });
 
   it('rejects invalid phase, expert, and numeric options', () => {

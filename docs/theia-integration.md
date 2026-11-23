@@ -2,9 +2,7 @@
 
 Theia is the chat service that runs small diffusion language models (dLLMs) across
 Crowd nodes and merges their token distributions asynchronously. This document
-defines the **protocol contract** that is shared today. The node executor is not
-implemented yet, so `theia-inference` is declared but deliberately excluded from
-`ROUTABLE_WORKLOADS` (the same staging used by `moe-inference`).
+defines the protocol contract **and** the node executor that serves it.
 
 ## Status
 
@@ -13,9 +11,11 @@ implemented yet, so `theia-inference` is declared but deliberately excluded from
 | `WorkloadType` / `WORKLOAD_TYPES` | declared |
 | `DEFAULT_WORKLOAD_TIMEOUT_MS` | 1,800,000 ms |
 | `HEAVY_WORKLOADS` | yes (a node holds dLLM weights and runs iterative denoising) |
-| `ROUTABLE_WORKLOADS` | **no** until a node executor lands |
-| Worker submit validator | pending (non-routable workloads are rejected at submit) |
-| Node executor | pending |
+| `ROUTABLE_WORKLOADS` | yes (base-model executor) |
+| Worker submit validator | `isTheiaInferencePayload` |
+| Node executor | `packages/node/src/workloads/theia.ts` + `friedflaxia/theia.ts` |
+| Pinned base dLLM | `qwen3-0.6b-diffusion-bd3lm` (Q4_0, 342 MB) |
+| LoRA adapters | not distributed yet; `expert` is rejected |
 | Theia consumer | `TeamFlaxia/theia` `CrowdInference` (submit → poll) |
 
 ## Payload
@@ -30,6 +30,7 @@ interface TheiaInferencePayload {
   round?: number;                // denoise round (freshness / stale detection)
   steps?: number;                // denoise steps in this block round
   maxSteps?: number;             // default 128
+  maxNewTokens?: number;         // generate response budget, default 64
   strength?: number;             // Self-Repulsion λ, default 64
   temperature?: number;          // node-side sampling, default 0.6
   mergeRule?: 'confidence-count' | 'logit-mean' | 'probability-mean' | 'poe';
@@ -42,6 +43,52 @@ existing Theia `CrowdInference` path). `phase: 'denoise'` runs `steps` denoise
 steps (default 8) over the supplied canvas (`canvas` is required, and forbidden
 in generate mode) and returns edit deltas for the host reducer. `round` defaults
 to 0. Placement is independent per task; there is no room or session record.
+
+## Node executor
+
+The node builds a Qwen chat prompt from `messages`, appends the canvas, masks the
+open span tokens with `<|mask|>`, and runs low-confidence remasking with
+`denoise_topk`:
+
+- Open spans are grouped into **32-token blocks** (BD3LM's training block). A
+  span longer than 32 tokens is generated left to right in 32-token chunks, not
+  truncated. Closed spans stay in the text as context; if one falls inside a
+  regenerated block its tokens are regenerated too, but no delta is returned
+  for it.
+- Open spans must fall on token boundaries, must not include leading/trailing
+  whitespace, and are limited to `MAX_THEIA_DELTA_TEXT_CHARS` (512)
+  characters. Otherwise the task fails with an explicit error instead of
+  returning a delta the host would discard. Closed spans are only context and
+  are not token-checked.
+- The last span in a block grows into the generated tail **only when it ends at
+  the canvas end**; otherwise it keeps its own token count so following text is
+  not duplicated. Give the span enough characters for the expected answer.
+- Commits are greedy top-1, most-confident first. `.steps` is per 32-token
+  chunk; `result.steps` reports the total forwards actually spent.
+- The prompt plus the padded block must fit `THEIA_MAX_CONTEXT_TOKENS = 512`
+  (the validation model's training window). A canvas longer than
+  `THEIA_MAX_CANVAS_CHARS = 16_000` is rejected before tokenization.
+- `phase: 'generate'` uses the same loop over a masked response region and stops
+  at `<|im_end|>`. `.maxNewTokens` bounds the response.
+- Control markers (`<|...|>`) in message or canvas text are rejected: the
+  tokenizer matches them verbatim, so allowing them would inject turns.
+- A requested `expert` is rejected until LoRA adapters are distributed (T5); an
+  adapter-loaded node also rejects an expert-less payload. The node never
+  silently returns a base-model answer under an expert's name.
+- `maxSteps`, `temperature`, `strength`, `mergeRule` and `theia.preferWarm` are
+  accepted by the contract but not used by this executor. `maxNewTokens`
+  controls the generate response; `steps` is per 32-token chunk.
+- At most `MAX_THEIA_RESULT_DELTAS` (64) deltas are returned per task. A
+  replacement is capped at `MAX_THEIA_DELTA_TEXT_CHARS` (512) characters; a
+  longer open span must be split by the host.
+  `result.model` is the pinned cache id (`qwen3-0.6b-diffusion-bd3lm`), not the
+  requested alias.
+
+The pinned model is `qwen3-0.6b-diffusion-bd3lm` (Q4_0, SHA-256 pinned in the
+FriedFlaxia manifest). Nodes report it in `modelCache`, so the coordinator's
+`resolveWarmModelId` can favor a warm node. There is no block/KV cache yet: one
+step is a full forward over the block, which is why the default step budget is
+small and the timeout is 30 minutes.
 
 ```ts
 interface TheiaSpan {
@@ -153,11 +200,12 @@ Qwen3-0.6B-bd3lm for algorithm validation) plus LoRA adapters for `code`,
 deltas and confidences are directly comparable.
 
 - Distribution: base GGUF + adapter files, each pinned by SHA-256.
-- Routing (planned): expert capabilities such as `theia-expert-code`. The
+- Routing (planned, T5): expert capabilities such as `theia-expert-code`. The
   current capability schema is `WorkloadType[]`, so this needs an
   `expertCapabilities` field (or equivalent) before it can be advertised.
-- Warm placement (planned): the existing `modelCache` heartbeat extended with
-  the adapter id; `preferWarm` has no adapter advertisement yet.
+- Warm placement (planned, T5): the existing `modelCache` heartbeat extended
+  with the adapter id. The base model is advertised today, so `preferWarm`
+  places a theia task on a node that already holds the dLLM.
 
 
 ## Validation
@@ -189,14 +237,12 @@ License safety comes first; avoid PolyForm Noncommercial models.
 ## Rollout checklist
 
 - [x] Declare the payload/result contract, phase, canvas and delta types.
-- [ ] Add `validateTheiaInferencePayload` and the submit dispatch branch in the
-      worker (`packages/worker/src/crowd/index.ts`), using the SDK guards.
-- [ ] Add the node executor: `generate` first, then `denoise` with
-      `denoise_step` + a LoRA adapter.
-- [ ] Add expert capabilities (`theia-expert-*`) and extend warm `modelCache`
-      entries with the adapter id.
-- [ ] Move `theia-inference` into `ROUTABLE_WORKLOADS` only after the executor
-      and the contract tests pass.
+- [x] Add the submit validation branch in the worker using the SDK guards.
+- [x] Add the node executor: `generate` and `denoise` over the pinned base dLLM.
+- [x] Move `theia-inference` into `ROUTABLE_WORKLOADS` with the executor.
+- [ ] Add expert capabilities (`theia-expert-*`), distribute LoRA adapters and
+      extend warm `modelCache` entries with the adapter id (T5).
+- [ ] Add the block/KV cache so a denoise step does not recompute the prefix.
 - [ ] Remove `swarm-inference` and its chain/peer/layer-plan machinery once the
       Theia executor is the supported distributed path.
 - [ ] Replace the Qwen3.5 generation acceptance workflow with a Theia

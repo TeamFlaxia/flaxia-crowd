@@ -31,6 +31,7 @@ import {
   MIN_SWARM_NODES,
   MAX_SWARM_NODES,
   isSupportedSwarmModelId,
+  THEIA_DLLM_MODEL_ID,
 } from "@flaxia/sdk";
 import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
@@ -159,6 +160,8 @@ export function implicitWarmModelId(workload: string): string {
       return 'google/embeddinggemma-2';
     case 'nudenet':
       return 'deepghs/nudenet_onnx';
+    case 'theia-inference':
+      return THEIA_DLLM_MODEL_ID;
     default:
       return '';
   }

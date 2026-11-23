@@ -1114,6 +1114,10 @@ describe('warm model identity', () => {
       'google/embeddinggemma-2',
     );
     expect(resolveWarmModelId('embed-gemma', undefined)).toBe('google/embeddinggemma-2');
+    // The payload model is a public alias, not the pinned manifest id.
+    expect(resolveWarmModelId('theia-inference', 'qwen-dlm-4b')).toBe(
+      'qwen3-0.6b-diffusion-bd3lm',
+    );
   });
 
   it('keeps the payload model for workloads that pin a real id', () => {

@@ -18,6 +18,7 @@ import {
   MAX_EMBED_GEMMA_TOTAL_CHARS,
   MAX_EMBED_GEMMA_TEXT_CHARS,
   isEmbedGemmaDimensions,
+  isTheiaInferencePayload,
   CC_CRAWL_PATTERN,
   ccWarcPathMatchesCrawl,
   NODE_SIGNAL_PROTOCOL,
@@ -757,6 +758,10 @@ app.post('/tasks', async (c) => {
   if (body.workload === 'vector-embed') {
     const embedError = validateVectorEmbedPayload(body.payload)
     if (embedError) return c.json({ error: embedError }, 400)
+  }
+
+  if (body.workload === 'theia-inference' && !isTheiaInferencePayload(body.payload)) {
+    return c.json({ error: 'Invalid theia-inference payload' }, 400)
   }
 
   const { sites: allowedSites, error: sitesError } = parseAllowedSites(body.payload)
