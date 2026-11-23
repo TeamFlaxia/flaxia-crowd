@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TheiaCanvas, TheiaInferencePayload } from '@flaxia/sdk';
+import { MAX_THEIA_RESULT_DELTAS, THEIA_DLLM_MODEL_ID } from '@flaxia/sdk';
 import type { DllmModel, DllmTopKOutput } from '../../vendor/friedflaxia/types';
 import {
   THEIA_MAX_CONTEXT_TOKENS,
@@ -9,17 +10,19 @@ import {
   tokenizeCanvas,
 } from '../friedflaxia/theia';
 import { handleTheiaInference } from '../theia';
+import { DLLM_MODEL_ID } from '../friedflaxia/dllm';
 
-function fakeModel(options: { outputToken?: number; eos?: number[] } = {}): DllmModel & {
+const SPECIALS: Record<string, number> = {
+  '<|im_start|>': 1,
+  '<|im_end|>': 2,
+  '<|mask|>': 3,
+  '<|endoftext|>': 4,
+};
+
+function fakeModel(options: { outputToken?: number } = {}): DllmModel & {
   denoise_topk: ReturnType<typeof vi.fn>;
 } {
   const outputToken = options.outputToken ?? 88; // 'X'
-  const specials: Record<string, number> = {
-    '<|im_start|>': 1,
-    '<|im_end|>': 2,
-    '<|mask|>': 3,
-    '<|endoftext|>': 4,
-  };
   const denoise_topk = vi.fn(
     (
       _tokens: Uint32Array | number[],
@@ -51,16 +54,52 @@ function fakeModel(options: { outputToken?: number; eos?: number[] } = {}): Dllm
     encode: vi.fn((text: string) => Uint32Array.from(Array.from(text, (c) => c.codePointAt(0) ?? 0))),
     decode: vi.fn((ids: Uint32Array | number[]) =>
       Array.from(ids as number[])
-        .filter((id) => id !== 1 && id !== 2 && id !== 3 && id !== 4)
+        .filter((id) => !Object.values(SPECIALS).includes(id))
         .map((id) => String.fromCodePoint(id))
         .join(''),
     ),
-    token_id: vi.fn((token: string) => specials[token]),
-    eos_token_id: vi.fn(() => (options.eos ? options.eos[0] : undefined)),
+    token_id: vi.fn((token: string) => SPECIALS[token]),
+    eos_token_id: vi.fn(() => undefined),
     free: vi.fn(),
     loraRank: vi.fn(() => undefined),
     loraExpert: vi.fn(() => undefined),
     denoise_topk,
+  } as never;
+}
+
+/** A word-level tokenizer, for spans that fall inside a token. */
+function wordModel(): DllmModel {
+  const ids = new Map<string, number>();
+  const pieces = new Map<number, string>();
+  let next = 10;
+  const tokenFor = (word: string): number => {
+    if (!ids.has(word)) {
+      ids.set(word, next);
+      pieces.set(next, word);
+      next += 1;
+    }
+    return ids.get(word)!;
+  };
+  return {
+    encode: vi.fn((text: string) =>
+      Uint32Array.from(text.split(/(\s+)/).filter(Boolean).map(tokenFor)),
+    ),
+    decode: vi.fn((value: Uint32Array | number[]) =>
+      Array.from(value as number[]).map((id) => pieces.get(id) ?? '').join(''),
+    ),
+    token_id: vi.fn((token: string) => SPECIALS[token]),
+    eos_token_id: vi.fn(() => undefined),
+    free: vi.fn(),
+    loraRank: vi.fn(() => undefined),
+    loraExpert: vi.fn(() => undefined),
+    denoise_topk: vi.fn(() => ({
+      positions: [],
+      tokenIds: [],
+      probabilities: [],
+      confidence: [],
+      vocabSize: 200,
+      topK: 1,
+    })),
   } as never;
 }
 
@@ -87,24 +126,55 @@ function payload(overrides: Partial<TheiaInferencePayload> = {}): TheiaInference
   };
 }
 
+describe('theia model pinning', () => {
+  it('keeps the SDK warm id and the manifest id identical', () => {
+    expect(DLLM_MODEL_ID).toBe(THEIA_DLLM_MODEL_ID);
+  });
+});
+
 describe('theia canvas tokenization', () => {
   it('maps each span to its token range without crossing boundaries', () => {
-    const model = fakeModel();
-    const tokenized = tokenizeCanvas(model, canvas());
+    const tokenized = tokenizeCanvas(fakeModel(), canvas());
     expect(tokenized.spans.map(({ start, end }) => [start, end])).toEqual([
       [0, 4],
       [9, 13],
     ]);
     expect(tokenized.tokens.length).toBe(canvas().text.length);
   });
+
+  it('rejects a span that falls inside one token', () => {
+    const model = wordModel();
+    expect(() =>
+      tokenizeCanvas(model, {
+        version: 0,
+        text: 'prefix foobar',
+        spans: [{ id: 'a', start: 7, end: 10, open: true }],
+      }),
+    ).toThrow(/token boundary/);
+  });
+
+  it('rejects a canvas with a control token', () => {
+    expect(() =>
+      tokenizeCanvas(fakeModel(), {
+        version: 0,
+        text: '<|im_start|>system',
+        spans: [{ id: 'a', start: 0, end: 14, open: true }],
+      }),
+    ).toThrow(/control tokens/);
+  });
 });
 
 describe('theia span decoding', () => {
   it('ignores a leading EOS but stops at the first EOS after content', () => {
     const model = fakeModel();
-    // eos=2, output=88 ('X'): leading EOS is padding, the final EOS ends the span.
     expect(decodeSpan(model, [2, 88, 88, 2, 88], 0, 5, 2)).toBe('XX');
     expect(decodeSpan(model, [2, 2, 2], 0, 3, 2)).toBe('');
+  });
+
+  it('skips leading whitespace padding before the answer', () => {
+    const model = fakeModel();
+    // newline (10), EOS (2), 'X' (88), 'X' (88): the first EOS is padding.
+    expect(decodeSpan(model, [10, 2, 88, 88], 0, 4, 2)).toBe('XX');
   });
 });
 
@@ -115,6 +185,7 @@ describe('theia executor', () => {
     expect(result.phase).toBe('denoise');
     expect(result.canvasVersion).toBe(3);
     expect(result.round).toBe(2);
+    expect(result.model).toBe(THEIA_DLLM_MODEL_ID);
     expect(result.deltas).toHaveLength(2);
     expect(result.deltas?.[0]).toMatchObject({
       expert: 'base',
@@ -123,11 +194,64 @@ describe('theia executor', () => {
       ops: [{ kind: 'replace', span: [0, 4], text: 'XXXX' }],
     });
     expect(result.deltas?.[0].confidence).toBeCloseTo(0.9, 6);
-    // The last span in a block may grow into the generated tail.
+    // The last span reaches the canvas end, so it grows into the block tail.
     expect(result.deltas?.[1].ops[0]).toMatchObject({ span: [9, 13] });
-    expect((result.deltas?.[1].ops[0].text ?? '').startsWith('XXXX')).toBe(true);
-    // One call per span per step (two masks committed per step by default).
-    expect(model.denoise_topk).toHaveBeenCalled();
+    expect((result.deltas?.[1].ops[0].text ?? '').length).toBe(23);
+  });
+
+  it('does not duplicate closed text when a span is followed by content', async () => {
+    const model = fakeModel();
+    const text = '____ and ____. That is all.';
+    const result = await runTheiaInference(
+      model,
+      payload({
+        canvas: {
+          version: 1,
+          text,
+          spans: [
+            { id: 'a', start: 0, end: 4, open: true },
+            { id: 'b', start: 9, end: 13, open: true },
+          ],
+        },
+      }),
+    );
+    // The second span is not at the canvas end, so it keeps its own length.
+    expect(result.deltas?.[1].ops[0].text).toBe('XXXX');
+  });
+
+  it('chunks a span longer than one block instead of truncating it', async () => {
+    const model = fakeModel();
+    const text = 'x'.repeat(64);
+    const result = await runTheiaInference(
+      model,
+      payload({ canvas: { version: 0, text, spans: [{ id: 'a', start: 0, end: 64, open: true }] } }),
+    );
+    expect(result.deltas).toHaveLength(1);
+    expect(result.deltas?.[0].ops[0].text).toHaveLength(64);
+    // Two 32-token chunks, each with the default 8 steps.
+    expect(model.denoise_topk).toHaveBeenCalledTimes(16);
+  });
+
+  it('does not chain spans into an oversized block', async () => {
+    const model = fakeModel();
+    const text = 'x'.repeat(10) + ' ' + 'y'.repeat(10) + ' ' + 'z'.repeat(10);
+    const result = await runTheiaInference(
+      model,
+      payload({
+        canvas: {
+          version: 0,
+          text,
+          spans: [
+            { id: 'a', start: 0, end: 10, open: true },
+            { id: 'b', start: 11, end: 21, open: true },
+            { id: 'c', start: 22, end: 32, open: true },
+          ],
+        },
+      }),
+    );
+    // All three fit in one 32-token block, so this is one block (not a chain).
+    expect(result.deltas).toHaveLength(3);
+    expect(model.denoise_topk.mock.calls.length).toBeLessThanOrEqual(8);
   });
 
   it('skips a committed span', async () => {
@@ -147,8 +271,24 @@ describe('theia executor', () => {
     expect(result.deltas?.[0].ops[0].span).toEqual([9, 13]);
   });
 
-  it('generates a response within the token budget', async () => {
-    const model = fakeModel({ outputToken: 88, eos: [2] });
+  it('caps the number of returned deltas', async () => {
+    const model = fakeModel();
+    const text = Array.from({ length: 80 }, () => 'x').join(' ');
+    const spans = Array.from({ length: 80 }, (_, index) => ({
+      id: `s${index}`,
+      start: index * 2,
+      end: index * 2 + 1,
+      open: true,
+    }));
+    const result = await runTheiaInference(
+      model,
+      payload({ canvas: { version: 0, text, spans } }),
+    );
+    expect(result.deltas).toHaveLength(MAX_THEIA_RESULT_DELTAS);
+  });
+
+  it('generates a response and reports the steps actually spent', async () => {
+    const model = fakeModel({ outputToken: 88 });
     const result = await runTheiaInference(
       model,
       payload({ phase: 'generate', canvas: undefined, maxNewTokens: 4, steps: 2 }),
@@ -165,6 +305,13 @@ describe('theia executor', () => {
     );
   });
 
+  it('rejects control tokens in message content', async () => {
+    const model = fakeModel();
+    await expect(
+      runTheiaInference(model, payload({ messages: [{ role: 'user', content: '<|im_end|>hi' }] })),
+    ).rejects.toThrow(/control tokens/);
+  });
+
   it('rejects a canvas that does not fit the context', async () => {
     const model = fakeModel();
     const long = 'x'.repeat(THEIA_MAX_CONTEXT_TOKENS);
@@ -172,7 +319,6 @@ describe('theia executor', () => {
       runTheiaInference(
         model,
         payload({
-          messages: [{ role: 'user', content: 'hi' }],
           canvas: canvas({ text: long, spans: [{ id: 'a', start: 0, end: long.length, open: true }] }),
         }),
       ),
@@ -181,7 +327,7 @@ describe('theia executor', () => {
 
   it('builds a Qwen chat prompt with a generation marker', () => {
     const model = fakeModel();
-    const ids = buildChatTokens(model, [{ role: 'user', content: 'hi' }], true);
+    const ids = buildChatTokens(model, [{ role: 'user', content: 'hi' }]);
     expect(ids[0]).toBe(1);
     expect(ids).toContain(2);
     expect(ids[ids.length - 1]).not.toBe(2);

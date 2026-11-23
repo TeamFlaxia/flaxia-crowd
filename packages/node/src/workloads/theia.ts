@@ -2,7 +2,7 @@ import type { TheiaInferencePayload, TheiaInferenceResult } from '@flaxia/sdk';
 import { isTheiaInferencePayload } from '@flaxia/sdk';
 import type { DllmModel } from '../vendor/friedflaxia/types';
 import { runTheiaInference } from './friedflaxia/theia';
-import { loadFriedFlaxiaDllm } from './friedflaxia/dllm';
+import { DLLM_MODEL_ID, loadFriedFlaxiaDllm } from './friedflaxia/dllm';
 
 /**
  * `theia-inference` node entry point.
@@ -20,7 +20,7 @@ export async function handleTheiaInference(
     throw new Error('theia-inference: invalid payload');
   }
   const loaded = model ?? (await loadFriedFlaxiaDllm());
-  return runTheiaInference(loaded, payload as TheiaInferencePayload, { onStep });
+  return runTheiaInference(loaded, payload as TheiaInferencePayload, { onStep, modelId: DLLM_MODEL_ID });
 }
 
 export {

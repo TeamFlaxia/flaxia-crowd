@@ -1,5 +1,4 @@
 import type { NodeModelCacheSnapshot } from '@flaxia/sdk';
-import { THEIA_DLLM_MODEL_ID } from '@flaxia/sdk';
 import { FRIEDFLAXIA_DLLM, downloadPinnedModel } from './model-registry';
 import { initFriedFlaxiaWasm } from '../../vendor/friedflaxia/init';
 import type { DllmModel } from '../../vendor/friedflaxia/types';
@@ -11,6 +10,9 @@ import type { DllmModel } from '../../vendor/friedflaxia/types';
  * are distributed (T5) the executor serves the base model only. The model is
  * pinned by URL and SHA-256 in `model-manifest.json`.
  */
+
+/** Manifest id of the pinned base dLLM, for results and warm placement. */
+export const DLLM_MODEL_ID = FRIEDFLAXIA_DLLM.modelId;
 
 let model: DllmModel | null = null;
 let modelLoad: Promise<DllmModel> | null = null;
@@ -58,7 +60,7 @@ export function getDllmCacheSnapshot(): NodeModelCacheSnapshot {
     entries: isDllmLoaded()
       ? [
           {
-            modelId: THEIA_DLLM_MODEL_ID,
+            modelId: DLLM_MODEL_ID,
             revision: FRIEDFLAXIA_DLLM.revision,
             dtype: 'q4_0',
             backend: 'wasm',

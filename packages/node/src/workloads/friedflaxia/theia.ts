@@ -6,6 +6,7 @@ import type {
   TheiaInferencePayload,
   TheiaInferenceResult,
 } from '@flaxia/sdk';
+import { MAX_THEIA_RESULT_DELTAS, THEIA_DLLM_MODEL_ID, isTheiaDelta } from '@flaxia/sdk';
 import type { DllmModel } from '../../vendor/friedflaxia/types';
 
 /**
@@ -17,19 +18,25 @@ import type { DllmModel } from '../../vendor/friedflaxia/types';
  *
  * v1 is deliberately conservative:
  * - one base dLLM plus (later) one LoRA adapter per task,
- * - replace-only edits with the span's token count as a soft length budget,
- * - low-confidence remasking, greedy top-1 commits,
- * - a bounded canvas because the block attention is O(tokens²).
+ * - replace-only edits,
+ * - BD3LM-style 32-token blocks, one chunk at a time,
+ * - low-confidence remasking with greedy top-1 commits,
+ * - a bounded canvas because block attention is O(tokens²).
  */
 
 /** BD3LM was trained with 32-token blocks. */
 export const THEIA_BLOCK_SIZE = 32;
 /**
- * The 0.6B validation model was trained at 512 tokens. The prompt plus canvas
- * must fit; the host keeps a block round small instead of sending a whole chat.
+ * The 0.6B validation model was trained at 512 tokens. The prompt plus the
+ * padded block must fit; the host keeps a block round small.
  */
 export const THEIA_MAX_CONTEXT_TOKENS = 512;
-/** Denoise refinement steps in one task. */
+/**
+ * Tokenizing a 64k-character canvas would run hundreds of prefix encodes just
+ * to reject it, so the executor refuses long text up front.
+ */
+export const THEIA_MAX_CANVAS_CHARS = 16_000;
+/** Denoise refinement steps per 32-token chunk. */
 export const THEIA_DEFAULT_STEPS = 8;
 export const THEIA_MAX_STEPS = 128;
 /** Response budget for `phase: 'generate'`. */
@@ -37,7 +44,7 @@ export const THEIA_DEFAULT_NEW_TOKENS = 64;
 export const THEIA_MAX_NEW_TOKENS = 256;
 /** Candidates requested per position; the first one is committed. */
 export const THEIA_TOPK = 8;
-/** Left/right context tokens included in a span's block. */
+/** Right-context tokens included in a chunk's block. */
 const SPAN_CONTEXT_TOKENS = 32;
 
 export interface TheiaDenoiseOptions {
@@ -69,40 +76,57 @@ function encode(model: DllmModel, text: string): number[] {
   return Array.from(model.encode(text, false));
 }
 
-/** Qwen3 chat prompt with an optional assistant generation prompt. */
+const CONTROL_TOKEN = /<\|[A-Za-z0-9_]+\|>/;
+
+/**
+ * Reject control markers in untrusted text.
+ *
+ * The tokenizer matches `<|im_start|>`-style tokens verbatim, so a message or
+ * canvas that contains one could inject a turn. Theia has no need for them in
+ * content: the executor adds the prompts itself.
+ */
+function assertNoControlTokens(text: string, where: string): void {
+  if (CONTROL_TOKEN.test(text)) {
+    throw new Error(`theia-inference: ${where} must not contain control tokens`);
+  }
+}
+
+/** Qwen3 chat prompt with an assistant generation marker. */
 export function buildChatTokens(
   model: DllmModel,
   messages: readonly TheiaChatMessage[],
-  addGenerationPrompt: boolean,
 ): number[] {
   const imStart = requireToken(model, '<|im_start|>');
   const imEnd = requireToken(model, '<|im_end|>');
   const newline = encode(model, '\n');
   const ids: number[] = [];
   for (const message of messages) {
+    assertNoControlTokens(message.content, 'message content');
     ids.push(imStart);
     ids.push(...encode(model, `${message.role}\n${message.content}`));
     ids.push(imEnd);
     ids.push(...newline);
   }
-  if (addGenerationPrompt) {
-    ids.push(imStart);
-    ids.push(...encode(model, 'assistant\n'));
-  }
+  ids.push(imStart);
+  ids.push(...encode(model, 'assistant\n'));
   return ids;
 }
 
 /**
  * Tokenize the canvas and record where every span lands.
  *
- * Segments are encoded independently so a span boundary is also a token
- * boundary. This is what lets the executor map a UTF-16 `[start, end)` span to
- * a token range without a character-offset tokenizer.
+ * The whole text is tokenized once. A span boundary that falls inside a BPE
+ * pre-token cannot be represented as a token range, so the decoded range is
+ * compared with the span text and a misaligned span is rejected instead of
+ * silently replacing characters outside the span.
  */
 export function tokenizeCanvas(model: DllmModel, canvas: TheiaCanvas): TheiaCanvasTokens {
-  // Tokenize the whole text once: segment-wise encoding turns the space before
-  // a span into a standalone "Ġ" token, which the model never saw in training
-  // (it predicts "ĠParis", not a bare word after a split space).
+  if (canvas.text.length > THEIA_MAX_CANVAS_CHARS) {
+    throw new Error(
+      `theia-inference: canvas text exceeds ${THEIA_MAX_CANVAS_CHARS} characters`,
+    );
+  }
+  assertNoControlTokens(canvas.text, 'canvas text');
   const tokens = encode(model, canvas.text);
   const spans: TheiaSpanTokens[] = [];
   let cursor = 0;
@@ -116,12 +140,18 @@ export function tokenizeCanvas(model: DllmModel, canvas: TheiaCanvas): TheiaCanv
     while (common < prefix.length && common < through.length && prefix[common] === through[common]) {
       common += 1;
     }
-    // The boundary token can merge the trailing space with the span's first
-    // character, so the span starts at the first token that differs.
     const start = Math.min(common, tokens.length - 1);
     const end = Math.min(tokens.length, through.length);
     if (end <= start) {
       throw new Error(`theia-inference: canvas span ${span.id} has no tokens`);
+    }
+    const decoded = model.decode(tokens.slice(start, end)).trim();
+    const expected = canvas.text.slice(span.start, span.end).trim();
+    if (!expected || decoded !== expected) {
+      throw new Error(
+        `theia-inference: canvas span ${span.id} does not align to a token boundary; ` +
+          'split the span so it starts and ends on a token',
+      );
     }
     spans.push({ span, start, end });
     cursor = span.end;
@@ -129,21 +159,18 @@ export function tokenizeCanvas(model: DllmModel, canvas: TheiaCanvas): TheiaCanv
   return { tokens, spans };
 }
 
-interface DenoisedRange {
-  tokens: number[];
-  text: string;
+interface DenoisedChunk {
+  steps: number;
   confidence: number;
 }
 
 /**
- * Denoise `[start, end)` with low-confidence remasking.
+ * Denoise one masked chunk with the MDLM transfer schedule.
  *
- * The block is the span plus a little right context: the span sees the clean
- * prompt/prefix and the surrounding canvas, while nothing after `end + 32` is
- * read. Positions are committed greedily, most-confident first, so the
- * remaining masks shrink predictably each step.
+ * `steps` is capped to the number of masked positions: a step that commits
+ * nothing would see the identical input and burn a full forward for nothing.
  */
-async function denoiseRange(
+async function denoiseChunk(
   model: DllmModel,
   tokens: number[],
   start: number,
@@ -151,79 +178,63 @@ async function denoiseRange(
   steps: number,
   options: TheiaDenoiseOptions,
   maskId: number,
-  eosId: number | undefined,
-): Promise<DenoisedRange> {
+): Promise<DenoisedChunk> {
   const positions: number[] = [];
   for (let position = start; position < end; position += 1) {
     tokens[position] = maskId;
     positions.push(position);
   }
-  if (positions.length === 0) {
-    return { tokens, text: '', confidence: 0 };
-  }
+  if (positions.length === 0) return { steps: 0, confidence: 0 };
 
+  const totalSteps = Math.max(1, Math.min(steps, positions.length));
+  const baseTransfer = Math.floor(positions.length / totalSteps);
+  const remainder = positions.length % totalSteps;
   const blockEnd = Math.min(tokens.length, end + SPAN_CONTEXT_TOKENS);
   let remaining = positions;
   let confidenceSum = 0;
   let confidenceCount = 0;
-  const totalSteps = Math.max(1, Math.min(steps, THEIA_MAX_STEPS));
-  // MDLM/BD3LM transfer schedule: spread the masks evenly over the steps and
-  // only commit the remainder in the last few. A 1-token span must stay masked
-  // for the early steps so the model can refine it, instead of committing a
-  // low-confidence first guess immediately.
-  const baseTransfer = Math.floor(positions.length / totalSteps);
-  const remainder = positions.length % totalSteps;
+  let stepsRun = 0;
+
   for (let step = 0; step < totalSteps && remaining.length > 0; step += 1) {
-    const out = model.denoise_topk(tokens, remaining, start, blockEnd, THEIA_TOPK);
+    // positions.length / totalSteps >= 1 here, so every step commits at least
+    // one token and no forward is wasted.
     const transfer = baseTransfer + (step >= totalSteps - remainder ? 1 : 0);
-    if (transfer > 0) {
-      const rows = remaining.map((position, row) => ({
-        position,
-        row,
-        probability: Number(out.probabilities[row * out.topK] ?? 0),
-        token: Number(out.tokenIds[row * out.topK] ?? 0),
-      }));
-      rows.sort((a, b) => b.probability - a.probability || a.position - b.position);
-      const committed = new Set<number>();
-      for (const row of rows.slice(0, transfer)) {
-        tokens[row.position] = row.token;
-        confidenceSum += row.probability;
-        confidenceCount += 1;
-        committed.add(row.position);
-      }
-      remaining = remaining.filter((position) => !committed.has(position));
+    const out = model.denoise_topk(tokens, remaining, start, blockEnd, THEIA_TOPK);
+    const rows = remaining.map((position, row) => ({
+      position,
+      probability: Number(out.probabilities[row * out.topK] ?? 0),
+      token: Number(out.tokenIds[row * out.topK] ?? 0),
+    }));
+    rows.sort((a, b) => b.probability - a.probability || a.position - b.position);
+    const committed = new Set<number>();
+    for (const row of rows.slice(0, transfer)) {
+      tokens[row.position] = row.token;
+      confidenceSum += row.probability;
+      confidenceCount += 1;
+      committed.add(row.position);
     }
+    remaining = remaining.filter((position) => !committed.has(position));
+    stepsRun += 1;
     await options.onStep?.();
   }
 
-  // Anything still masked (steps ran out) gets one greedy pass so the span is
-  // complete; its confidence is the top-1 probability.
-  if (remaining.length > 0) {
-    const out = model.denoise_topk(tokens, remaining, start, blockEnd, 1);
-    remaining.forEach((position, row) => {
-      tokens[position] = Number(out.tokenIds[row] ?? 0);
-      confidenceSum += Number(out.probabilities[row] ?? 0);
-      confidenceCount += 1;
-    });
-  }
-
-  const eosAt = eosId === undefined ? -1 : tokens.indexOf(eosId, start);
-  const stop = eosAt >= 0 ? Math.min(end, eosAt) : end;
-  const decodeEnd = stop > start ? stop : end;
-  const text = model.decode(tokens.slice(start, decodeEnd));
   return {
-    tokens,
-    text,
+    steps: stepsRun,
     confidence: confidenceCount > 0 ? confidenceSum / confidenceCount : 0,
   };
 }
 
+function clampConfidence(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
+}
+
 /**
- * Decode a generated span, dropping EOS padding.
+ * Decode a generated range, dropping EOS padding.
  *
- * The model can emit EOS before the real answer (the assistant turn starts
- * with newlines), and pads the remainder of a block with EOS. Only an EOS that
- * follows some content marks the end; leading EOS tokens are ignored.
+ * The model can emit newlines and EOS before the real answer and pads the rest
+ * of a block with EOS. Leading whitespace/control padding is ignored; the first
+ * EOS after real content ends the output.
  */
 export function decodeSpan(
   model: DllmModel,
@@ -232,30 +243,28 @@ export function decodeSpan(
   end: number,
   eosId: number | undefined,
 ): string {
+  let begin = start;
   let stop = end;
-  if (eosId !== undefined) {
-    let sawContent = false;
-    for (let position = start; position < end; position += 1) {
-      if (tokens[position] === eosId) {
-        if (sawContent) {
-          stop = position;
-          break;
-        }
-      } else {
-        sawContent = true;
+  let sawContent = false;
+  for (let position = start; position < end; position += 1) {
+    const id = tokens[position];
+    if (eosId !== undefined && id === eosId) {
+      if (sawContent) {
+        stop = position;
+        break;
       }
+      begin = position + 1;
+      continue;
+    }
+    if (!sawContent) {
+      // A decoded token can be a newline or a space; those are padding until
+      // the answer actually starts.
+      const text = model.decode([id]);
+      if (text.trim().length > 0) sawContent = true;
+      else begin = position + 1;
     }
   }
-  return model.decode(tokens.slice(start, stop));
-}
-
-function clampConfidence(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.min(1, Math.max(0, value));
-}
-
-function cleanText(text: string): string {
-  return text.trim();
+  return model.decode(tokens.slice(begin, stop));
 }
 
 function deltaId(): string {
@@ -266,16 +275,16 @@ function deltaId(): string {
 }
 
 export interface RunTheiaOptions extends TheiaDenoiseOptions {
-  /** Override for tests; defaults to the pinned payload expert contract. */
-  expert?: string;
+  /** Cache identity reported in the result; defaults to the pinned base dLLM. */
+  modelId?: string;
 }
 
 /**
  * Run one `theia-inference` task against an already-loaded model.
  *
  * Throws on a payload the node cannot serve (`expert` not distributed yet,
- * canvas too large) instead of silently returning a base-model result under an
- * expert's name.
+ * canvas too large, a span that is not token-aligned) instead of silently
+ * returning a base-model result under an expert's name.
  */
 export async function runTheiaInference(
   model: DllmModel,
@@ -285,21 +294,22 @@ export async function runTheiaInference(
   const startedAt = performance.now();
   const phase = payload.phase ?? 'generate';
   const expert = payload.expert;
+  const loadedExpert = model.loraExpert?.();
   if (expert !== undefined) {
-    const loadedExpert = model.loraExpert?.();
     if (!loadedExpert || loadedExpert !== expert) {
       throw new Error(
         `theia-inference: LoRA expert ${expert} is not distributed yet (base model only)`,
       );
     }
+  } else if (loadedExpert) {
+    throw new Error(`theia-inference: this node serves expert ${loadedExpert}; expert id is required`);
   }
 
-  // Both phases start the assistant turn: a denoise canvas is the assistant
-  // response being edited, not another user message.
-  const prompt = buildChatTokens(model, payload.messages, true);
+  const prompt = buildChatTokens(model, payload.messages);
   const maskId = requireToken(model, '<|mask|>');
   const eosId = model.eos_token_id?.();
   const steps = Math.max(1, Math.min(payload.steps ?? THEIA_DEFAULT_STEPS, THEIA_MAX_STEPS));
+  const modelId = options.modelId ?? THEIA_DLLM_MODEL_ID;
 
   if (phase === 'generate') {
     const newTokens = Math.max(
@@ -312,7 +322,7 @@ export async function runTheiaInference(
       );
     }
     const tokens = [...prompt, ...new Array(newTokens).fill(maskId)];
-    const denoised = await denoiseRange(
+    const denoised = await denoiseChunk(
       model,
       tokens,
       prompt.length,
@@ -320,12 +330,11 @@ export async function runTheiaInference(
       steps,
       options,
       maskId,
-      eosId,
     );
     return {
-      output: cleanText(denoised.text),
-      model: payload.model,
-      steps,
+      output: decodeSpan(model, tokens, prompt.length, tokens.length, eosId).trim(),
+      model: modelId,
+      steps: denoised.steps,
       expert,
       phase,
       durationMs: Math.round(performance.now() - startedAt),
@@ -337,68 +346,92 @@ export async function runTheiaInference(
     throw new Error('theia-inference: denoise requires a canvas');
   }
   const canvasTokens = tokenizeCanvas(model, canvas);
-  if (prompt.length + canvasTokens.tokens.length > THEIA_MAX_CONTEXT_TOKENS) {
-    throw new Error(
-      `theia-inference: prompt (${prompt.length}) + canvas (${canvasTokens.tokens.length}) ` +
-        `exceed ${THEIA_MAX_CONTEXT_TOKENS} tokens; keep a block round small`,
-    );
-  }
-
-  // Group open spans into left-to-right 32-token blocks. Each block is fully
-  // masked, matching BD3LM training, and later blocks condition on the tokens
-  // generated by earlier ones.
   const promptLength = prompt.length;
   const working = [...prompt, ...canvasTokens.tokens];
   const openSpans = canvasTokens.spans.filter(({ span, start, end }) => span.open && start < end);
+
+  // Build blocks of at most one BD3LM block. A span that starts before the
+  // current block ends but extends past it gets its own block; this prevents
+  // "grouping" from chaining arbitrarily large blocks.
   const blocks: Array<{ start: number; end: number; spans: TheiaSpanTokens[] }> = [];
   for (const entry of openSpans) {
     const current = blocks[blocks.length - 1];
-    if (current && entry.start < current.end) {
-      current.end = Math.max(current.end, entry.start + THEIA_BLOCK_SIZE);
+    if (!current || entry.start >= current.end) {
+      blocks.push({
+        start: entry.start,
+        end: Math.max(entry.start + THEIA_BLOCK_SIZE, entry.end),
+        spans: [entry],
+      });
+    } else if (entry.end <= current.end) {
       current.spans.push(entry);
     } else {
       blocks.push({
         start: entry.start,
-        end: entry.start + THEIA_BLOCK_SIZE,
+        end: Math.max(entry.start + THEIA_BLOCK_SIZE, entry.end),
         spans: [entry],
       });
     }
   }
 
+  const maxBlockEnd = blocks.reduce((max, block) => Math.max(max, block.end), 0);
+  if (promptLength + maxBlockEnd > THEIA_MAX_CONTEXT_TOKENS) {
+    throw new Error(
+      `theia-inference: prompt (${promptLength}) + block (${maxBlockEnd}) exceed ` +
+        `${THEIA_MAX_CONTEXT_TOKENS}; keep a block round small`,
+    );
+  }
+
   const deltas: TheiaDelta[] = [];
   const round = payload.round ?? 0;
   const expertName = expert ?? 'base';
+  let stepsRun = 0;
   for (const block of blocks) {
-    const start = promptLength + block.start;
-    const end = promptLength + block.end;
-    while (working.length < end) working.push(maskId);
-    const denoised = await denoiseRange(
-      model,
-      working,
-      start,
-      end,
-      steps,
-      options,
-      maskId,
-      eosId,
-    );
+    if (deltas.length >= MAX_THEIA_RESULT_DELTAS) break;
+    let blockConfidence = 0;
+    let blockTokens = 0;
+    // Long spans (or a block extended past 32 tokens) are generated left to
+    // right in 32-token chunks, so every forward matches the training block.
+    for (let chunkStart = block.start; chunkStart < block.end; chunkStart += THEIA_BLOCK_SIZE) {
+      const chunkEnd = Math.min(block.end, chunkStart + THEIA_BLOCK_SIZE);
+      const absoluteEnd = promptLength + chunkEnd;
+      while (working.length < absoluteEnd) working.push(maskId);
+      const denoised = await denoiseChunk(
+        model,
+        working,
+        promptLength + chunkStart,
+        absoluteEnd,
+        steps,
+        options,
+        maskId,
+      );
+      stepsRun += denoised.steps;
+      const count = chunkEnd - chunkStart;
+      blockConfidence += denoised.confidence * count;
+      blockTokens += count;
+    }
+
     for (const [index, entry] of block.spans.entries()) {
+      if (deltas.length >= MAX_THEIA_RESULT_DELTAS) break;
       const spanStart = promptLength + entry.start;
-      // The last span may grow into the rest of the generated block: a short
-      // placeholder cannot hold a full answer otherwise, and v1 allows a
-      // replacement to change the span length when committed.
-      const growTo = index === block.spans.length - 1 ? block.end : entry.end;
-      const spanEnd = promptLength + growTo;
-      const text = cleanText(decodeSpan(model, working, spanStart, spanEnd, eosId));
+      // Grow the last span only when it reaches the end of the canvas; growing
+      // into real following text would duplicate it (the op covers only the
+      // original span characters).
+      const atCanvasEnd = entry.end === canvasTokens.tokens.length;
+      const growTo =
+        index === block.spans.length - 1 && atCanvasEnd ? block.end : entry.end;
+      const text = decodeSpan(model, working, spanStart, promptLength + growTo, eosId).trim();
       if (!text) continue;
-      deltas.push({
+      const delta: TheiaDelta = {
         id: deltaId(),
         expert: expertName,
         baseVersion: canvas.version,
         round,
         ops: [{ kind: 'replace', span: [entry.span.start, entry.span.end], text }],
-        confidence: clampConfidence(denoised.confidence),
-      });
+        confidence: clampConfidence(blockTokens > 0 ? blockConfidence / blockTokens : 0),
+      };
+      // The node must produce exactly what the host guard accepts.
+      if (!isTheiaDelta(delta, canvas)) continue;
+      deltas.push(delta);
     }
   }
 
@@ -406,8 +439,8 @@ export async function runTheiaInference(
     deltas,
     canvasVersion: canvas.version,
     round,
-    model: payload.model,
-    steps,
+    model: modelId,
+    steps: stepsRun,
     expert,
     phase,
     durationMs: Math.round(performance.now() - startedAt),

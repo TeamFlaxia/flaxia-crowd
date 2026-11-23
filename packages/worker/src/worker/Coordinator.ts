@@ -31,6 +31,7 @@ import {
   MIN_SWARM_NODES,
   MAX_SWARM_NODES,
   isSupportedSwarmModelId,
+  THEIA_DLLM_MODEL_ID,
 } from "@flaxia/sdk";
 import { clampByteCapacity, createSwarmHopKey, createWebhookSignature, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
@@ -160,8 +161,7 @@ export function implicitWarmModelId(workload: string): string {
     case 'nudenet':
       return 'deepghs/nudenet_onnx';
     case 'theia-inference':
-      // Mirrors THEIA_DLLM_MODEL_ID; the worker cannot import the node vendor.
-      return 'qwen3-0.6b-diffusion-bd3lm';
+      return THEIA_DLLM_MODEL_ID;
     default:
       return '';
   }
