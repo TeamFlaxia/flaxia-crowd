@@ -20,11 +20,23 @@ export const isPlamoLoaded = (): boolean => model !== null;
 export async function loadFriedFlaxiaPlamo(): Promise<PlamoModel> {
   if (model) return model;
   if (modelLoad) return modelLoad;
+  const loadStartedAt = performance.now();
   modelLoad = (async () => {
+    const wasmStartedAt = performance.now();
     await initFriedFlaxiaWasm();
+    const wasmMs = performance.now() - wasmStartedAt;
+    const downloadStartedAt = performance.now();
     const bytes = await downloadPinnedModel(FRIEDFLAXIA_PLAMO);
+    const downloadMs = performance.now() - downloadStartedAt;
+    const constructStartedAt = performance.now();
     const { Model } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
     const loaded: PlamoModel = new Model(bytes);
+    const constructMs = performance.now() - constructStartedAt;
+    console.log(
+      `[flaxia-node:worker] model load modelId=${FRIEDFLAXIA_PLAMO.modelId} bytes=${bytes.byteLength} ` +
+        `wasmMs=${Math.round(wasmMs)} downloadMs=${Math.round(downloadMs)} constructMs=${Math.round(constructMs)} ` +
+        `totalMs=${Math.round(performance.now() - loadStartedAt)}`,
+    );
     model = loaded;
     return loaded;
   })().catch((error) => {
@@ -75,8 +87,10 @@ export async function generateWithModel(
   const { input, maxNewTokens } = assertPlamoPayload(payload);
   const prompt = plamo.encode(input, true);
   let generated: Uint32Array;
-  if (plamo.generateStream && onToken) {
-    generated = await plamo.generateStream(prompt, maxNewTokens, async (token) => {
+  if (plamo.generate_stream && onToken) {
+    // The vendored wasm export is `generate_stream`. It awaits the callback
+    // between tokens, so the worker can throttle, abort and send heartbeats.
+    generated = await plamo.generate_stream(prompt, maxNewTokens, async (token: number) => {
       const text = plamo.decode(Uint32Array.from([token]));
       if (text) await onToken(text);
     });

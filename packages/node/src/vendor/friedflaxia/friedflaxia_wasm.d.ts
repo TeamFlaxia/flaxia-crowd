@@ -24,6 +24,22 @@ export class Model {
     bos_token_id(): number | undefined;
     decision(token_ids: Uint32Array | number[], marker_positions: Uint32Array | number[], qtype: number): Float32Array;
     decode(ids: Uint32Array | number[]): string;
+    /**
+     * Full-vocabulary logits for the requested positions of one denoise step.
+     *
+     * Returns `{ logits: Float32Array, positions: Uint32Array, confidence:
+     * Float32Array, vocabSize: number }`. `logits` is row-major
+     * `[positions.len()][vocabSize]`.
+     */
+    denoise_step(tokens: Uint32Array | number[], positions: Uint32Array | number[], block_start: number, block_end: number): any;
+    /**
+     * Top-k candidates for the requested positions of one denoise step.
+     *
+     * Returns `{ positions, tokenIds, probabilities, confidence, vocabSize,
+     * topK }`. `tokenIds`/`probabilities` are row-major
+     * `[positions.len()][topK]`.
+     */
+    denoise_topk(tokens: Uint32Array | number[], positions: Uint32Array | number[], block_start: number, block_end: number, top_k: number): any;
     detect(input: Float32Array | number[], top_k: number, iou_threshold: number, score_threshold: number): Float32Array;
     embed(token_ids: Uint32Array | number[]): Float32Array;
     embed_text(text: string): Float32Array;
@@ -36,12 +52,18 @@ export class Model {
      * host can pause, cancel or throttle the stream.
      */
     generate_stream(prompt_ids: Uint32Array | number[], max_tokens: number, on_token: Function): Promise<Uint32Array>;
+    loraExpert(): string | undefined;
+    loraRank(): number | undefined;
     metadata_f32(key: string): number | undefined;
     metadata_u32(key: string): number | undefined;
     constructor(bytes: Uint8Array | number[]);
     next_token(token_ids: Uint32Array | number[]): number;
     tensor_count(): number;
     token_id(token: string): number | undefined;
+    /**
+     * Load a base dLLM and a LoRA adapter in one step.
+     */
+    static withLora(baseBytes: Uint8Array | number[], loraBytes: Uint8Array | number[]): Model;
 }
 
 /**
@@ -84,6 +106,8 @@ export interface InitOutput {
     readonly model_bos_token_id: (a: number) => number;
     readonly model_decision: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly model_decode: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly model_denoise_step: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly model_denoise_topk: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly model_detect: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly model_embed: (a: number, b: number, c: number) => [number, number, number, number];
     readonly model_embed_text: (a: number, b: number, c: number) => [number, number, number, number];
@@ -91,12 +115,15 @@ export interface InitOutput {
     readonly model_eos_token_id: (a: number) => number;
     readonly model_generate: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly model_generate_stream: (a: number, b: number, c: number, d: number, e: any) => any;
+    readonly model_loraExpert: (a: number) => [number, number];
+    readonly model_loraRank: (a: number) => number;
     readonly model_metadata_f32: (a: number, b: number, c: number) => number;
     readonly model_metadata_u32: (a: number, b: number, c: number) => number;
     readonly model_new: (a: number, b: number) => [number, number, number];
     readonly model_next_token: (a: number, b: number, c: number) => [number, number, number];
     readonly model_tensor_count: (a: number) => number;
     readonly model_token_id: (a: number, b: number, c: number) => number;
+    readonly model_withLora: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly multimodalmodel_bos_token_id: (a: number) => number;
     readonly multimodalmodel_embed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly multimodalmodel_encode: (a: number, b: number, c: number, d: number) => [number, number, number, number];

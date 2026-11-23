@@ -7,11 +7,14 @@ const log = (...args: unknown[]) => console.log("[flaxia-node]", ...args);
 
 interface ActiveTask {
   id: string;
-  resolve: (value: unknown) => void;
+  workload: string;
+  priority: number;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   worker: Worker;
   removeListener: () => void;
+  /** Re-run this exact task (used when a foreground task preempts it). */
+  job: () => void;
 }
 
 /** A task waiting for the worker, with the handle needed to settle or drop it. */
@@ -19,7 +22,15 @@ interface QueuedTask {
   id: string;
   job: () => void;
   reject: (error: Error) => void;
+  priority: number;
 }
+
+/**
+ * Workload id used by the local warm-up task. It is not a protocol workload;
+ * it exists so a foreground task can preempt a speculative model load instead
+ * of queueing behind it for tens of seconds.
+ */
+export const PRELOAD_WORKLOAD = 'ai-preload';
 
 /** Swarm tasks exchange control messages and binary frames mid-task. */
 export interface SwarmCallbacks {
@@ -83,8 +94,14 @@ export class WorkerPool {
     onToken?: (token: string) => void,
     config?: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[] },
     swarm?: SwarmCallbacks,
+    /** 0 = foreground, 1 = speculative preload. Preloads yield to foreground. */
+    priority = 0,
   ): Promise<unknown> {
     return new Promise((resolve, reject) => {
+      const queuedAt = performance.now();
+      // Only two classes exist: foreground (0) and speculative (1). Normalising
+      // keeps a stray negative value from preempting everything.
+      priority = priority > 0 ? 1 : 0;
       if (!this.worker) {
         reject(new Error('Worker not available'));
         return;
@@ -97,14 +114,56 @@ export class WorkerPool {
         reject(new Error('WorkerPool queue is full; task rejected (retryable)'));
         return;
       }
-      const job = () => this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, swarm);
+      const job: () => void = () =>
+        this.execute(id, workload, payload, timeoutMs, onToken, config, resolve, reject, swarm, priority, queuedAt, job);
+      // A foreground task must not wait behind a speculative model warm-up:
+      // terminate that worker (the only way to stop a synchronous wasm load)
+      // and let this task start on a fresh one.
+      if (this.active && priority < this.active.priority) {
+        this.preemptActive(`preempted by ${workload}`);
+      }
       if (!this.active) {
         job();
       } else {
         log(`task queued id=${id} workload=${workload} (active task running)`);
-        this.queue.push({ id, job, reject });
+        const entry: QueuedTask = { id, job, reject, priority };
+        const index = this.queue.findIndex((queued) => queued.priority > priority);
+        if (index === -1) this.queue.push(entry);
+        else this.queue.splice(index, 0, entry);
       }
     });
+  }
+
+  /**
+   * Re-queue the active task at its own priority and start from a fresh worker.
+   *
+   * Used for speculative preloads. Re-queueing (instead of settling) keeps the
+   * warm-up alive: a preempted preload runs again once the foreground task
+   * finishes, so the connect-time warm-up is not lost for the whole connection.
+   */
+  private preemptActive(reason: string): boolean {
+    const active = this.active;
+    if (!active) return false;
+    log(`task preempted id=${active.id} workload=${active.workload} reason=${reason}`);
+    this.active = null;
+    clearTimeout(active.timer);
+    active.removeListener();
+    this.pendingControls = this.pendingControls.filter((c) => c.taskId !== active.id);
+    try {
+      this.cleanupWorker();
+    } catch (err) {
+      log(`worker restart failed after preemption error=${err instanceof Error ? err.message : String(err)}`);
+    }
+    const entry: QueuedTask = {
+      id: active.id,
+      job: active.job,
+      reject: active.reject,
+      priority: active.priority,
+    };
+    const index = this.queue.findIndex((queued) => queued.priority > entry.priority);
+    if (index === -1) this.queue.push(entry);
+    else this.queue.splice(index, 0, entry);
+    return true;
   }
 
   private execute(
@@ -117,6 +176,9 @@ export class WorkerPool {
     resolve: (value: unknown) => void,
     reject: (error: Error) => void,
     swarm?: SwarmCallbacks,
+    priority = 0,
+    queuedAt = performance.now(),
+    job?: () => void,
   ) {
     const worker = this.worker;
     if (!worker) {
@@ -128,7 +190,11 @@ export class WorkerPool {
     const timeout = timeoutMs ?? this.defaultTimeoutMs;
     let settled = false;
     const startedAt = performance.now();
-    log(`task start id=${id} workload=${workload} timeoutMs=${timeout}`);
+    const queuedMs = Math.max(0, startedAt - queuedAt);
+    log(`task start id=${id} workload=${workload} timeoutMs=${timeout} queuedMs=${Math.round(queuedMs)}`);
+    if (queuedMs >= 1000) {
+      log(`task queue wait id=${id} workload=${workload} queuedMs=${Math.round(queuedMs)}`);
+    }
 
     const settle = (fn: () => void) => {
       if (settled) return;
@@ -206,7 +272,7 @@ export class WorkerPool {
       settle(() => reject(new Error('TIMEOUT')));
     }, timeout);
 
-    this.active = { id, resolve, reject, timer, worker, removeListener };
+    this.active = { id, workload, priority, reject, timer, worker, removeListener, job: job ?? (() => {}) };
     worker.addEventListener('message', handleMessage);
 
     try {

@@ -153,6 +153,12 @@ export class D1MultimodalModel {
 if (Symbol.dispose) D1MultimodalModel.prototype[Symbol.dispose] = D1MultimodalModel.prototype.free;
 
 export class Model {
+    static __wrap(ptr) {
+        const obj = Object.create(Model.prototype);
+        obj.__wbg_ptr = ptr;
+        ModelFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -235,6 +241,72 @@ export class Model {
         } finally {
             wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
         }
+    }
+    /**
+     * Full-vocabulary logits for the requested positions of one denoise step.
+     *
+     * Returns `{ logits: Float32Array, positions: Uint32Array, confidence:
+     * Float32Array, vocabSize: number }`. `logits` is row-major
+     * `[positions.len()][vocabSize]`.
+     * @param {Uint32Array | number[]} tokens
+     * @param {Uint32Array | number[]} positions
+     * @param {number} block_start
+     * @param {number} block_end
+     * @returns {any}
+     */
+    denoise_step(tokens, positions, block_start, block_end) {
+        const val3 = +block_start;
+        const val4 = +block_end;
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passArray32ToWasm0(tokens, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passArray32ToWasm0(positions, wasm.__wbindgen_malloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 4, 4); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 4, 4); }
+            throw e;
+        }
+        const ret = wasm.model_denoise_step(this.__wbg_ptr, ptr0, len0, ptr1, len1, val3, val4);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Top-k candidates for the requested positions of one denoise step.
+     *
+     * Returns `{ positions, tokenIds, probabilities, confidence, vocabSize,
+     * topK }`. `tokenIds`/`probabilities` are row-major
+     * `[positions.len()][topK]`.
+     * @param {Uint32Array | number[]} tokens
+     * @param {Uint32Array | number[]} positions
+     * @param {number} block_start
+     * @param {number} block_end
+     * @param {number} top_k
+     * @returns {any}
+     */
+    denoise_topk(tokens, positions, block_start, block_end, top_k) {
+        const val3 = +block_start;
+        const val4 = +block_end;
+        const val5 = +top_k;
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passArray32ToWasm0(tokens, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passArray32ToWasm0(positions, wasm.__wbindgen_malloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 4, 4); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 4, 4); }
+            throw e;
+        }
+        const ret = wasm.model_denoise_topk(this.__wbg_ptr, ptr0, len0, ptr1, len1, val3, val4, val5);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * @param {Float32Array | number[]} input
@@ -345,6 +417,25 @@ export class Model {
         return ret;
     }
     /**
+     * @returns {string | undefined}
+     */
+    loraExpert() {
+        const ret = wasm.model_loraExpert(this.__wbg_ptr);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]);
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
+    /**
+     * @returns {number | undefined}
+     */
+    loraRank() {
+        const ret = wasm.model_loraRank(this.__wbg_ptr);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
      * @param {string} key
      * @returns {number | undefined}
      */
@@ -407,6 +498,30 @@ export class Model {
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.model_token_id(this.__wbg_ptr, ptr0, len0);
         return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    }
+    /**
+     * Load a base dLLM and a LoRA adapter in one step.
+     * @param {Uint8Array | number[]} baseBytes
+     * @param {Uint8Array | number[]} loraBytes
+     * @returns {Model}
+     */
+    static withLora(baseBytes, loraBytes) {
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passArray8ToWasm0(baseBytes, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passArray8ToWasm0(loraBytes, wasm.__wbindgen_malloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+            throw e;
+        }
+        const ret = wasm.model_withLora(ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return Model.__wrap(ret[0]);
     }
 }
 if (Symbol.dispose) Model.prototype[Symbol.dispose] = Model.prototype.free;
@@ -592,6 +707,18 @@ function __wbg_get_imports() {
             const ret = arg0.call(arg1, arg2);
             return ret;
         }, arguments); },
+        __wbg_new_cd4348290afae586: function() {
+            const ret = new Object();
+            return ret;
+        },
+        __wbg_new_from_slice_3512352010266e02: function(arg0, arg1) {
+            const ret = new Uint32Array(getArrayU32FromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_new_from_slice_355c10c5d8f2addb: function(arg0, arg1) {
+            const ret = new Float32Array(getArrayF32FromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg_new_typed_e09da9dae6ee5935: function(arg0, arg1) {
             try {
                 var state0 = {a: arg0, b: arg1};
@@ -621,6 +748,10 @@ function __wbg_get_imports() {
             const ret = Promise.resolve(arg0);
             return ret;
         },
+        __wbg_set_2793479888329cb6: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.set(arg0, arg1, arg2);
+            return ret;
+        }, arguments); },
         __wbg_static_accessor_GLOBAL_THIS_003ee833af9699fc: function() {
             const ret = typeof globalThis === 'undefined' ? undefined : globalThis;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);

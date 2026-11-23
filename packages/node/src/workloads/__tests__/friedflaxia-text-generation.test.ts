@@ -10,6 +10,7 @@ function fakeModel(): PlamoModel {
   return {
     encode: vi.fn(() => Uint32Array.from([1, 16, 19])),
     generate: vi.fn(() => Uint32Array.from([3, 4])),
+    generate_stream: undefined,
     decode: vi.fn(() => 'こんにちは'),
     free: vi.fn(),
   };
@@ -33,10 +34,10 @@ describe('friedflaxia PLaMO text generation', () => {
     expect(result).toEqual({ output: [{ generated_text: 'こんにちは' }] });
   });
 
-  it('streams decoded tokens through onToken when wasm exposes generateStream', async () => {
+  it('streams decoded tokens through onToken when wasm exposes generate_stream', async () => {
     const model = fakeModel();
     const seen: number[] = [];
-    model.generateStream = vi.fn(async (promptIds, maxTokens, onToken) => {
+    model.generate_stream = vi.fn(async (promptIds, maxTokens, onToken) => {
       expect(promptIds).toEqual(Uint32Array.from([1, 16, 19]));
       expect(maxTokens).toBe(8);
       for (const token of [3, 4]) {

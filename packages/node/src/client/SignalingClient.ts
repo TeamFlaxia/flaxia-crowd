@@ -10,7 +10,7 @@ import {
   safeLocalStorageSet,
   safeRandomUUID,
 } from '../consent/storage';
-import { WorkerPool } from '../executor/WorkerPool';
+import { PRELOAD_WORKLOAD, WorkerPool } from '../executor/WorkerPool';
 import { HEAVY_WORKLOAD_WASM_MEMORY_BYTES, getAdvertisedWasmMemoryBytes, hasEnoughWasmMemoryForHeavy } from '../executor/memoryProbe';
 import { collectNodeResourceReport } from '../executor/resourceReporter';
 import { assertPublicUrl } from '../executor/egress-guard';
@@ -816,11 +816,14 @@ class SignalingClient {
     const id = `preload-${typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`}`;
     await this.workerPool.run(
       id,
-      'ai-preload' as unknown as WorkloadType,
+      PRELOAD_WORKLOAD as unknown as WorkloadType,
       request,
       300000,
       undefined,
       { maxCpuLoad: this.effectiveMaxCpuLoad() },
+      undefined,
+      // Speculative: a real task preempts this instead of queueing behind it.
+      1,
     );
   }
 

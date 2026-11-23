@@ -12,6 +12,14 @@ export const MAX_EMBED_GEMMA_TEXTS = 32;
 export const MAX_EMBED_GEMMA_TOTAL_CHARS = 100_000;
 /** Maximum characters accepted for a single text. */
 export const MAX_EMBED_GEMMA_TEXT_CHARS = 4_000;
+/**
+ * Maximum tokens fed to one encoder sequence.
+ *
+ * The GGUF advertises a much larger context, but every extra token streams the
+ * whole Q8_0 encoder once, so 2048 keeps a single task bounded in both time and
+ * wasm memory. Longer input is truncated (BOS/EOS preserved) by the node.
+ */
+export const MAX_EMBED_GEMMA_TOKENS = 2_048;
 /** Matryoshka truncation sizes supported by the model. */
 export const EMBED_GEMMA_DIMENSIONS: readonly EmbedGemmaDimensions[] = [768, 512, 256, 128];
 

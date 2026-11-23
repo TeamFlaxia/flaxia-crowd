@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { embedTexts, truncateAndNormalize, type FriedFlaxiaModel } from '../friedflaxia/embed-gemma';
+import { MAX_EMBED_GEMMA_TOKENS } from '@flaxia/sdk';
+import {
+  embedTexts,
+  limitTokenIds,
+  truncateAndNormalize,
+  type FriedFlaxiaModel,
+} from '../friedflaxia/embed-gemma';
 
 function fakeModel(embedding: Float32Array): FriedFlaxiaModel {
   return {
@@ -44,5 +50,23 @@ describe('friedflaxia embed-gemma', () => {
     const onBatch = vi.fn();
     await embedTexts(fakeModel(unitEmbedding()), ['hello'], 768, onBatch);
     expect(onBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('caps a sequence at the token budget and restores EOS', async () => {
+    const ids = new Uint32Array(10);
+    for (let index = 0; index < ids.length; index += 1) ids[index] = index + 3;
+    const limited = limitTokenIds(ids, 1, 4);
+    expect(Array.from(limited)).toEqual([3, 4, 5, 1]);
+    expect(limitTokenIds(ids, 1, 10)).toBe(ids);
+  });
+
+  it('truncates before calling the encoder', async () => {
+    const model = fakeModel(unitEmbedding());
+    model.encode = vi.fn(() => new Uint32Array(MAX_EMBED_GEMMA_TOKENS + 10).fill(7));
+    model.eos_token_id = () => 1;
+    await embedTexts(model, ['long'], 768);
+    const passed = (model.embed as ReturnType<typeof vi.fn>).mock.calls[0][0] as Uint32Array;
+    expect(passed.length).toBe(MAX_EMBED_GEMMA_TOKENS);
+    expect(passed[passed.length - 1]).toBe(1);
   });
 });

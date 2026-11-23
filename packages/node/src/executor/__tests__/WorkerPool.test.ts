@@ -59,6 +59,87 @@ describe('WorkerPool', () => {
     expect(result).toEqual({ output: 'ok' });
   });
 
+  it('preempts a speculative preload and retries it after the foreground task', async () => {
+    let handler: Function | undefined;
+    const terminate = vi.fn();
+    let preloadAttempts = 0;
+    class MockWorker {
+      postMessage = vi.fn((message: { id: string; workload: string }) => {
+        if (message.workload === 'ai-preload') {
+          preloadAttempts += 1;
+          // The first attempt is killed mid-load; the retry completes.
+          if (preloadAttempts > 1) {
+            setTimeout(
+              () => handler?.({ data: { id: message.id, type: 'done', result: { warm: true } } }),
+              0,
+            );
+          }
+          return;
+        }
+        setTimeout(
+          () => handler?.({ data: { id: message.id, type: 'done', result: { ok: true } } }),
+          0,
+        );
+      });
+      terminate = terminate;
+      addEventListener = vi.fn((_event: string, h: Function) => {
+        handler = h;
+      });
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    pool = new WorkerPool();
+
+    const preload = pool.run(
+      'preload-1',
+      'ai-preload' as any,
+      {},
+      60_000,
+      undefined,
+      undefined,
+      undefined,
+      1,
+    );
+    const foreground = pool.run('task-1', 'ai-inference', {}, 100);
+
+    await expect(foreground).resolves.toEqual({ ok: true });
+    // The warm-up is not dropped: it runs again once the foreground task ends.
+    await expect(preload).resolves.toEqual({ warm: true });
+    expect(preloadAttempts).toBe(2);
+    // Stopping the warm-up is the only way to break a synchronous wasm load.
+    expect(terminate).toHaveBeenCalled();
+  });
+
+  it('runs equal-priority queued tasks in arrival order', async () => {
+    let handler: Function | undefined;
+    const started: string[] = [];
+    class MockWorker {
+      postMessage = vi.fn((message: { id: string; workload: string }) => {
+        started.push(message.id);
+        setTimeout(
+          () => handler?.({ data: { id: message.id, type: 'done', result: { id: message.id } } }),
+          0,
+        );
+      });
+      terminate = vi.fn();
+      addEventListener = vi.fn((_event: string, h: Function) => {
+        handler = h;
+      });
+      removeEventListener = vi.fn();
+    }
+    (globalThis as any).Worker = MockWorker as any;
+    pool = new WorkerPool();
+
+    const results = await Promise.all([
+      pool.run('first', 'ai-inference', {}),
+      pool.run('second', 'ai-inference', {}),
+      pool.run('third', 'image-process', {}),
+    ]);
+
+    expect(started).toEqual(['first', 'second', 'third']);
+    expect(results.map((result: any) => result.id)).toEqual(['first', 'second', 'third']);
+  });
+
   it('distinguishes an unobserved CPU load from a measured zero', async () => {
     let handler: Function;
     class MockWorker {

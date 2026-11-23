@@ -145,8 +145,17 @@ function releaseLoadedCaches(): void {
 
 function getModelCacheSnapshot(): NodeModelCacheSnapshot {
   const sampledAt = Date.now();
+  // Dedupe after flatMap on the full cache identity: the text and multimodal
+  // snapshotters can report the same manifest id, while a different dtype or
+  // backend is a distinct download. The 8-entry budget is shared with swarm.
+  const seen = new Set<string>();
   const entries = [...cacheSnapshotters.values()].flatMap((snapshot) => {
     try { return snapshot().entries; } catch { return []; }
+  }).filter((entry) => {
+    const key = `${entry.modelId}\u0000${entry.dtype}\u0000${entry.backend}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   }).slice(0, 8);
   return { version: 1, sampledAt, expiresAt: sampledAt + 60_000, entries };
 }
@@ -194,6 +203,7 @@ async function runWorkload(
     case 'vector-embed':
       const embed = await import('../workloads/vector-embed');
       cacheReleasers.set(workload, embed.releaseCache);
+      cacheSnapshotters.set(workload, embed.getModelCacheSnapshot);
       return await embed.handleVectorEmbed(payload as any);
     case 'vector-store':
       const store = await import('../workloads/vector-store');
@@ -206,6 +216,7 @@ async function runWorkload(
     case 'nudenet':
       const nudenet = await import('../workloads/nudenet');
       cacheReleasers.set(workload, nudenet.releaseCache);
+      cacheSnapshotters.set(workload, nudenet.getModelCacheSnapshot);
       return await nudenet.handleNudeNet(payload as any);
     case 'cc-extract':
       const cc = await import('../workloads/cc-extract');
@@ -213,6 +224,7 @@ async function runWorkload(
     case 'embed-gemma':
       const gemma = await import('../workloads/embed-gemma');
       cacheReleasers.set(workload, gemma.releaseCache);
+      cacheSnapshotters.set(workload, gemma.getModelCacheSnapshot);
       return await gemma.handleEmbedGemma(payload as any, yieldToThrottle);
     default:
       throw new Error(`Unknown workload type: ${workload}`);

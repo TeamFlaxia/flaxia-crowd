@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { NodeResourceReport, NodeModelCacheSnapshot, SwarmChainNode, TaskRecord } from '@flaxia/sdk';
 import { encodeSwarmEnvelope, MAX_RESOURCE_CAPACITY_BYTES, verifyCrowdWebhook } from '@flaxia/sdk';
 import type { PeerLinkHistory } from '../peer-link-history';
-import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK } from '../Coordinator';
+import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK, resolveWarmModelId } from '../Coordinator';
 import { MAX_SWARM_RELAY_BYTES_PER_TASK, swarmRelayBudgetKey } from '../relay-budget';
 import { parseSwarmCapabilities, parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
@@ -969,6 +969,45 @@ describe('Coordinator', () => {
     expect(jsonFrames(honest).some(f => f.type === 'task' && f.taskId === second.id)).toBe(true);
   });
 
+  it('treats a NudeNet node as warm for the alias model the payload carries', async () => {
+    stub = newStub();
+    await connectNode('node-nude-cold', 'capabilities=nudenet');
+    const warm = await connectNode('node-nude-warm', 'capabilities=nudenet');
+    const now = Date.now();
+    await withStorage(async (storage) => {
+      const record = await storage.get<NodeRecord>('node:node-nude-warm');
+      record!.modelCache = {
+        version: 1,
+        sampledAt: now,
+        expiresAt: now + 60_000,
+        entries: [
+          {
+            modelId: 'deepghs/nudenet_onnx',
+            revision: 'main',
+            dtype: 'q8_0',
+            backend: 'wasm',
+            state: 'ready',
+            referenceCount: 1,
+          },
+        ],
+      };
+      await storage.put('node:node-nude-warm', record!);
+    });
+
+    // The public payload names the size alias, not the cache id.
+    const task = makeTask({
+      workload: 'nudenet',
+      payload: { model: '320n', imageUrl: 'https://example.com/a.jpg' },
+    });
+    await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+    await new Promise(r => setTimeout(r, 30));
+
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('node-nude-warm');
+    expect(scheduled.placementReason).toBe('warm-model');
+    expect(jsonFrames(warm).some((frame) => frame.type === 'task' && frame.taskId === task.id)).toBe(true);
+  });
+
   it('records why the warm model node won and exposes the current reservation generation', async () => {
     stub = newStub();
     await connectNode('node-cold', 'capabilities=ai-inference');
@@ -1062,6 +1101,25 @@ describe('Coordinator', () => {
     });
     await runAssign();
     expect((await getTask(task.id)).assignedNodeId).toBe('node-leased');
+  });
+});
+
+describe('warm model identity', () => {
+  it('uses the manifest id when the payload carries a public alias', () => {
+    // NudeNet's payload model is '320n'/'640m', never the cache id.
+    expect(resolveWarmModelId('nudenet', '320n')).toBe('deepghs/nudenet_onnx');
+    expect(resolveWarmModelId('nudenet', undefined)).toBe('deepghs/nudenet_onnx');
+    // The advertised embedding id is the ONNX binding, not the manifest id.
+    expect(resolveWarmModelId('vector-embed', 'onnx-community/embeddinggemma-2-ONNX')).toBe(
+      'google/embeddinggemma-2',
+    );
+    expect(resolveWarmModelId('embed-gemma', undefined)).toBe('google/embeddinggemma-2');
+  });
+
+  it('keeps the payload model for workloads that pin a real id', () => {
+    expect(resolveWarmModelId('ai-inference', 'Xenova/distilbert')).toBe('Xenova/distilbert');
+    expect(resolveWarmModelId('ai-inference', undefined)).toBe('');
+    expect(resolveWarmModelId('ai-inference', '')).toBe('');
   });
 });
 

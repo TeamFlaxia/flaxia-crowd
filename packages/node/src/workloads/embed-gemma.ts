@@ -10,7 +10,10 @@ import {
 } from '@flaxia/sdk';
 import { handleFriedFlaxiaEmbedGemma } from './friedflaxia/embed-gemma';
 
-export { releaseCache } from './friedflaxia/embed-gemma';
+export {
+  releaseCache,
+  getEmbedGemmaCacheSnapshot as getModelCacheSnapshot,
+} from './friedflaxia/embed-gemma';
 
 function fail(message: string): never {
   throw new Error(`embed-gemma: ${message}`);

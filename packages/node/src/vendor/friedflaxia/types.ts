@@ -13,16 +13,19 @@ import type {
   MultimodalModel,
 } from './friedflaxia_wasm';
 
-export type FriedFlaxiaModel = Pick<Model, 'encode' | 'embed' | 'free'>;
-
-export type PlamoModel = Pick<Model, 'encode' | 'decode' | 'generate' | 'free'> & {
-  /** Incremental PlamoSession; awaits the callback so hosts can throttle. */
-  generateStream?: (
-    promptIds: Uint32Array,
-    maxTokens: number,
-    onToken: (token: number) => void | Promise<void>,
-  ) => Promise<Uint32Array>;
+export type FriedFlaxiaModel = Pick<Model, 'encode' | 'embed' | 'free'> & {
+  /** Present on the vendored build; used to restore EOS after truncation. */
+  eos_token_id?: () => number | undefined;
 };
+
+export type PlamoModel = Pick<Model, 'encode' | 'decode' | 'generate' | 'free'> &
+  /**
+   * Incremental PlamoSession. The wasm-bindgen export is `generate_stream`;
+   * it awaits the callback so hosts can throttle and cancel between tokens.
+   * Bind to the generated declaration so a rename fails typecheck; `Partial`
+   * keeps the fallback for older vendored builds.
+   */
+  Partial<Pick<Model, 'generate_stream'>>;
 
 export type D1Model = Pick<
   Model,
