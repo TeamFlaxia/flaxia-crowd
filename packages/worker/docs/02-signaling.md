@@ -113,7 +113,7 @@ type ProgressMessage = {
   attemptId: string
 }
 
-// 失敗（ホストのみ。swarm メンバーの失敗はホストへ中継される）
+// 失敗
 type ErrorMessage = {
   type: 'error'
   taskId: string
@@ -136,18 +136,6 @@ Signalingハンドラは `NodeManager` Durable Object に以下を委譲する�
 - ノードのWebSocket接続の保持
 - タスク割り当て（どのノードにどのタスクを振るか）
 - Ping/Pongによる死活確認（30秒間隔）
-
-## swarm セッションの権限（Issue #4）
-
-- `swarm-plan` / `swarm-ready` / `swarm-error` / `swarm-done` / `swarm-token` は
-  セッション ID とメンバーシップを検証する。
-- 結果（`result`）とセッションの失敗（`error` / `swarm-error`）を確定できるのは
-  **ホストのみ**。メンバーの失敗は `swarm-error`（`fromNodeId` 付き）として
-  ホストへ中継され、ホストが中断を決める。メンバーが他メンバーのタスクを
-  直接失敗させることはできない。
-- ホストが提案するレイヤ計画は連続性・全被覆に加え、整数スライス・
-  総層数 1024 以下・1 ノード 256 層以下を検査する。違反は `swarm-error` を返し、
-  タスクを恒久失敗させる（`end: 1e9` による GPU OOM を防ぐ）。
 
 ## 実装上の注意
 

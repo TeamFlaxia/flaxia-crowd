@@ -1,11 +1,10 @@
 /// <reference types="@cloudflare/vitest-pool-workers" />
 /**
- * `POST /crowd/tasks` boundary validation for `swarm-inference`.
+ * `POST /crowd/tasks` boundary validation.
  *
- * The scheduler falls back to defaults for unusable `swarm` options so a bad
- * payload cannot wedge the queue, but that fallback is a safety net, not an
- * API contract: a client that mistypes an option must get a 400, not a task
- * that quietly runs with different settings than it asked for.
+ * Payload checks happen at submit time: a client that mistypes an option must
+ * get a 400, not a task that quietly runs with different settings than it asked
+ * for.
  */
 
 import { env as testEnv } from 'cloudflare:test';
@@ -26,7 +25,7 @@ function envWithApiKey(apiKey: string): Env {
 
 function submit(
   payload: unknown,
-  workload = 'swarm-inference',
+  workload = 'ai-inference',
   apiKey = API_KEY,
   options: { priority?: unknown } = {},
 ): Promise<Response> {
@@ -46,51 +45,33 @@ function submit(
   );
 }
 
-describe('POST /tasks swarm payload validation', () => {
+describe('POST /tasks payload validation', () => {
   it('fails closed when the API_KEYS secret is not configured', async () => {
-    const res = await submit({ model: 'qwen3-1.7b', prompt: 'hi' }, 'swarm-inference', '');
+    const res = await submit({ task: 'text-generation', model: 'm', input: 'hi' }, 'ai-inference', '');
     expect(res.status).toBe(401);
   });
 
-  it('accepts a payload without swarm options', async () => {
-    const res = await submit({ model: 'qwen3-1.7b', prompt: 'hi' });
+  it('accepts a well-formed ai-inference payload', async () => {
+    const res = await submit({ task: 'text-generation', model: 'm', input: 'hi' });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { taskId?: string };
     expect(typeof body.taskId).toBe('string');
   });
 
-  it('accepts well-formed swarm options', async () => {
-    const res = await submit({
-      model: 'qwen3-1.7b',
-      prompt: 'hi',
-      maxNewTokens: 128,
-      swarm: { minNodes: 2, maxNodes: 4, preferWarm: false },
-    });
-    expect(res.status).toBe(200);
-  });
-
   it('accepts a bounded scheduling priority', async () => {
-    const res = await submit({ model: 'qwen3-1.7b', prompt: 'hi' }, 'swarm-inference', API_KEY, { priority: 3 });
+    const res = await submit({ task: 'text-generation', model: 'm', input: 'hi' }, 'ai-inference', API_KEY, { priority: 3 });
     expect(res.status).toBe(200);
   });
 
   it.each([-1, 1.5, 4, '2', null])('rejects invalid scheduling priority %s', async (priority) => {
-    const res = await submit({ model: 'qwen3-1.7b', prompt: 'hi' }, 'swarm-inference', API_KEY, { priority });
+    const res = await submit({ task: 'text-generation', model: 'm', input: 'hi' }, 'ai-inference', API_KEY, { priority });
     expect(res.status).toBe(400);
   });
 
   const invalid: Array<[label: string, payload: unknown]> = [
     ['a non-object payload', 'nope'],
-    ['a swarm option that is not an object', { model: 'm', prompt: 'p', swarm: 'abc' }],
-    ['a swarm option that is an array', { model: 'm', prompt: 'p', swarm: [] }],
-    ['a non-numeric minNodes', { model: 'm', prompt: 'p', swarm: { minNodes: 'abc' } }],
-    ['a non-integer minNodes', { model: 'm', prompt: 'p', swarm: { minNodes: 2.5 } }],
-    ['a zero minNodes', { model: 'm', prompt: 'p', swarm: { minNodes: 0 } }],
-    ['a non-numeric maxNodes', { model: 'm', prompt: 'p', swarm: { maxNodes: { huge: true } } }],
-    ['maxNodes below minNodes', { model: 'm', prompt: 'p', swarm: { minNodes: 4, maxNodes: 2 } }],
-    ['a non-boolean preferWarm', { model: 'm', prompt: 'p', swarm: { preferWarm: 'yes' } }],
-    ['a non-integer maxNewTokens', { model: 'm', prompt: 'p', maxNewTokens: 12.5 }],
-    ['a zero maxNewTokens', { model: 'm', prompt: 'p', maxNewTokens: 0 }],
+    ['an unknown engine', { task: 'text-generation', model: 'm', input: 'hi', engine: 'other' }],
+    ['a non-boolean ondeviceOnly', { task: 'text-generation', model: 'm', input: 'hi', options: { ondeviceOnly: 'yes' } }],
   ];
 
   it.each(invalid)('rejects %s with 400', async (_label, payload) => {
@@ -100,13 +81,8 @@ describe('POST /tasks swarm payload validation', () => {
     expect(body.error).toBeTruthy();
   });
 
-  it('does not validate swarm options for other workloads', async () => {
-    const res = await submit({ task: 'image-process', swarm: { minNodes: 'abc' } }, 'image-process');
-    expect(res.status).toBe(200);
-  });
-
   it('still rejects an unroutable workload before payload validation', async () => {
-    const res = await submit({ swarm: { minNodes: 'abc' } }, 'moe-inference');
+    const res = await submit({ task: 'text-generation' }, 'moe-inference');
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toBe('Invalid workload type');

@@ -1,4 +1,4 @@
-import type { SwarmNodeCapabilities, WarmModelRange } from '@flaxia/sdk';
+import type { WarmModelRange } from '@flaxia/sdk';
 
 const encoder = new TextEncoder();
 
@@ -127,23 +127,10 @@ export interface NodeTokenPayload {
   exp: number;
   /** Device RAM in GB as reported by the browser; `null`/missing on mobile WebViews. */
   deviceMemory?: number | null;
-  /** Measured WASM memory the device can commit, used as swarm split capacity. */
+  /** Measured WASM memory the device can commit, used for placement ordering. */
   wasmMemoryBytes?: number;
-  /** WebGPU capabilities probed by the node, for swarm inference routing. */
-  swarm?: SwarmNodeCapabilities;
   /** Warm model layer ranges the node can serve without downloading. */
   warmModels?: WarmModelRange[];
-}
-
-/**
- * Fresh 256-bit key for one swarm hop edge, base64url encoded. The coordinator
- * hands each member its inbound/outbound key in `swarm-slice` and never keeps
- * them: frames are authenticated between neighbours, not by the relay.
- */
-export function createSwarmHopKey(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return bytesToBase64Url(bytes);
 }
 
 /**

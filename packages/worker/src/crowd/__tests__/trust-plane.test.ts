@@ -4,7 +4,6 @@
  *
  *   #3  tenant isolation (per-key tenants, site allow-lists)
  *   #5  server-issued node identity, token-bound node ids, capacity clamps
- *   #6  swarm sizing / payload bounds
  *   #13 webhook signing fails closed
  *   #14 subscribe authorization
  *   #20 token transport via the WebSocket subprotocol
@@ -407,32 +406,6 @@ describe('#3 tenant isolation of task reads', () => {
       );
       expect(resp.status).toBe(400);
     }
-  });
-});
-
-describe('#6 swarm sizing bounds at the API boundary', () => {
-  const env = makeEnv({ API_KEYS: 'key-bounds:tenant-bounds' });
-
-  it('rejects minNodes / maxNodes beyond the documented maximum', async () => {
-    for (const swarm of [{ minNodes: 99999 }, { maxNodes: 1000000 }, { minNodes: 1, maxNodes: 17 }]) {
-      const resp = await submitTask(
-        'key-bounds',
-        { workload: 'swarm-inference', payload: { model: 'm', prompt: 'p', swarm } },
-        env,
-      );
-      expect(resp.status).toBe(400);
-      const body = await resp.json() as { error?: string };
-      expect(body.error).toMatch(/swarm\.(minNodes|maxNodes)/);
-    }
-  });
-
-  it('accepts the documented range', async () => {
-    const resp = await submitTask(
-      'key-bounds',
-      { workload: 'swarm-inference', payload: { model: 'm', prompt: 'p', swarm: { minNodes: 2, maxNodes: 16 } } },
-      env,
-    );
-    expect(resp.status).toBe(200);
   });
 });
 
