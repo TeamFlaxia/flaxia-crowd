@@ -969,6 +969,45 @@ describe('Coordinator', () => {
     expect(jsonFrames(honest).some(f => f.type === 'task' && f.taskId === second.id)).toBe(true);
   });
 
+  it('treats a NudeNet node as warm for the alias model the payload carries', async () => {
+    stub = newStub();
+    await connectNode('node-nude-cold', 'capabilities=nudenet');
+    const warm = await connectNode('node-nude-warm', 'capabilities=nudenet');
+    const now = Date.now();
+    await withStorage(async (storage) => {
+      const record = await storage.get<NodeRecord>('node:node-nude-warm');
+      record!.modelCache = {
+        version: 1,
+        sampledAt: now,
+        expiresAt: now + 60_000,
+        entries: [
+          {
+            modelId: 'deepghs/nudenet_onnx',
+            revision: 'main',
+            dtype: 'q8_0',
+            backend: 'wasm',
+            state: 'ready',
+            referenceCount: 1,
+          },
+        ],
+      };
+      await storage.put('node:node-nude-warm', record!);
+    });
+
+    // The public payload names the size alias, not the cache id.
+    const task = makeTask({
+      workload: 'nudenet',
+      payload: { model: '320n', imageUrl: 'https://example.com/a.jpg' },
+    });
+    await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+    await new Promise(r => setTimeout(r, 30));
+
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('node-nude-warm');
+    expect(scheduled.placementReason).toBe('warm-model');
+    expect(jsonFrames(warm).some((frame) => frame.type === 'task' && frame.taskId === task.id)).toBe(true);
+  });
+
   it('records why the warm model node won and exposes the current reservation generation', async () => {
     stub = newStub();
     await connectNode('node-cold', 'capabilities=ai-inference');
