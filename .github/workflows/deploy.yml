@@ -38,8 +38,10 @@ jobs:
             exit 1
           fi
 
-      - name: Build @flaxia/sdk
-        run: npm run build --workspace=@flaxia/sdk
+      # text-analyzer typechecks against @flaxia/node's emitted types, so all
+      # workspaces must be built before the typecheck step below.
+      - name: Build all workspaces
+        run: npm run build
 
       - name: Typecheck all workspaces
         run: npm run typecheck
