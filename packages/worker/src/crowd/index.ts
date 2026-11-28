@@ -32,6 +32,7 @@ import {
   verifyNodeToken,
   validateCallbackUrl,
   resolveTenantId,
+  resolveTenantIdFromDb,
   createSubscribeToken,
   verifySubscribeToken,
   SUBSCRIBE_TOKEN_TTL_MS,
@@ -100,7 +101,10 @@ function isSafeMediaUrl(value: unknown): boolean {
  * that it can no longer read another tenant's tasks.
  */
 export async function resolveCallerTenant(env: Env, authHeader: string | undefined): Promise<string | null> {
-  return resolveTenantId(env.API_KEYS, authHeader)
+  const fromSecret = await resolveTenantId(env.API_KEYS, authHeader)
+  if (fromSecret) return fromSecret
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined
+  return token ? resolveTenantIdFromDb(env.DB, token) : null
 }
 
 export async function validateApiKey(env: Env, authHeader: string | undefined): Promise<boolean> {

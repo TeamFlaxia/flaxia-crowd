@@ -6,6 +6,8 @@ export { Coordinator } from './worker/Coordinator'
 
 export interface Env {
   COORDINATOR: DurableObjectNamespace
+  /** D1 database holding SHA-256 hashes of accepted API keys. */
+  DB: D1Database
   /** Comma-separated API keys: `key` or `key:tenantId`. */
   API_KEYS: string
   CORS_ORIGINS: string

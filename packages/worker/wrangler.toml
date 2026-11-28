@@ -19,6 +19,11 @@ MAX_PAYLOAD_SIZE = "1048576"
 # and subscription return 503; without WEBHOOK_SIGNING_SECRET, tasks with a
 # callbackUrl are rejected with 400.
 
+[[d1_databases]]
+binding = "DB"
+database_name = "flaxia-crowd-keys"
+database_id = "9ef5f678-2e15-4026-aa57-4e4f9659efcc"
+
 [[durable_objects.bindings]]
 name = "COORDINATOR"
 class_name = "Coordinator"

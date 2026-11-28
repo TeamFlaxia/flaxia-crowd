@@ -25,6 +25,28 @@ function base64UrlDecode(input: string): string {
   return new TextDecoder().decode(base64UrlToBytes(input));
 }
 
+/**
+ * Resolve an API key tenant from the D1 hash table. Only the SHA-256 digest is
+ * stored, so adding a second host's key never requires reading or rotating the
+ * existing `API_KEYS` secret. Fail closed on any database error.
+ */
+export async function resolveTenantIdFromDb(db: D1Database | undefined, token: string): Promise<string | null> {
+  if (!db) return null;
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', encoder.encode(token));
+    const hash = Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+    const row = await db
+      .prepare('SELECT tenant_id FROM api_keys WHERE key_hash = ?')
+      .bind(hash)
+      .first<{ tenant_id: string }>();
+    return row?.tenant_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
