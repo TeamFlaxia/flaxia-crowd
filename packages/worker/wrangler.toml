@@ -23,6 +23,9 @@ MAX_PAYLOAD_SIZE = "1048576"
 binding = "DB"
 database_name = "flaxia-crowd-keys"
 database_id = "9ef5f678-2e15-4026-aa57-4e4f9659efcc"
+# Point Wrangler at the D1 schema so `wrangler d1 migrations apply` (and the
+# deploy workflow) creates api_keys before the Worker can look up key hashes.
+migrations_dir = "./migrations"
 
 [[durable_objects.bindings]]
 name = "COORDINATOR"

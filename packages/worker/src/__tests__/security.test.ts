@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { describe, expect, it } from 'vitest';
-import { createNodeToken, validateCallbackUrl, verifyNodeToken } from '../security';
+import { createNodeToken, resolveTenantIdFromDb, validateCallbackUrl, verifyNodeToken } from '../security';
 import { TEST_NODE_TOKEN_SECRET } from '../worker/__tests__/testSecrets';
 
 describe('verifyNodeToken expert capabilities', () => {
@@ -34,6 +34,53 @@ describe('verifyNodeToken expert capabilities', () => {
       expertCapabilities: expertCapabilities as string[] | undefined,
     });
     expect(await verifyNodeToken(TEST_NODE_TOKEN_SECRET, token)).toBeNull();
+  });
+});
+
+describe('resolveTenantIdFromDb', () => {
+  const token = 'test-key-for-d1';
+  // Lowercase 64-hex SHA-256 of `token`, computed independently of the Worker:
+  //   printf '%s' 'test-key-for-d1' | sha256sum
+  const expectedHash = 'b1568d729980e54a571e9e03ba15e4a59bade51a0261b007df804e9decafd800';
+
+  /** Minimal fake D1 binding: records what was queried and returns a scripted row. */
+  function makeDb(first: () => Promise<{ tenant_id: string } | null>) {
+    const state = { prepareCalls: 0, boundHash: undefined as string | undefined };
+    const db = {
+      prepare(query: string) {
+        state.prepareCalls++;
+        expect(query).toContain('api_keys');
+        expect(query).toContain('key_hash');
+        return {
+          bind(hash: string) {
+            state.boundHash = hash;
+            return { first };
+          },
+        };
+      },
+    } as unknown as D1Database;
+    return { db, state };
+  }
+
+  it('returns the tenant for a correct hash lookup', async () => {
+    const { db, state } = makeDb(() => Promise.resolve({ tenant_id: 'tenant-a' }));
+    expect(await resolveTenantIdFromDb(db, token)).toBe('tenant-a');
+    expect(state.prepareCalls).toBe(1);
+    expect(state.boundHash).toBe(expectedHash);
+  });
+
+  it('returns null when no row matches the hash', async () => {
+    const { db, state } = makeDb(() => Promise.resolve(null));
+    expect(await resolveTenantIdFromDb(db, token)).toBeNull();
+    expect(state.prepareCalls).toBe(1);
+    expect(state.boundHash).toBe(expectedHash);
+  });
+
+  it('fails closed (null) when the database throws', async () => {
+    const { db, state } = makeDb(() => Promise.reject(new Error('D1 unavailable')));
+    expect(await resolveTenantIdFromDb(db, token)).toBeNull();
+    expect(state.prepareCalls).toBe(1);
+    expect(state.boundHash).toBe(expectedHash);
   });
 });
 

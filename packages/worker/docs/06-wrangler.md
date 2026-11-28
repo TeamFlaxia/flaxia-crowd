@@ -17,6 +17,12 @@ CORS_ORIGINS = "http://localhost:5173,http://localhost:5174,http://localhost:878
 RATE_LIMIT_MAX = "100"
 MAX_PAYLOAD_SIZE = "1048576"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "flaxia-crowd-keys"
+database_id = "9ef5f678-2e15-4026-aa57-4e4f9659efcc"
+migrations_dir = "./migrations"
+
 [[durable_objects.bindings]]
 name = "COORDINATOR"
 class_name = "Coordinator"
@@ -30,6 +36,7 @@ new_sqlite_classes = ["Coordinator"]
 
 | 名前 | 種別 | 用途 |
 |------|------|------|
+| `DB` | D1 (`flaxia-crowd-keys`) | 登録済み API キーの SHA-256 ハッシュとテナント ID |
 | `COORDINATOR` | Durable Object (`Coordinator`) | キュー、ノード状態、WebSocket、レート制限 |
 | `CORS_ORIGINS` | var | 許可オリジン（カンマ区切り、ワイルドカード可） |
 | `RATE_LIMIT_MAX` | var | IP あたりの 1 分間のリクエスト上限 |
@@ -80,6 +87,47 @@ API_KEYS = "fc_live_example_a:tenant-a,fc_live_example_b:tenant-b"
 3. サーバー側クライアント／プロキシを `new_key` に切り替える。
 4. 動作確認後、`API_KEYS=new_key` に更新して旧キーを失効させる。
 5. `VITE_*` 等、ブラウザbundleへ展開される環境変数にAPIキーを置かない。
+
+## D1 による API キー登録（追加ホストなど）
+
+`API_KEYS` Secret を書き換えずにキーを追加できる。`api_keys` テーブルには
+キー自身ではなく **`SHA-256(キーの UTF-8 バイト)` の小文字 64 桁 hex** だけを保存する
+（`security.ts` の `resolveTenantIdFromDb` と同じ形式。`sha256=` プレフィックスや
+base64 は付けない）。Worker は受け取った Bearer トークンを同じ方法でハッシュ化して照合する。
+
+スキーマは `migrations/0001_api_keys.sql` にあり、Wrangler が期待する
+`0001_<name>.sql` の命名に従う。デプロイ workflow が `wrangler deploy` の前に
+`npx wrangler d1 migrations apply flaxia-crowd-keys --remote` を実行する。
+適用済みマイグレーションは D1 の `d1_migrations` テーブルに記録され、SQL 自体も
+`CREATE TABLE IF NOT EXISTS` なので再実行は冪等である。手動で適用する場合も同じ
+コマンドを `packages/worker` で実行する。
+
+登録手順（以下は `packages/worker` をカレントディレクトリとして実行する）:
+
+```bash
+# キーは argv に渡さない。シェル履歴に残したくない場合は read -s を使う（bash）。
+read -rsp 'API key: ' API_KEY; echo
+API_KEY="$API_KEY" node scripts/add-api-key.mjs --tenant tenant-b --execute
+```
+
+- `API_KEY` 環境変数が無い場合は stdin から読む。例:
+  `printf '%s' "$API_KEY" | node scripts/add-api-key.mjs --tenant tenant-b --execute`
+- `--execute` を外すと INSERT 文を標準出力するだけで、D1 は変更しない。
+  出力にはハッシュとテナント ID のみが含まれ、生キーは決して表示されない。
+- `--tenant` を省略すると既定値は `key-<ハッシュの先頭 16 桁>` になる。これは
+  `API_KEYS` にテナントを明示しなかったレガシーキーと同じ安定 ID で、
+  キーごとに別テナントになる（安全な既定値）。
+
+登録結果の確認（ハッシュだけが表示されるので安全）:
+
+```bash
+npx wrangler d1 execute flaxia-crowd-keys --remote \
+  --command "SELECT key_hash, tenant_id FROM api_keys WHERE tenant_id = 'tenant-b';"
+# 期待値の確認: printf '%s' "$API_KEY" | sha256sum
+```
+
+`key_hash` は小文字 64 桁の hex（`sha256sum` の出力と同じ値）、`tenant_id` は
+指定したテナント（または既定の `key-...`）になる。
 
 ## ノード登録フロー（HMACトークン）
 

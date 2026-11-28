@@ -52,5 +52,14 @@ jobs:
       - name: Validate the Worker configuration
         run: npm run deploy:worker -- --dry-run
 
+      # The Worker resolves D1-backed API keys, so the schema must exist before
+      # the new code is deployed. This is idempotent: Wrangler records applied
+      # migrations in d1_migrations and the SQL uses CREATE TABLE IF NOT EXISTS,
+      # so re-running it on every tag deploy is safe. Run from packages/worker
+      # so Wrangler finds wrangler.toml and its migrations_dir binding.
+      - name: Apply D1 migrations
+        working-directory: packages/worker
+        run: npx wrangler d1 migrations apply flaxia-crowd-keys --remote
+
       - name: Deploy the Worker
         run: npm run deploy:worker
