@@ -28,6 +28,18 @@ function deploy() {
   const workerRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
   const packageJson = JSON.parse(readFileSync(resolve(workerRoot, 'package.json'), 'utf8'))
 
+  // The workflow performs the same check before running tests/deploy; keep it
+  // here too so a mismatched tag cannot deploy even if the workflow is edited.
+  const expectedTag = `crowd-v${packageJson.version}`
+  if (refName !== expectedTag) {
+    console.error(
+      `deploy_version_mismatch: tag ${refName ?? '<unset>'} does not match ` +
+      `packages/worker/package.json version ${packageJson.version} (expected ${expectedTag})`,
+    )
+    process.exitCode = 1
+    return
+  }
+
   function validSha(value) {
     const sha = value?.trim()
     return sha && /^[a-f0-9]{7,40}$/i.test(sha) ? sha : undefined

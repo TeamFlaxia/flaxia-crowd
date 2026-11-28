@@ -11,3 +11,4 @@ export * from './resources';
 export * from './model-cache';
 export * from './handshake';
 export * from './flow-control';
+export * from './host-security';

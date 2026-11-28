@@ -2,119 +2,91 @@
 
 ## 概要
 
-`POST /crowd/tasks` にタスクを投入するロジック。
+`FlaxiaClient.submit()` が `POST /crowd/tasks` にタスクを投入する。
+投入は即時レスポンスを返すだけであり、完了まで待つ場合は別途
+`waitForTask()` を呼ぶ（[03-polling.md](03-polling.md)）。
 
-## TaskSubmitOptions 型定義
-
-```typescript
-type WorkloadType = 'ai-inference' | 'image-process' | 'file-convert'
-
-type TaskSubmitOptions = {
-  /** 実行するワークロードの種別 */
-  workload: WorkloadType
-  /** ワークロード固有のペイロード（04-types.md参照） */
-  payload: AiInferencePayload | ImageProcessPayload | FileConvertPayload
-  /**
-   * タスク完了まで待つ最大時間 ms
-   * デフォルト: 60000（60秒）
-   * この時間を超えると FlaxiaTimeoutError が throw される
-   */
-  waitTimeoutMs?: number
-  /**
-   * ポーリング間隔 ms
-   * デフォルト: 2000（2秒）
-   */
-  pollIntervalMs?: number
-}
-
-type TaskSubmitAsyncOptions = {
-  workload: WorkloadType
-  payload: unknown
-  /**
-   * 完了時にPOSTするURL（HTTPS必須）
-   * 省略不可（非同期モードなのでコールバックがないと結果を受け取れない）
-   */
-  callbackUrl: string
-}
-```
-
-## リクエスト・レスポンス
+## 実際のAPI（`src/client.ts` / `src/types.ts`）
 
 ```typescript
-// POST /crowd/tasks
-// Request body
-type SubmitRequest = {
+interface FlaxiaClientConfig {
+  /** API キー（必須）。空文字は AuthenticationError。 */
+  apiKey: string
+  /** オーケストレーター URL。既定は 'https://api.flaxia.crowd'。 */
+  baseUrl?: string
+}
+
+interface SubmitTaskOptions {
   workload: WorkloadType
-  payload: unknown
+  payload: TaskPayload
+  /** 完了時に POST する Webhook URL（HTTPS かつ公開ホストのみ）。 */
   callbackUrl?: string
-  timeoutMs: number
+  /** タスクの実行タイムアウト ms（1,000..3,600,000）。待ち時間ではない。 */
+  timeoutMs?: number
+  /** スケジューリング優先度 0..3。 */
+  priority?: 0 | 1 | 2 | 3
 }
 
-// Response (200 OK)
-type SubmitResponse = {
+/** submit() の戻り値。完全な TaskRecord ではなく部分スナップショット。 */
+interface SubmitTaskResponse {
+  message: string
   taskId: string
-  id: string
-  status: 'pending'
-  createdAt: number
-  /** GET /crowd/subscribe に必要な短期トークン（既定 10 分）。 */
+  id: string            // taskId と同じ値
+  status: TaskStatus
+  createdAt: number     // unix ms
+  /** /crowd/subscribe 用の短期トークン（既定 10 分）。 */
   subscribeToken?: string
   subscribeTokenExpiresAt?: number
 }
 ```
 
-## submit() の実装イメージ
+`waitTimeoutMs` / `pollIntervalMs` / `submitAsync()` は**存在しない**。
+待ち時間は `waitForTask(taskId, intervalMs, timeoutMs)` の引数で指定する。
+
+## 使い方
 
 ```typescript
-async submit<T>(options: TaskSubmitOptions): Promise<TaskResult<T>> {
-  // 1. タスク投入
-  const { taskId } = await this.request<SubmitResponse>('POST', '/crowd/tasks', {
-    workload: options.workload,
-    payload: options.payload,
-    timeoutMs: options.waitTimeoutMs ?? 60_000,
-  })
+import { FlaxiaClient } from '@flaxia/sdk'
 
-  // 2. ポーリングで結果待ち（03-polling.md参照）
-  return this.pollUntilDone<T>(taskId, {
-    waitTimeoutMs: options.waitTimeoutMs ?? 60_000,
-    pollIntervalMs: options.pollIntervalMs ?? 2_000,
-  })
-}
+const client = new FlaxiaClient({ apiKey: process.env.FLAXIA_API_KEY! })
+
+const submitted = await client.submit({
+  workload: 'ai-inference',
+  payload: {
+    task: 'text-generation',
+    model: 'Xenova/distilbert-base-uncased-finetuned-sst-2-english',
+    input: 'This is amazing!',
+  },
+  timeoutMs: 60_000,
+  priority: 2,
+})
+
+// submitted.taskId は文字列。結果は waitForTask() で取得する。
+const task = await client.waitForTask(submitted.taskId)
+if (task.status === 'done') console.log(task.result)
 ```
 
-## submitAsync() の実装イメージ
-
-```typescript
-async submitAsync(options: TaskSubmitAsyncOptions): Promise<{ id: string }> {
-  if (!options.callbackUrl.startsWith('https://')) {
-    throw new FlaxiaValidationError('callbackUrl must be HTTPS')
-  }
-
-  const { taskId } = await this.request<SubmitResponse>('POST', '/crowd/tasks', {
-    workload: options.workload,
-    payload: options.payload,
-    callbackUrl: options.callbackUrl,
-    timeoutMs: 300_000,  // 非同期なので長めに設定
-  })
-
-  return { id: taskId }
-}
-```
+`submit()` は入力が空なら `ValidationError`、API キー不正なら `AuthenticationError`、
+Worker が拒否した場合は `FlaxiaError`（`code: 'SUBMIT_ERROR'`、`status` は HTTP ステータス）を投げる。
+`callbackUrl` は Worker で HTTPS・公開ホスト・既定ポート・署名シークレット設定済みか検証される。
+`payload.allowedSites` は **未実装** のため、付けて投入すると `400`（unsupported）で拒否される。
 
 ## Webhookペイロード（コールバック受信側）
 
 ```typescript
-// callbackUrl に届くPOSTのbody
-type WebhookPayload = {
+// parseCrowdWebhook() が返す型（src/webhook.ts）
+interface CrowdWebhookEvent<TResult = unknown> {
   taskId: string
   status: 'done' | 'failed'
-  result?: unknown
+  /** 結果のエンベロープ。実payloadは result.output（無い場合は result 自体）。 */
+  result?: { output?: TResult; [key: string]: unknown }
   error?: string
-  /** 結果を出したノード（監査用）。 */
-  nodeId?: string
-  /** 受理した配信試行（監査用）。 */
-  attemptId?: string
 }
 ```
+
+Worker が送る生の本文には監査用の `nodeId` / `attemptId` も入るが、
+`parseCrowdWebhook()` の戻り値には含まれない。監査に使うなら検証済みの
+生の本文を別途記録すること。結果の取り出しには `extractCallbackOutput(event)` を使う。
 
 ### 検証（必須）
 
@@ -152,7 +124,5 @@ app.post('/api/crowd/webhook', async (c) => {
 
 - タイムスタンプ許容は既定 300 秒（`toleranceSeconds` で変更可）。
 - nonce は必須。`replayGuard` を渡すと同一 nonce の再送を `replayed_nonce` で拒否する。
-- 既に検証済みの本文は従来どおり `parseCrowdWebhook()` でパースできる。
-- **署名は配送の真正性のみを示し、結果の正しさは保証しない**。
-  ノードは実行した値をそのまま報告するため、下流の意思決定に使う場合は
+- 署名は配送の真正性のみを示し、結果の正しさは保証しない。下流の意思決定に使う場合は
   再実行・サンプリング検証を組み合わせ、`nodeId` / `attemptId` を記録すること。

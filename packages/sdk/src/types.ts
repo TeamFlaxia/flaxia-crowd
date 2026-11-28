@@ -664,12 +664,11 @@ export interface EmbedGemmaResult {
 /** Scheduling hints any workload payload may carry. */
 export interface TaskPayloadRouting {
   /**
-   * Optional allow-list of node site ids. When set, the coordinator only hands
-   * the task to nodes whose signed registration token carries one of these
-   * site ids, and fails the task if no such node appears before its deadline.
-   *
-   * Note: a volunteer node necessarily sees the payload it executes, so this
-   * restricts *which* sites see it, not whether a node can read it.
+   * NOT IMPLEMENTED — do not use. The worker rejects any submission carrying
+   * this field with `400` (`allowedSites is unsupported`), because there is no
+   * verified site identity and the coordinator would skip the task until its
+   * queue deadline. The field is kept only for wire compatibility with older
+   * task records; new tasks never carry it.
    */
   allowedSites?: string[];
 }
@@ -701,8 +700,8 @@ export interface TaskRecord {
    */
   tenantId: string;
   /**
-   * Optional site allow-list copied from `payload.allowedSites`. When present,
-   * only nodes whose signed token carries a matching `siteId` may run the task.
+   * Legacy field from `payload.allowedSites`. NOT IMPLEMENTED: new submissions
+   * with an allow-list are rejected with 400. Older records may still carry it.
    */
   allowedSites?: string[];
   /** Caller-selected scheduling class. Lower values age into fair service. */

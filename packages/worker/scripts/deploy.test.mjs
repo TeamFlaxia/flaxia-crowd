@@ -11,6 +11,10 @@ import { fileURLToPath } from 'node:url'
 const workerRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const repoRoot = resolve(workerRoot, '../..')
 const skipWindows = { skip: process.platform === 'win32' }
+const workerPackage = JSON.parse(readFileSync(join(workerRoot, 'package.json'), 'utf8'))
+const workerLock = JSON.parse(readFileSync(join(workerRoot, 'package-lock.json'), 'utf8'))
+const matchingTag = `crowd-v${workerPackage.version}`
+const mismatchedTag = 'crowd-v0.0.0'
 
 // Copy deploy.mjs into an isolated fixture: the fake `npx` on PATH is the only
 // thing that can answer a deploy call, and the fixture git repo supplies a SHA.
@@ -52,7 +56,7 @@ const invokeDeploy = (root, env) => execFileSync(
   { cwd: root, env, stdio: 'pipe' },
 )
 
-function assertDeployRejected({ root, env, output }) {
+function assertDeployRejected({ root, env, output }, reason = /deploy_requires_tag/) {
   let error
   try {
     invokeDeploy(root, env)
@@ -61,7 +65,7 @@ function assertDeployRejected({ root, env, output }) {
   }
   assert.ok(error, 'deploy should have failed')
   assert.equal(error.status, 1)
-  assert.match(String(error.stderr ?? ''), /deploy_requires_tag/)
+  assert.match(String(error.stderr ?? ''), reason)
   assert.equal(existsSync(output), false, 'wrangler must not be invoked')
 }
 
@@ -77,23 +81,35 @@ test('root deploy forwards flags and reports only a clean checkout SHA', skipWin
     writeFileSync(join(worker, 'changed.ts'), 'modified')
     args = run()
     assert.ok(args.includes('WORKER_COMMIT_SHA:unknown'))
-  }, { refType: 'tag', refName: 'crowd-v0.7.1' })
+  }, { refType: 'tag', refName: matchingTag })
 })
 
 test('deploy without tag ref information fails before calling wrangler', skipWindows, () => {
   withFixture(assertDeployRejected)
 })
 
+test('deploy rejects a crowd tag whose version does not match package.json', skipWindows, () => {
+  withFixture(
+    (fixture) => assertDeployRejected(fixture, /deploy_version_mismatch/),
+    { refType: 'tag', refName: mismatchedTag },
+  )
+})
+
+test('worker package-lock version matches package.json', () => {
+  assert.equal(workerLock.version, workerPackage.version)
+  assert.equal(workerLock.packages[''].version, workerPackage.version)
+})
+
 for (const [label, refs] of [
   ['main branch push', { refType: 'branch', refName: 'main' }],
-  ['branch named like a crowd tag', { refType: 'branch', refName: 'crowd-v0.7.1' }],
+  ['branch named like a crowd tag', { refType: 'branch', refName: matchingTag }],
   ['tag named main', { refType: 'tag', refName: 'main' }],
-  ['node sdk tag', { refType: 'tag', refName: 'node-v0.7.1' }],
-  ['tag name without ref type', { refName: 'crowd-v0.7.1' }],
+  ['node sdk tag', { refType: 'tag', refName: 'node-v0.0.0' }],
+  ['tag name without ref type', { refName: matchingTag }],
   ['forged tag env outside GitHub Actions', {
     actions: false,
     refType: 'tag',
-    refName: 'crowd-v0.7.1',
+    refName: matchingTag,
   }],
 ]) {
   test(`deploy rejects ${label}`, skipWindows, () => {

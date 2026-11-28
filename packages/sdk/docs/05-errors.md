@@ -1,105 +1,85 @@
 # 05. エラーハンドリング
 
-## エラークラス階層
+## 実際のエラークラス（`src/errors.ts`）
 
 ```
 Error
-└── FlaxiaError               基底クラス（すべてのFlaxiaエラー）
-    ├── FlaxiaCrowdError      オーケストレーターからのエラーレスポンス
-    ├── FlaxiaTimeoutError    ポーリングタイムアウト
-    ├── FlaxiaValidationError 入力値不正
-    └── FlaxiaNetworkError    ネットワークエラー・fetchの失敗
+└── FlaxiaError                        基底（message / code / status）
+    ├── AuthenticationError            code: AUTH_ERROR, status: 401
+    ├── TaskNotFoundError              code: TASK_NOT_FOUND, status: 404
+    ├── ValidationError                code: VALIDATION_ERROR, status: 400
+    └── OndeviceUnavailableError       code: ONDEVICE_UNAVAILABLE, status: 500
 ```
 
-## クラス定義
+`FlaxiaCrowdError` / `FlaxiaTimeoutError` / `FlaxiaValidationError` /
+`FlaxiaNetworkError` は**存在しない**。時間切れや HTTP エラーは `FlaxiaError` の
+`code` / `status` で表現する。
 
 ```typescript
 class FlaxiaError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'FlaxiaError'
-  }
+  constructor(message: string, public code: string, public status?: number)
 }
 
-class FlaxiaCrowdError extends FlaxiaError {
-  constructor(
-    message: string,
-    /** オーケストレーターが返したエラーコード */
-    public readonly code: string,
-    /** HTTPステータスコード */
-    public readonly statusCode: number
-  ) {
-    super(message)
-    this.name = 'FlaxiaCrowdError'
-  }
-}
-
-class FlaxiaTimeoutError extends FlaxiaError {
-  constructor(public readonly taskId: string) {
-    super(`Task ${taskId} did not complete within the specified timeout`)
-    this.name = 'FlaxiaTimeoutError'
-  }
-}
-
-class FlaxiaValidationError extends FlaxiaError {
-  constructor(message: string) {
-    super(message)
-    this.name = 'FlaxiaValidationError'
-  }
-}
-
-class FlaxiaNetworkError extends FlaxiaError {
-  constructor(message: string, public readonly cause: unknown) {
-    super(message)
-    this.name = 'FlaxiaNetworkError'
-  }
-}
+new AuthenticationError()                    // 'Invalid API Key', AUTH_ERROR, 401
+new TaskNotFoundError(taskId)                // 'Task not found: <id>', TASK_NOT_FOUND, 404
+new ValidationError(message)                 // VALIDATION_ERROR, 400
+new OndeviceUnavailableError(message, detail) // ONDEVICE_UNAVAILABLE, 500
 ```
 
-## エラーコード一覧（FlaxiaCrowdErrorのcode）
+## 実在する `code` / `status`
 
-| code | statusCode | 意味 |
-|------|-----------|------|
-| `UNAUTHORIZED` | 401 | APIキーが無効 |
-| `TASK_NOT_FOUND` | 404 | タスクIDが存在しない |
-| `TASK_FAILED` | 500 | タスクがリトライ上限に達して失敗 |
-| `QUEUE_FULL` | 503 | キューが満杯（しばらく待って再試行） |
-| `INVALID_PAYLOAD` | 400 | ペイロードが不正 |
-| `MODEL_TOO_LARGE` | 400 | モデルサイズ上限超過 |
-| `UNSUPPORTED_WORKLOAD` | 400 | 対応していないworkload |
+| code | status | 発生箇所 |
+|------|--------|---------|
+| `AUTH_ERROR` | 401 | `FlaxiaClient` の API キー未指定、`AuthenticationError` |
+| `VALIDATION_ERROR` | 400 | `submit()` の引数不正、`ValidationError` |
+| `TASK_NOT_FOUND` | 404 | `getTask()` / `waitForTask()` が 404 を受け取った場合 |
+| `ONDEVICE_UNAVAILABLE` | 500 | on-device 専用実行が不可能な場合 |
+| `SUBMIT_ERROR` | Worker の HTTP ステータス | `submit()` が非 2xx を受け取った場合 |
+| `FETCH_ERROR` | Worker の HTTP ステータス | `getTask()` / `getQueueStats()` の非 2xx |
+| `POLLING_TIMEOUT` | 408 | `waitForTask()` が期限までに端末状態へ到達しなかった場合 |
+| `SUBSCRIBE_UNAUTHORIZED` | 401 | `subscribe()` にトークンが無い場合 |
+| `WS_CONNECT_ERROR` | 0 | WebSocket 接続失敗 |
 
-## 使い方（ユーザー向けドキュメント想定）
+Worker が返す JSON の `{ error: string }` は `message` としてそのまま使われる。
+`status` は HTTP ステータス（`FetchError` 相当の通信障害では NetworkError ではなく
+`FlaxiaError` の `FETCH_ERROR` となる）。
+
+## 使い方
 
 ```typescript
-import { FlaxiaClient, FlaxiaCrowdError, FlaxiaTimeoutError } from '@flaxia/sdk'
+import { FlaxiaClient, FlaxiaError, TaskNotFoundError } from '@flaxia/sdk'
+
+const client = new FlaxiaClient({ apiKey: process.env.FLAXIA_API_KEY! })
 
 try {
-  const result = await client.submit({ ... })
+  const submitted = await client.submit({
+    workload: 'ai-inference',
+    payload: { task: 'text-generation', model: 'm', input: 'hi' },
+  })
+  const task = await client.waitForTask(submitted.taskId)
+  if (task.status === 'failed') console.error(task.error)
+  else console.log(task.result)
 } catch (err) {
-  if (err instanceof FlaxiaTimeoutError) {
-    console.log('処理が時間内に完了しませんでした。タスクID:', err.taskId)
-    // あとでclient.getTask(err.taskId)で確認できる
-  } else if (err instanceof FlaxiaCrowdError) {
-    if (err.code === 'QUEUE_FULL') {
-      console.log('混雑しています。しばらく後に再試行してください')
-    } else {
-      console.log('エラー:', err.message, err.code)
-    }
+  if (err instanceof TaskNotFoundError) {
+    console.error('タスクが見つからない:', err.message)
+  } else if (err instanceof FlaxiaError) {
+    console.error('Flaxia エラー:', err.code, err.status, err.message)
   } else {
-    throw err  // 予期しないエラーは再throw
+    throw err
   }
 }
 ```
 
-## FlaxiaTimeoutError後の結果確認
+## タイムアウト後の結果確認
 
-タイムアウトしてもタスク自体はWorker上で処理継続中の場合がある。
-`taskId` を保存しておけば後から結果を取得できる：
+`waitForTask()` が `POLLING_TIMEOUT` を投げてもタスク自体は Worker 上で継続している
+可能性がある。`taskId` を保存しておけば後から `getTask()` で確認できる。
 
 ```typescript
-// タイムアウト後、数分後に確認
-const result = await client.getTask(savedTaskId)
-if (result.status === 'done') {
-  // 完了していた
-}
+const savedTaskId = submitted.taskId
+const task = await client.getTask(savedTaskId)
+if (task.status === 'done') console.log(task.result)
 ```
+
+Webhook の検証エラー（`verifyCrowdWebhook()` の `result.reason`）は別体系であり、
+`FlaxiaError` ではない（[02-submit-task.md](02-submit-task.md) 参照）。

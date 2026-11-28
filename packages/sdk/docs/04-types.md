@@ -92,12 +92,8 @@ type FileConvertPayload = {
 ```typescript
 type TaskPayloadRouting = {
   /**
-   * 実行を許可するノードサイト ID の allow-list。
-   * 指定時は署名済みノードトークンの siteId が一致するノードだけに割り当て、
-   * 期限までに候補が現れなければタスクを失敗させる。
-   *
-   * 注意: 実行するノードはペイロードそのものを読める。allow-list は
-   * 「どのサイトに渡すか」を絞るだけで、内容の秘匿は保証しない。
+   * NOT IMPLEMENTED。サイト所有の検証手段が無いため、Worker はこのフィールドを
+   * 付けた投入を 400（unsupported）で拒否する。古いレコードとの互換用に型だけ残る。
    */
   allowedSites?: string[]
 }
@@ -108,7 +104,7 @@ type TaskPayloadRouting = {
 | フィールド | 型 | 説明 |
 |-----------|-----|------|
 | `tenantId` | `string` | 所有テナント（API キーから解決）。他テナントからは 404 |
-| `allowedSites` | `string[]?` | サイト allow-list の写し |
+| `allowedSites` | `string[]?` | 未実装。古いレコード用の互換フィールド（新規投入は 400 拒否） |
 | `resultNodeId` | `string?` | 結果を受理したノード（監査用） |
 | `resultAttemptId` | `string?` | 結果を受理した配信試行（監査用） |
 | `subscribeToken` | `string?` | API 応答のみ。`/crowd/subscribe` 用の短期トークン |

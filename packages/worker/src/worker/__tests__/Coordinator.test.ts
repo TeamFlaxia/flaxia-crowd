@@ -2,7 +2,7 @@ import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, vi } from 'vitest';
 import type { NodeResourceReport, NodeModelCacheSnapshot, TaskRecord } from '@flaxia/sdk';
 import { MAX_RESOURCE_CAPACITY_BYTES, THEIA_DLLM_MODEL_ID, verifyCrowdWebhook } from '@flaxia/sdk';
-import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK, THEIA_MAX_PENDING_TTL_MS, pendingTtlMs, resolveWarmModelId, resolveWarmTarget, taskTimeoutMs } from '../Coordinator';
+import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_RESULT_BYTES, MAX_SUBSCRIBERS_PER_TASK, THEIA_MAX_PENDING_TTL_MS, pendingTtlMs, resolveWarmModelId, resolveWarmTarget, taskTimeoutMs, validateResultPayload } from '../Coordinator';
 import { parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
 
@@ -1700,3 +1700,28 @@ async function connectAndAssign(nodeId: string): Promise<{ task: TaskRecord; nod
 function jsonFrames(node: NodeSocket): any[] {
   return node.frames.filter((f): f is string => typeof f === 'string').map((f) => JSON.parse(f));
 }
+
+describe('validateResultPayload enforces the 4 MiB UTF-8 byte budget', () => {
+  it('accepts a payload just under the byte cap', () => {
+    // A 3-byte CJK character: 3 MiB of text plus JSON overhead stays below 4 MiB.
+    const result = { output: 'あ'.repeat(1_000_000) };
+    expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBeLessThan(MAX_RESULT_BYTES);
+    expect(validateResultPayload(result)).toEqual({ ok: true });
+  });
+
+  it('rejects multibyte text whose code-unit count fits but UTF-8 bytes do not', () => {
+    // 1.5M UTF-16 code units used to pass the old `serialized.length` check,
+    // while the actual UTF-8 JSON body is ~4.5 MiB.
+    const result = { output: 'あ'.repeat(1_500_000) };
+    expect(JSON.stringify(result).length).toBeLessThan(MAX_RESULT_BYTES);
+    expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBeGreaterThan(MAX_RESULT_BYTES);
+    expect(validateResultPayload(result)).toEqual({ ok: false, reason: 'result is too large' });
+  });
+
+  it('rejects non-objects and unserializable values', () => {
+    expect(validateResultPayload([])).toEqual({ ok: false, reason: 'result must be an object' });
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(validateResultPayload(cyclic)).toEqual({ ok: false, reason: 'result is not serializable' });
+  });
+});

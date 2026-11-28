@@ -27,6 +27,17 @@ jobs:
 
       - run: npm ci
 
+      - name: Verify tag matches the Worker version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(node -p "require('./packages/worker/package.json').version")
+          expected="crowd-v$version"
+          if [ "$REF_NAME" != "$expected" ]; then
+            echo "::error::Tag $REF_NAME does not match packages/worker/package.json version $version (expected $expected)"
+            exit 1
+          fi
+
       - name: Build @flaxia/sdk
         run: npm run build --workspace=@flaxia/sdk
 

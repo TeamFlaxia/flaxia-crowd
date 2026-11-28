@@ -1,4 +1,4 @@
-import { isTheiaExpertCapability, type WarmModelRange } from '@flaxia/sdk';
+import { isTheiaExpertCapability, isSafePublicUrl, type WarmModelRange } from '@flaxia/sdk';
 
 const encoder = new TextEncoder();
 
@@ -260,135 +260,13 @@ export async function createWebhookSignature(
 
 // --- callbackUrl validation (SSRF guard) ---
 
-function parseIPv4(host: string): number | null {
-  const parts = host.split('.');
-  if (parts.length !== 4) return null;
-  let ip = 0;
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) return null;
-    const n = parseInt(part, 10);
-    if (n > 255) return null;
-    ip = (ip << 8) | n;
-  }
-  return ip >>> 0;
-}
-
-function isPrivateIPv4(ip: number): boolean {
-  const a = ip >>> 24;
-  const b = (ip >>> 16) & 0xff;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 198 && (b === 18 || b === 19 || b === 51)) ||
-    (a === 192 && (b === 0 || b === 2 || b === 168)) ||
-    (a === 203 && b === 0)
-  );
-}
-
-/** Parse an IPv6 literal (without URL brackets) into eight 16-bit groups. */
-function parseIPv6(host: string): number[] | null {
-  const h = host.toLowerCase();
-  if (!h.includes(':')) return null;
-  const halves = h.split('::');
-  if (halves.length > 2) return null;
-  const parseGroups = (part: string): number[] | null => {
-    if (part === '') return [];
-    const groups = part.split(':');
-    const result: number[] = [];
-    for (let i = 0; i < groups.length; i++) {
-      const group = groups[i];
-      if (group.includes('.')) {
-        if (i !== groups.length - 1) return null;
-        const ipv4 = parseIPv4(group);
-        if (ipv4 === null) return null;
-        result.push((ipv4 >>> 16) & 0xffff, ipv4 & 0xffff);
-      } else {
-        if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
-        result.push(parseInt(group, 16));
-      }
-    }
-    return result;
-  };
-  const head = parseGroups(halves[0]);
-  if (head === null) return null;
-  if (halves.length === 1) return head.length === 8 ? head : null;
-  const tail = parseGroups(halves[1]);
-  if (tail === null) return null;
-  const zeroGroups = 8 - head.length - tail.length;
-  if (zeroGroups < 1) return null;
-  return [...head, ...new Array<number>(zeroGroups).fill(0), ...tail];
-}
-
-function isNonPublicIPv4(ip: number): boolean {
-  const a = ip >>> 24;
-  const b = (ip >>> 16) & 0xff;
-  return (
-    isPrivateIPv4(ip) ||
-    a >= 224 ||
-    (a === 192 && b === 88 && ((ip >>> 8) & 0xff) === 99) ||
-    (a === 192 && b === 0 && ((ip >>> 8) & 0xff) === 0 && (ip & 0xff) !== 9 && (ip & 0xff) !== 10)
-  );
-}
-
-function isPrivateIPv6(host: string): boolean {
-  const groups = parseIPv6(host);
-  if (!groups) return true;
-  const first = groups[0];
-  // Reject non-global/special-use ranges conservatively. Webhook destinations
-  // should be globally routable literals; special translation/relay ranges can
-  // otherwise embed private IPv4 addresses.
-  if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
-  if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
-  if ((first & 0xff00) === 0xff00) return true; // ff00::/8 multicast
-  if (first === 0x0100 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0) return true; // discard-only 100::/64
-  if (first === 0x0064 && groups[1] === 0xff9b) return true; // NAT64 well-known and local-use prefixes
-  if (first === 0x2001 && groups[1] === 0x0db8) return true; // documentation
-  if (first === 0x2001 && (groups[1] & 0xfe00) === 0) return true; // special-purpose 2001::/23
-  if (first === 0x2002) return true; // 6to4 can encode non-global IPv4
-
-  const firstFiveZero = groups.slice(0, 5).every(group => group === 0);
-  if (firstFiveZero) {
-    // Reject unspecified, loopback and IPv4-compatible encodings. For mapped
-    // addresses, apply a broader non-public IPv4 denylist to the embedded IP.
-    if (groups[5] === 0) return true;
-    if (groups[5] === 0xffff) return isNonPublicIPv4(((groups[6] << 16) | groups[7]) >>> 0);
-  }
-  return false;
-}
-
-function isSafeHostname(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-  if (!host || host === 'localhost' || host === '0.0.0.0') return false;
-  if (/.+\.(local|internal)$/.test(host) || /\.internal\./.test(host)) return false;
-  if (host.endsWith('.localhost')) return false;
-
-  const ipv4 = parseIPv4(host);
-  if (ipv4 !== null) return !isPrivateIPv4(ipv4);
-
-  if (host.includes(':')) return !isPrivateIPv6(host);
-
-  return true;
-}
-
+/**
+ * Host/IP rules live in `@flaxia/sdk` so the worker, the node egress guard and
+ * payload URL validation all reject the same addresses. Validation is repeated
+ * at delivery time because stored task records can outlive submission and may
+ * have been created by an older deployment.
+ */
 export function validateCallbackUrl(raw: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return null;
-  }
-  // Webhooks are always HTTPS and must never target a literal private host.
-  // This validation is repeated at delivery time because stored task records
-  // can outlive submission and may have been created by an older deployment.
-  if (url.protocol !== 'https:' || !isSafeHostname(url.hostname)) return null;
-  // Match the node egress guard: only the default HTTPS port. A public host
-  // on an arbitrary port is an SSRF-adjacent surface (internal service on a
-  // public hostname, or a redirect to an internal port).
-  if (url.port && Number(url.port) !== 443) return null;
-  return url.toString();
+  const url = isSafePublicUrl(raw);
+  return url ? url.toString() : null;
 }

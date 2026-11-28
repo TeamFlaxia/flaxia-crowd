@@ -430,20 +430,25 @@ describe('#3 tenant isolation of task reads', () => {
     expect(resp.status).toBe(401);
   });
 
-  it('stores the site allow-list on the task', async () => {
+  it('fails fast on an unsupported site allow-list instead of queuing a dead task', async () => {
     const env = makeEnv({ API_KEYS: 'key-sites:tenant-sites' });
     const submit = await submitTask(
       'key-sites',
       { workload: 'ai-inference', payload: { task: 't', allowedSites: ['trusted.example'] } },
       env,
     );
-    expect(submit.status).toBe(200);
-    const { taskId } = await submit.json() as { taskId: string };
-    const record = await readStoredTask('tenant-sites', taskId);
-    expect(record?.allowedSites).toEqual(['trusted.example']);
+    expect(submit.status).toBe(400);
+    const body = await submit.json() as { error?: string; taskId?: string };
+    expect(body.error).toMatch(/allowedSites.*unsupported|unsupported.*allowedSites/i);
+    expect(body.taskId).toBeUndefined();
+    // No record is stored: the submission never reaches the coordinator queue.
+    const stub = testEnv.COORDINATOR.get(testEnv.COORDINATOR.idFromName('global-coordinator'));
+    const stored = await runInDurableObject(stub, (instance) =>
+      (instance as any).ctx.storage.list({ prefix: 'task:tenant-sites:' }) as Promise<Map<string, unknown>>);
+    expect([...stored.keys()]).toHaveLength(0);
   });
 
-  it('rejects a malformed site allow-list', async () => {
+  it('rejects every allowedSites value, including malformed ones, with 400', async () => {
     const env = makeEnv({ API_KEYS: 'key-sites-bad:tenant-sites-bad' });
     for (const allowedSites of [[], ['ok', 42], 'trusted.example', Array.from({ length: 20 }, (_, i) => `s${i}`)]) {
       const resp = await submitTask(
@@ -452,6 +457,8 @@ describe('#3 tenant isolation of task reads', () => {
         env,
       );
       expect(resp.status).toBe(400);
+      const body = await resp.json() as { error?: string };
+      expect(body.error).toMatch(/unsupported/i);
     }
   });
 });

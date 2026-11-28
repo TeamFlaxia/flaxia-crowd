@@ -41,20 +41,33 @@ const BLOCKED_HOSTS = [
   '224.0.0.1',
   '255.255.255.255',
   '[ff02::1]',
-  // names
+  // translation / relay / documentation IPv6 ranges
+  '[64:ff9b::a00:1]', // NAT64 64:ff9b::/96
+  '64:ff9b::a00:1',
+  '[64:ff9b:1::a00:1]', // NAT64 local-use 64:ff9b:1::/48
+  '[2002:0a00:0001::1]', // 6to4 carrying 10.0.0.1
+  '[2001::1]', // Teredo 2001::/32
+  '[2001:db8::1]', // documentation 2001:db8::/32
+  // names, including trailing-dot bypasses
   'localhost',
+  'localhost.',
   'foo.local',
+  'foo.local.',
   'metadata.internal',
+  'metadata.internal.',
   'service.home.arpa',
+  'service.home.arpa.',
 ];
 
 const ALLOWED_HOSTS = [
   'example.com',
+  'example.com.', // fully qualified public name
   'cdn.jsdelivr.net',
   'huggingface.co',
   '8.8.8.8',
   '1.1.1.1',
   '[2606:4700:4700::1111]',
+  '[2001:4860:4860::8888]',
 ];
 
 describe('egress guard host rules', () => {
@@ -89,8 +102,23 @@ describe('egress guard host rules', () => {
   });
 
   it('rejects malformed IPv6 literals instead of passing them through', () => {
-    expect(isBlockedIPv6('1:2:3:4:5:6:7')).toBe(false); // unparseable
+    expect(isBlockedIPv6('1:2:3:4:5:6:7')).toBe(true); // unparseable -> fail closed
     expect(() => assertPublicHostname('[1:2:3:4:5:6:7]')).toThrow(/invalid IPv6 literal/);
+  });
+
+  it('blocks the exact bypass forms reported for egress URLs', () => {
+    for (const url of [
+      'https://localhost./payload.wasm',
+      'https://foo.local./payload.wasm',
+      'https://metadata.internal./token',
+      'https://[64:ff9b::192:168:1:1]/payload.wasm',
+      'https://[64:ff9b:1::1]/payload.wasm',
+      'https://[2002:0a00:0001::1]/payload.wasm',
+      'https://[2001::1]/payload.wasm',
+      'https://[2001:db8::1]/payload.wasm',
+    ]) {
+      expect(() => assertPublicUrl(url), url).toThrow(/Egress blocked/);
+    }
   });
 });
 

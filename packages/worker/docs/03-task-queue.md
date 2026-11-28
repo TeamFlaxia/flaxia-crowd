@@ -51,7 +51,7 @@ type TaskRecord = {
   payload: unknown
   createdAt: number       // unixtime ms
   tenantId: string        // API キーから解決した所有テナント
-  allowedSites?: string[] // payload.allowedSites の写し（サイト allow-list）
+  allowedSites?: string[] // 未実装。古いレコード用の互換フィールド（新規投入は400拒否）
   assignedAt?: number
   completedAt?: number
   assignedNodeId?: string
@@ -86,7 +86,7 @@ type TaskRecord = {
 | テナント別 pending | 50 | `429` |
 | テナント別 enqueue | 60/分 | `429` |
 | pending TTL | `queuedAt + min(timeoutMs, cap)` (`theia-inference` の cap は 30 分、他は 5 分) | `alarm()` が恒久失敗 |
-| `minNodes` / `maxNodes` | 1..16 | `400` |
+| `priority` | 0..3（省略時は既定値） | 範囲外は `400` |
 | 1 パスで見る pending | 32 件 | 残りは次回のパス |
 
 `tryAssignAll` はノードレコードを 1 回だけ読み込み、キュー先頭 32 件だけを

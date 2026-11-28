@@ -52,8 +52,12 @@ await client.submit({
 ```
 
 ## エラーハンドリング
-- `FlaxiaTimeoutError`: タイムアウトが発生した場合
-- `FlaxiaValidationError`: パラメータが不正な場合
+
+実在するクラスは `FlaxiaError`（基底）と `AuthenticationError` /
+`TaskNotFoundError` / `ValidationError` / `OndeviceUnavailableError` のみ。
+`waitForTask()` のタイムアウトは `FlaxiaError`（`code: 'POLLING_TIMEOUT'`、
+`status: 408`）、引数不正は `ValidationError` としてthrowされる。
+詳細は [SDK エラーガイド](../packages/sdk/docs/05-errors.md)。
 
 ## Common Crawl 抽出 (cc-extract)
 

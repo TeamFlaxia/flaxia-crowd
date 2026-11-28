@@ -54,7 +54,7 @@ const controller = initFlaxiaNode({
 | `consent.privacyPolicyUrl` | `string` | no | プライバシーポリシーへのリンク（http/https のみ） |
 | `consent.minVisibleMs` | `number` | no | 同意ボタンが有効になるまでの最低表示時間。**延長のみ**（下限1500ms） |
 | `consent.onConsentRequired` | `(controls: ConsentControls) => void` | no | ホスト独自の同意UIを使う場合に指定。指定すると内蔵バナーは表示されない |
-| `maxCpuLoad` | `number` | no | CPU負荷制限（未実装） |
+| `maxCpuLoad` | `number` | no | CPU負荷の上限（0..1）。`WorkerPool` の `CpuThrottle` とモバイルライフサイクルの判定に使用（省略時は自動調整） |
 
 ### ホスト独自の同意UI（オプトインが必要）
 

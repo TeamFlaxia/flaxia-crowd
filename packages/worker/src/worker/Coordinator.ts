@@ -267,9 +267,10 @@ export function validateResultPayload(result: unknown): { ok: true } | { ok: fal
     return { ok: false, reason: "result is not serializable" };
   }
   if (serialized === undefined) return { ok: false, reason: "result is not serializable" };
-  // Character count, not bytes: UTF-16 code units bound the serialized form
-  // within a factor of two, which is enough for a DoS ceiling.
-  if (serialized.length > MAX_RESULT_BYTES) return { ok: false, reason: "result is too large" };
+  // The cap is a byte budget, not a UTF-16 code-unit count: multibyte text
+  // could otherwise occupy ~3x MAX_RESULT_BYTES after UTF-8 encoding.
+  const bytes = new TextEncoder().encode(serialized).byteLength;
+  if (bytes > MAX_RESULT_BYTES) return { ok: false, reason: "result is too large" };
   return { ok: true };
 }
 

@@ -56,14 +56,19 @@ private connections: Map<string, WebSocket>
 
 1. `capabilities` に対象 `workload` が含まれるノードに絞る
 2. `lowMemory` ノードは heavy ワークロードから除外する
-3. `allowedSites` があるタスクはトークン由来の `siteId` が一致するノードのみ
-4. **累計割り当て数（`assignedCount`）が最も少ないノード**を選ぶ
-5. 同率なら自己申告 `cpuLoad` を 0.25 刻みに量子化した値が低い順
-6. さらに同率なら `connectedAt` が古い順（先着優先）
+3. `allowedSites` は **未実装**。古いレコードは一律スキップされ、
+   新しい投入は API 境界で 400 拒否される（`07-trust-plane.md` 参照）
+4. **ウォームモデル（ベース＋アダプタ）→ ウォームベース** の順に優先
+5. 同率なら実測 GPU 完了時間が短い順（未計測は後ろ）
+6. 同率なら既知のメモリ容量（`wasmMemoryBytes`）が大きい順
+7. 同率なら累計割り当て数（`assignedCount`）が少ない順
+8. 同率なら自己申告 `cpuLoad` が低い順
+9. 同率なら `connectedAt` が古い順（先着優先）、最後に nodeId で安定化
 
-`cpuLoad` は検証できない自己申告値なので、主キーにはしない。
-「割り当て数の少ないノード優先」により、負荷 0 を偽って申告しても
-キューを独占できない（詳細は `07-trust-plane.md`）。
+実装は `src/worker/scheduler.ts:rankPlacementCandidates()` が唯一の真実の源泉。
+`cpuLoad` は検証できない自己申告値なので主キーにはしない。ウォーム状態・実測値・
+容量・割り当て数が先に比較されるため、負荷 0 を偽って申告してもキューを
+独占できない（詳細は `07-trust-plane.md`）。
 
 ## ノード identity（Issue #5）
 

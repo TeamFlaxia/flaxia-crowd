@@ -9,7 +9,7 @@ Crowd orchestration Worker and Durable Object coordinator.
 - `POST /crowd/nodes/register` returns a short-lived signed node token.
 - `WS /crowd/signal` receives node connections; bearer tokens travel only in the WebSocket subprotocol.
 
-Task payloads may include `allowedSites: string[]` to restrict execution to a site. **This restriction currently fails closed**: node registration is public and a submitted `siteId` is only a claim, not proof that the node controls that site. No node will satisfy the restriction until a cryptographically verified site proof is implemented. Do not rely on `siteId` claims for access control.
+`payload.allowedSites` is **NOT IMPLEMENTED**. A submitted `siteId` is only an unverified claim, so the coordinator cannot honor a site allow-list. `POST /crowd/tasks` rejects any task carrying `allowedSites` with `400` (`unsupported`); older records that still carry the field are skipped by the scheduler. Do not rely on `siteId` claims for access control.
 
 ## Configuration
 

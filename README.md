@@ -60,8 +60,11 @@ npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0
 訪問者のリソース利用には明示的な同意が必須です。
 
 - **リソース制限**: CPU使用率は最大15%（動画再生相当）。バックグラウンドタブでは自動停止。
-- **匿名性**: 処理内容はサイト側に一切開示されません。
-- **管理**: 同意状態はlocalStorageに保持（デフォルト30日）。
+- **プライバシー**: ペイロードは実行するボランティアノードに渡され、そのノードでは
+  内容を読み取れます（サイトallow-listは未実装）。結果をサイト側に渡すかどうかは
+  ホスト側の設計に依存します。詳細は
+  [07-trust-plane.md](packages/worker/docs/07-trust-plane.md) を参照。
+- **管理**: 同意状態はlocalStorageに保持（デフォルト180日）。
 
 ---
 

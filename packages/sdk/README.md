@@ -41,9 +41,11 @@ console.log(result)
 
 | メソッド | 引数 | 戻り値 | 説明 |
 |---------|------|--------|------|
-| `submit()` | `SubmitTaskOptions` | `Promise<TaskRecord>` | タスクを投入し、即座に taskId を返す |
+| `submit()` | `SubmitTaskOptions` | `Promise<SubmitTaskResponse>` | タスクを投入し、`taskId` / `id` 等を含む部分レスポンスを即座に返す |
 | `getTask()` | `taskId: string` | `Promise<TaskRecord>` | タスクの状態を取得 |
-| `waitForTask()` | `taskId, intervalMs?, timeoutMs?` | `Promise<TaskRecord>` | 完了するまでポーリング（デフォルト: 2s間隔, 60sタイムアウト） |
+| `waitForTask()` | `taskId, intervalMs?, timeoutMs?` | `Promise<TaskRecord>` | 完了または失敗まで待機（デフォルト: 2s間隔, 60sタイムアウト）。失敗は `error` 付きのレコード、期限切れは `FlaxiaError` |
+| `subscribe()` | `taskId, options?` | `Promise<TaskSubscription>` | ストリームトークンと完了結果を WebSocket で購読 |
+| `getQueueStats()` | なし | `Promise<TaskQueueStats>` | 自テナントのキュー統計 |
 
 ### 対応ワークロード
 
@@ -63,7 +65,8 @@ console.log(result)
 | `AuthenticationError` | 401 | `AUTH_ERROR` |
 | `TaskNotFoundError` | 404 | `TASK_NOT_FOUND` |
 | `ValidationError` | 400 | `VALIDATION_ERROR` |
-| `FlaxiaError` | 可変 | 可変（基本クラス） |
+| `OndeviceUnavailableError` | 500 | `ONDEVICE_UNAVAILABLE` |
+| `FlaxiaError` | 可変 | 可変（基本クラス。`POLLING_TIMEOUT` / `SUBMIT_ERROR` 等） |
 
 ## 型定義
 

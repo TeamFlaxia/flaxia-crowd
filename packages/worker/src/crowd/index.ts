@@ -24,6 +24,7 @@ import {
   NODE_SIGNAL_PROTOCOL,
   SUBSCRIBE_PROTOCOL,
   parseBearerSubprotocol,
+  isSafePublicUrl,
 } from '@flaxia/sdk'
 import {
   createNodeToken,
@@ -66,9 +67,7 @@ function isLowMemoryNode(
   if (typeof wasmMemoryBytes === 'number') return wasmMemoryBytes < LOW_MEMORY_WASM_BYTES
   return deviceMemory == null || deviceMemory < LOW_MEMORY_DEVICE_GIB
 }
-/** Upper bound on `payload.allowedSites` entries. */
-const MAX_ALLOWED_SITES = 16
-/** Upper bound on a single site id. */
+/** Upper bound on a single site id (registration still accepts siteId). */
 const MAX_SITE_ID_CHARS = 128
 /** Upper bound on the number of capabilities a node may advertise. */
 const MAX_NODE_CAPABILITIES = 32
@@ -81,6 +80,16 @@ function originAllowed(origin: string, env: Env): boolean {
   const allowed = (env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
   if (allowed.length === 0) return true
   return allowed.some(pattern => originMatchesPattern(origin, pattern))
+}
+
+/**
+ * Media URLs are fetched by volunteer nodes, so an `https://` prefix alone is
+ * not enough: localhost/private hosts, credentials, odd ports and trailing-dot
+ * name tricks must be rejected here before a task occupies a volunteer slot.
+ * Uses the same SDK helper as the callback and node egress checks.
+ */
+function isSafeMediaUrl(value: unknown): boolean {
+  return typeof value === 'string' && isSafePublicUrl(value) !== null
 }
 
 /**
@@ -204,13 +213,13 @@ export function validateAiInferencePayload(payload: unknown): string | null {
       return 'payload.decision.imageUrls must hold 0..8 URLs'
     }
     for (const url of (Array.isArray(imageUrls) ? imageUrls : [])) {
-      if (typeof url !== 'string' || !url.startsWith('https://')) {
-        return 'payload.decision.imageUrls must be https:// URLs'
+      if (!isSafeMediaUrl(url)) {
+        return 'payload.decision.imageUrls must be public https:// URLs'
       }
     }
     const audioUrl = decision.audioUrl
-    if (audioUrl !== undefined && (typeof audioUrl !== 'string' || !audioUrl.startsWith('https://'))) {
-      return 'payload.decision.audioUrl must be an https:// URL'
+    if (audioUrl !== undefined && !isSafeMediaUrl(audioUrl)) {
+      return 'payload.decision.audioUrl must be a public https:// URL'
     }
     if (Array.isArray(imageUrls) && imageUrls.length > 0 && audioUrl !== undefined) {
       return 'payload.decision: pass images or audio in one call, not both'
@@ -247,17 +256,17 @@ export function validateVectorEmbedPayload(payload: unknown): string | null {
     return 'payload.imageUrls must hold 0..29 URLs'
   }
   for (const url of (Array.isArray(imageUrls) ? imageUrls : [])) {
-    if (typeof url !== 'string' || !url.startsWith('https://')) {
-      return 'payload.imageUrls must be https:// URLs'
+    if (!isSafeMediaUrl(url)) {
+      return 'payload.imageUrls must be public https:// URLs'
     }
   }
   const audioUrl = body.audioUrl
-  if (audioUrl !== undefined && (typeof audioUrl !== 'string' || !audioUrl.startsWith('https://'))) {
-    return 'payload.audioUrl must be an https:// URL'
+  if (audioUrl !== undefined && !isSafeMediaUrl(audioUrl)) {
+    return 'payload.audioUrl must be a public https:// URL'
   }
   const videoUrl = body.videoUrl
-  if (videoUrl !== undefined && (typeof videoUrl !== 'string' || !videoUrl.startsWith('https://'))) {
-    return 'payload.videoUrl must be an https:// URL'
+  if (videoUrl !== undefined && !isSafeMediaUrl(videoUrl)) {
+    return 'payload.videoUrl must be a public https:// URL'
   }
   const hasText = typeof text === 'string' && text.length > 0
   const hasMedia = (Array.isArray(imageUrls) && imageUrls.length > 0) || audioUrl !== undefined || videoUrl !== undefined
@@ -320,6 +329,7 @@ export function validateCcExtractPayload(payload: unknown): string | null {
         const parsed = new URL(record.fetchUrl)
         if (parsed.protocol !== 'https:') return 'payload.records[].fetchUrl must use https'
         if (parsed.username || parsed.password) return 'payload.records[].fetchUrl must not carry credentials'
+        if (!isSafeMediaUrl(record.fetchUrl)) return 'payload.records[].fetchUrl must use a public https:// host'
       } catch {
         return 'payload.records[].fetchUrl must be a valid URL'
       }
@@ -398,27 +408,16 @@ export function validateEmbedGemmaPayload(payload: unknown): string | null {
 }
 
 /**
- * Read the optional `payload.allowedSites` allow-list. Returns an error message
- * when the value is malformed, or `undefined` sites when the task is open.
+ * `allowedSites` is NOT IMPLEMENTED: there is no verified site identity, so the
+ * coordinator skips every such task until its queue deadline. Reject the
+ * submission instead of letting it sit in the queue and fail later. The
+ * `TaskRecord` field remains for wire compatibility with older records.
  */
 export function parseAllowedSites(payload: unknown): { sites?: string[]; error?: string } {
   if (!payload || typeof payload !== 'object') return {}
   const value = (payload as Record<string, unknown>).allowedSites
   if (value === undefined || value === null) return {}
-  if (!Array.isArray(value) || value.length === 0) {
-    return { error: 'payload.allowedSites must be a non-empty array of site ids' }
-  }
-  if (value.length > MAX_ALLOWED_SITES) {
-    return { error: `payload.allowedSites must contain at most ${MAX_ALLOWED_SITES} entries` }
-  }
-  const sites: string[] = []
-  for (const entry of value) {
-    if (typeof entry !== 'string' || !entry || entry.length > MAX_SITE_ID_CHARS) {
-      return { error: 'payload.allowedSites entries must be non-empty site id strings' }
-    }
-    sites.push(entry)
-  }
-  return { sites }
+  return { error: 'payload.allowedSites is unsupported (NOT IMPLEMENTED); submit without an allow-list' }
 }
 
 const app: Hono<{ Bindings: Env }> = new Hono<{ Bindings: Env }>()

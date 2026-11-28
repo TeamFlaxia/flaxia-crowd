@@ -29,7 +29,28 @@ describe('resultLimits', () => {
   it('handles primitives and null-like values', () => {
     expect(estimateSerializedBytes(null)).toBe(0);
     expect(estimateSerializedBytes(undefined)).toBe(0);
-    expect(estimateSerializedBytes(42)).toBe(16);
-    expect(estimateSerializedBytes('abcd')).toBe(8);
+    expect(estimateSerializedBytes(42)).toBe(24);
+    expect(estimateSerializedBytes('abcd')).toBe(14);
+  });
+
+  it('counts UTF-8 bytes, so multibyte text near the cap is rejected', () => {
+    // 1.5M Japanese characters serialize to ~4.5 MiB of UTF-8 even though
+    // their UTF-16 code-unit count is below the 4 MiB budget.
+    const multibyte = { output: 'あ'.repeat(1_500_000) };
+    const realBytes = new TextEncoder().encode(JSON.stringify(multibyte)).byteLength;
+    expect(realBytes).toBeGreaterThan(MAX_TASK_RESULT_BYTES);
+    expect(estimateSerializedBytes(multibyte)).toBeGreaterThanOrEqual(realBytes);
+    expect(isResultWithinLimit(multibyte)).toBe(false);
+
+    const within = { output: 'あ'.repeat(1_000_000) };
+    const withinBytes = new TextEncoder().encode(JSON.stringify(within)).byteLength;
+    expect(withinBytes).toBeLessThan(MAX_TASK_RESULT_BYTES);
+    expect(isResultWithinLimit(within)).toBe(true);
+  });
+
+  it('counts object keys and escapes as part of the serialized budget', () => {
+    const escaped = { 'キー': '\n\u0000"\\' };
+    const realBytes = new TextEncoder().encode(JSON.stringify(escaped)).byteLength;
+    expect(estimateSerializedBytes(escaped)).toBeGreaterThanOrEqual(realBytes);
   });
 });

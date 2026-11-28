@@ -17,21 +17,22 @@
 - `POST /crowd/tasks` は呼び出し元テナントを記録し、
   `GET /crowd/tasks/:id` / `/crowd/subscribe` / Webhook はすべてそのテナントに閉じる。
 
-## 2. サイト allow-list
+## 2. サイト allow-list（NOT IMPLEMENTED）
 
-- ノードの `siteId` は **署名済みノードトークン**から取り出す
-  （`/crowd/signal` が `site` として DO に渡す）。リクエストボディ由来の値は使わない。
-- タスクは `payload.allowedSites: string[]` で許可サイトを宣言できる。
-  指定時は `siteId` が一致するノードだけに割り当て、期限までに候補が現れなければ
-  `No eligible node for the requested sites` で失敗させる。
+- **未実装**。ノードの `siteId` は署名済みノードトークンから取り出す
+  （`/crowd/signal` が `site` として DO に渡す）が、サイト所有の証明は存在しない。
+  そのため `payload.allowedSites` を付けたタスクは Coordinator が
+  割り当てず、キュー TTL 後に恒久失敗していた。
+- 現在は `POST /crowd/tasks` の検証で `allowedSites` 付きの投入を
+  **`400`（`unsupported (NOT IMPLEMENTED)`）で即時拒否**する。キューに積まれない。
+  `TaskRecord.allowedSites` は古いレコードとの互換のためだけに残っている。
 
 ### 残存リスク（重要）
 
-ボランティアノードは**実行するペイロードそのものを読める**。allow-list は
-「どのサイトのノードに渡すか」を絞るだけで、渡したノードが内容を見ることを
-防ぐものではない。機密性が必要な入力は、ホスト側で暗号化するか、
-信頼できるサイトのノードのみを登録する運用（`CORS_ORIGINS` と
-`siteId` の管理）で担保すること。
+ボランティアノードは**実行するペイロードそのものを読める**。仮に allow-list が
+存在しても「どのサイトのノードに渡すか」を絞るだけで、渡したノードが内容を見る
+ことを防ぐものではない。機密性が必要な入力はホスト側で暗号化し、信頼できる
+ノードのみを登録する運用（`CORS_ORIGINS` と `siteId` の管理）で担保すること。
 
 ## 3. 配信試行（attempt）と結果の真正性（Issue #4 / #21）
 
@@ -41,8 +42,11 @@
 - `result` / `error` / `progress` は
   **(a) 現在の `attemptId` を持つ**、**(b) その配信を受け取ったソケットから届く**
   の両方を満たす場合のみ受理する。それ以外は状態を一切変更せず破棄する。
-- `result` は「プレーンオブジェクト」かつ直列化後 4 MiB 以下（`MAX_RESULT_BYTES`）
-  のみ受理する。壊れた/過大な結果は done にせず、失敗にもしない（捨てる）。
+- `result` は「プレーンオブジェクト」かつ **UTF-8 直列化後 4 MiB 以下**
+  （`MAX_RESULT_BYTES`）のみ受理する。文字数 rather than バイト数で見ると
+  UTF-16 の文字数で見ると多バイト文字で上限を約 3 倍超過できるため、
+  `TextEncoder` で実バイトを測る。
+  壊れた/過大な結果は done にせず、失敗にもしない（捨てる）。
 - `progress` のトークンは文字列かつ 4 KB 以下、タスクごとに毎秒 50 件まで。
   違反は転送せず破棄する。
 - 監査のため、受理した結果のノード ID と attempt ID を
@@ -61,8 +65,10 @@
   - `wasmMemoryBytes` は 16 GiB にクランプ。
   - `warmModels` は非負整数・`start < end`・`end <= 4096` のみ受理。
   - `cpuLoad` は有限数値のみ採用（不正値は前回値を保持）。
-- 割り当ては「累計割り当て数の少ないノード優先 → 負荷バケット → 接続時刻」で、
-  負荷を偽って 0 と申告しても独占できない。
+- 割り当て順は `scheduler.ts:rankPlacementCandidates()` の実装に従い、
+  **ウォームモデル / ウォームベース → 実測 GPU → 既知容量 → 累計割り当て数 →
+  自己申告負荷 → 接続時刻**（同率なら nodeId）の順。負荷を偽って 0 と申告しても
+  それより前の骨子が優先されるため独占できない。
 
 ## 5. キューとファンアウトの上限（Issue #6）
 
