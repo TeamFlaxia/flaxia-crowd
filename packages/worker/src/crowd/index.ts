@@ -77,6 +77,16 @@ const MAX_CAPABILITY_CHARS = 64
 /** Upper bound on a warm-model repository id. */
 const MAX_WARM_MODEL_ID_CHARS = 128
 
+/**
+ * Guard for caller-supplied ids, mirroring the `SAFE_ID` rule used by the other
+ * Flaxia surfaces: no separators or encoded punctuation can reach a storage key.
+ */
+const SAFE_ID = /^[A-Za-z0-9_.:-]{1,128}$/
+
+function isSafeId(value: unknown): value is string {
+  return typeof value === 'string' && SAFE_ID.test(value)
+}
+
 function originAllowed(origin: string, env: Env): boolean {
   const allowed = (env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
   if (allowed.length === 0) return true
@@ -832,6 +842,32 @@ app.get('/tasks/:id', async (c) => {
     subscribeToken,
     subscribeTokenExpiresAt: subscribeToken ? Date.now() + SUBSCRIBE_TOKEN_TTL_MS : undefined,
   })
+})
+
+/**
+ * Cancel a task owned by the calling tenant. The tenant is part of the
+ * coordinator's storage key, so another tenant's id is a 404, never a
+ * settlement of someone else's task.
+ */
+app.post('/tasks/:id/cancel', async (c) => {
+  const tenantId = await resolveCallerTenant(c.env, c.req.header('Authorization'))
+  if (!tenantId) return c.json({ error: 'Unauthorized' }, 401)
+
+  const id = c.req.param('id')
+  if (!isSafeId(id)) return c.json({ error: 'Invalid task id' }, 400)
+
+  const stub = getCoordinator(c)
+  const resp = await stub.fetch(
+    `http://internal/cancel/${encodeURIComponent(tenantId)}/${encodeURIComponent(id)}`,
+    { method: 'POST' },
+  )
+  if (resp.status === 404) return c.json({ error: 'Not found' }, 404)
+  if (!resp.ok) return c.json({ error: 'Failed to cancel task' }, 502)
+
+  // Pending tasks are failed permanently; processing tasks get the coordinator's
+  // internal `abort` frame before being settled. Done/failed tasks come back
+  // unchanged, so repeating a cancel is harmless.
+  return c.json(await resp.json() as TaskRecord)
 })
 
 export { app as crowdApp }

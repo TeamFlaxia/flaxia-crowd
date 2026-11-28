@@ -2,7 +2,7 @@ import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, vi } from 'vitest';
 import type { NodeResourceReport, NodeModelCacheSnapshot, TaskRecord } from '@flaxia/sdk';
 import { MAX_RESOURCE_CAPACITY_BYTES, THEIA_DLLM_MODEL_ID, verifyCrowdWebhook } from '@flaxia/sdk';
-import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_RESULT_BYTES, MAX_SUBSCRIBERS_PER_TASK, THEIA_MAX_PENDING_TTL_MS, pendingTtlMs, resolveWarmModelId, resolveWarmTarget, taskTimeoutMs, validateResultPayload } from '../Coordinator';
+import { ALARM_INTERVAL_MS, CANCELLED_BY_CALLER, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_RESULT_BYTES, MAX_SUBSCRIBERS_PER_TASK, THEIA_MAX_PENDING_TTL_MS, pendingTtlMs, resolveWarmModelId, resolveWarmTarget, taskTimeoutMs, validateResultPayload } from '../Coordinator';
 import { parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
 
@@ -563,6 +563,26 @@ describe('Coordinator', () => {
     const aborts = jsonFrames(connected).filter((f) => f.type === 'abort');
     expect(aborts).toHaveLength(1);
     expect(aborts[0]).toMatchObject({ taskId: task.id, error: 'Task timed out' });
+  });
+
+  it('cancels a processing task permanently and aborts its assigned node', async () => {
+    stub = newStub();
+    const { task, node } = await connectAndAssign('node-cancel');
+
+    const resp = await stub.fetch(`http://internal/cancel/${TENANT}/${task.id}`, { method: 'POST' });
+    expect(resp.status).toBe(200);
+    const cancelled = await resp.json() as TaskRecord;
+    expect(cancelled).toMatchObject({ status: 'failed', error: CANCELLED_BY_CALLER, retryCount: 0 });
+
+    const aborts = jsonFrames(node).filter(f => f.type === 'abort');
+    expect(aborts).toHaveLength(1);
+    expect(aborts[0]).toMatchObject({ taskId: task.id, error: CANCELLED_BY_CALLER });
+
+    // Terminal tasks are returned as-is, and another tenant cannot cancel it.
+    const again = await stub.fetch(`http://internal/cancel/${TENANT}/${task.id}`, { method: 'POST' });
+    expect(await again.json()).toMatchObject({ status: 'failed', error: CANCELLED_BY_CALLER });
+    const foreign = await stub.fetch(`http://internal/cancel/${OTHER_TENANT}/${task.id}`, { method: 'POST' });
+    expect(foreign.status).toBe(404);
   });
 
   it('fails a task permanently once MAX_RETRIES is reached', async () => {

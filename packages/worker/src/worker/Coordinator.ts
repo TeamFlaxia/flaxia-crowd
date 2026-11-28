@@ -34,6 +34,8 @@ import {
 import { orderPendingTasks, parseTenantSchedulingWeights, TASK_PRIORITY_DEFAULT, type PendingTaskSummary } from "./queue-scheduler";
 
 export const DEFAULT_TIMEOUT_MS = 60000;
+/** Permanent failure recorded when the owning caller cancels a task. */
+export const CANCELLED_BY_CALLER = 'cancelled_by_caller';
 export const MAX_RETRIES = 3;
 export const STALE_NODE_MS = 60000;
 export const ALARM_INTERVAL_MS = 30000;
@@ -326,6 +328,18 @@ export class Coordinator extends DurableObject<Env> {
       const task = await this.getTask(parts[1], parts[0]);
       if (!task) return new Response("Not found", { status: 404 });
       return Response.json(task);
+    }
+
+    // `/cancel/<tenantId>/<taskId>` is only called by the authenticated worker
+    // route. The tenant is part of the key, so cancellation can never settle a
+    // task in another tenant's namespace.
+    if (url.pathname.startsWith("/cancel/")) {
+      if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+      const parts = url.pathname.slice("/cancel/".length).split("/").map(decodeURIComponent);
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        return new Response("Not found", { status: 404 });
+      }
+      return this.handleCancel(parts[1], parts[0]);
     }
 
     return new Response("Not Found", { status: 404 });
@@ -1135,6 +1149,23 @@ export class Coordinator extends DurableObject<Env> {
         taskId, status: 'failed', error: task.error,
       });
     }
+  }
+
+  /**
+   * Cancel a task on behalf of its owning tenant. Cancellation is permanent:
+   * `failTask` sends the existing `abort` control frame to the assigned node,
+   * retires the attempt, releases the node's reservation and removes the task
+   * from both pending queues — without the transient-retry path. Tasks already
+   * in a terminal state are returned untouched, making retries idempotent.
+   */
+  private async handleCancel(taskId: string, tenantId: string): Promise<Response> {
+    const task = await this.getTask(taskId, tenantId);
+    if (!task) return new Response("Not found", { status: 404 });
+    if (task.status === "done" || task.status === "failed") return Response.json(task);
+
+    await this.failTask(taskId, CANCELLED_BY_CALLER, undefined, true, true);
+    const settled = await this.getTask(taskId, tenantId);
+    return Response.json(settled ?? task);
   }
 
   private async releaseNode(nodeId: string, taskId?: string, generation?: string) {
