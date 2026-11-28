@@ -146,7 +146,9 @@ function releaseLoadedCaches(): void {
     try { release(); } catch {}
   }
   cacheReleasers.clear();
-  cacheSnapshotters.clear();
+  // Snapshotters stay registered: they only sample metadata, and dropping them
+  // would make the next heartbeat report empty entries even though the models
+  // are still warm. A later task re-registers (and overwrites) them anyway.
 }
 
 function getModelCacheSnapshot(): NodeModelCacheSnapshot {
@@ -169,10 +171,23 @@ function getModelCacheSnapshot(): NodeModelCacheSnapshot {
   return { version: 1, sampledAt, expiresAt: sampledAt + 60_000, entries };
 }
 
+function cancelIdleEviction(): void {
+  if (idleEvictTimer === null) return;
+  clearTimeout(idleEvictTimer);
+  idleEvictTimer = null;
+}
+
 function armIdleEviction(): void {
-  if (idleEvictTimer) clearTimeout(idleEvictTimer);
+  cancelIdleEviction();
   idleEvictTimer = setTimeout(() => {
     idleEvictTimer = null;
+    // A timer queued before a task arrived can still win the race. Never drop
+    // caches from under a running workload: defer to the next idle period
+    // instead (the task's `finally` will re-arm again when it completes).
+    if (activeTaskId !== null) {
+      armIdleEviction();
+      return;
+    }
     releaseLoadedCaches();
   }, IDLE_EVICT_MS);
 }
@@ -270,6 +285,10 @@ self.onmessage = async (e: MessageEvent) => {
   }
 
   const { id, workload, payload, config } = data;
+  // An idle eviction queued before this task arrived must not fire mid-task.
+  // The timer is re-armed only by the task's inner `finally` (or the outer
+  // catch for failures that never reach it).
+  cancelIdleEviction();
   if (config?.theiaAdapterPins) {
     const dllm = await import('../workloads/friedflaxia/dllm');
     dllm.setAdapterPins(config.theiaAdapterPins);
@@ -362,5 +381,8 @@ self.onmessage = async (e: MessageEvent) => {
     if (activeTaskId === id) activeTaskId = null;
     releaseTokenFlow(id);
     self.postMessage({ id, type: 'error', error, errorCode, errorStatus, permanent, detail, modelCache: getModelCacheSnapshot() });
+    // Failures before the inner try/finally (e.g. CPU slot rejection) never
+    // reach its re-arm, so the idle timer must be restored here as well.
+    armIdleEviction();
   }
 };
