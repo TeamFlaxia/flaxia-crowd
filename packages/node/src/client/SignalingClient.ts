@@ -26,6 +26,7 @@ import {
   buildNodeSignalProtocols,
   buildWsUrl,
 } from '@flaxia/sdk';
+import { supportedTheiaExperts } from '../workloads/friedflaxia/dllm';
 
 import type { ConsentState, FlaxiaNodeController, NodeConfig, WorkloadType } from '@flaxia/sdk';
 import type { AiInferencePayload, AiInferenceResult } from '@flaxia/sdk';
@@ -46,6 +47,24 @@ function validatedHttpsOrigins(origins?: readonly string[]): string[] {
     }
   }
   return [...valid];
+}
+
+/**
+ * Advertise only experts this node can actually serve. The pin list is read
+ * from the environment at register time, and an incapable node has already
+ * had `theia-inference` filtered out of `capabilities`, so neither case may
+ * attract expert-routed tasks.
+ *
+ * Browsers have no `process.env`: an unavailable pin list simply means no
+ * expert is advertised rather than failing registration.
+ */
+function expertCapabilitiesFor(capabilities: readonly WorkloadType[]): string[] {
+  if (!capabilities.includes('theia-inference')) return [];
+  try {
+    return supportedTheiaExperts().map((id) => `theia-expert-${id}`);
+  } catch {
+    return [];
+  }
 }
 
 export interface TaskMessage {
@@ -362,8 +381,10 @@ class SignalingClient {
         capabilities = capabilities.filter((cap) => cap !== 'cc-extract');
       }
 
+      const expertCapabilities = expertCapabilitiesFor(capabilities);
+
       log(
-        `register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)}`,
+        `register capability probe capable=${capable} wasmMemoryBytes=${wasmMemoryBytes} capabilities=${JSON.stringify(capabilities)} experts=${JSON.stringify(expertCapabilities)}`,
       );
 
       const base = this.config.orchestratorUrl.replace(/\/+$/, '');
@@ -377,6 +398,9 @@ class SignalingClient {
           // random id and binds the token to it, so a node cannot claim another
           // node's identity (or displace a live socket).
           capabilities,
+          // LoRA experts are advertised only when the node can run the base
+          // dLLM and has a verified adapter pin for each expert id.
+          expertCapabilities,
           // Only nodes with an explicit trusted-origin list can receive file refs.
           fileSources: validatedHttpsOrigins(this.config.fileSourceOrigins).length > 0,
           // Measured WASM memory the device could actually commit (bytes), or 0

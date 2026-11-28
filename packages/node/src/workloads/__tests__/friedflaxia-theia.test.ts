@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TheiaCanvas, TheiaInferencePayload } from '@flaxia/sdk';
 import { MAX_THEIA_CANVAS_CHARS, MAX_THEIA_RESULT_DELTAS, THEIA_DLLM_MODEL_ID } from '@flaxia/sdk';
 import type { DllmModel, DllmTopKOutput } from '../../vendor/friedflaxia/types';
@@ -11,7 +11,16 @@ import {
   tokenizeCanvas,
 } from '../friedflaxia/theia';
 import { handleTheiaInference } from '../theia';
-import { DLLM_MODEL_ID } from '../friedflaxia/dllm';
+import { DLLM_MODEL_ID, supportedTheiaExperts } from '../friedflaxia/dllm';
+import { PermanentTaskError } from '../../executor/errors';
+
+// The workload boundary loads the expert model lazily. Keep that seam mockable
+// so pin routing can be tested without downloading or compiling the wasm dLLM.
+const { loadDllmMock } = vi.hoisted(() => ({ loadDllmMock: vi.fn() }));
+vi.mock('../friedflaxia/dllm', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../friedflaxia/dllm')>();
+  return { ...actual, loadFriedFlaxiaDllm: loadDllmMock };
+});
 
 const SPECIALS: Record<string, number> = {
   '<|im_start|>': 1,
@@ -366,13 +375,6 @@ describe('theia executor', () => {
     expect(result.steps).toBe(4);
   });
 
-  it('rejects an expert that is not loaded', async () => {
-    const model = fakeModel();
-    await expect(runTheiaInference(model, payload({ expert: 'code' }))).rejects.toThrow(
-      /not distributed yet/,
-    );
-  });
-
   it('rejects control tokens in message content', async () => {
     const model = fakeModel();
     await expect(
@@ -414,5 +416,51 @@ describe('theia workload wrapper', () => {
     const model = fakeModel();
     const result = await handleTheiaInference(payload(), undefined, model);
     expect(result.deltas).toHaveLength(2);
+  });
+});
+
+describe('theia expert pins at the workload boundary', () => {
+  const originalPinEnv = process.env.THEIA_LORA_ADAPTERS;
+  const validPin = {
+    url: 'https://models.example/lora-code.bin',
+    sha256: 'a'.repeat(64),
+    maxBytes: 1024,
+  };
+
+  beforeEach(() => {
+    loadDllmMock.mockReset();
+    delete process.env.THEIA_LORA_ADAPTERS;
+  });
+
+  afterEach(() => {
+    if (originalPinEnv === undefined) delete process.env.THEIA_LORA_ADAPTERS;
+    else process.env.THEIA_LORA_ADAPTERS = originalPinEnv;
+  });
+
+  it('runs an expert task when its adapter is pinned', async () => {
+    process.env.THEIA_LORA_ADAPTERS = JSON.stringify({ code: validPin });
+    loadDllmMock.mockImplementation(async (expert?: string) => fakeModel({ loraExpert: expert }));
+
+    const result = await handleTheiaInference(payload({ expert: 'code' }));
+
+    expect(supportedTheiaExperts()).toEqual(['code']);
+    expect(loadDllmMock).toHaveBeenCalledWith('code');
+    expect(result.deltas?.[0].expert).toBe('code');
+  });
+
+  it('rejects an expert without a pin as a permanent task error', async () => {
+    // A missing pin is a deployment error, not a transient failure: the loader
+    // contract is to surface it as permanent and the wrapper must not soften it.
+    loadDllmMock.mockImplementation(async (expert?: string) => {
+      if (expert && !supportedTheiaExperts().includes(expert)) {
+        throw new PermanentTaskError(`theia-inference: no adapter pin for expert '${expert}'`, 'EXPERT_NOT_PINNED');
+      }
+      return fakeModel();
+    });
+
+    await expect(handleTheiaInference(payload({ expert: 'code' }))).rejects.toBeInstanceOf(
+      PermanentTaskError,
+    );
+    expect(loadDllmMock).toHaveBeenCalledWith('code');
   });
 });

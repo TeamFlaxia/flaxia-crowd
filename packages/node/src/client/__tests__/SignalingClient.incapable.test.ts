@@ -57,7 +57,38 @@ describe('SignalingClient (incapable device)', () => {
 
     const [, opts] = (global.fetch as any).mock.calls[0];
     expect(JSON.parse(opts.body).capabilities).toEqual([]);
+    expect(JSON.parse(opts.body).expertCapabilities).toEqual([]);
     expect(JSON.parse(opts.body).wasmMemoryBytes).toBe(0);
+  });
+
+  it('does not advertise pinned experts on an incapable node', async () => {
+    const original = process.env.THEIA_LORA_ADAPTERS;
+    process.env.THEIA_LORA_ADAPTERS = JSON.stringify({
+      code: { url: 'https://models.example/lora-code.bin', sha256: 'a'.repeat(64), maxBytes: 1024 },
+    });
+    try {
+      globalThis.WebSocket = vi.fn() as any;
+      mockFetchToken();
+      seedGrantedConsent();
+
+      initFlaxiaNode({
+        orchestratorUrl: 'https://flaxia.app',
+        siteId: 'test-site',
+        consent: { brandName: 'Test', position: 'bottom-right' },
+        capabilities: ['theia-inference'],
+      });
+      await flush();
+      await flush();
+
+      const [, opts] = (global.fetch as any).mock.calls[0];
+      const body = JSON.parse(opts.body);
+      // The heavy workload is filtered out before expert capabilities are derived.
+      expect(body.capabilities).toEqual([]);
+      expect(body.expertCapabilities).toEqual([]);
+    } finally {
+      if (original === undefined) delete process.env.THEIA_LORA_ADAPTERS;
+      else process.env.THEIA_LORA_ADAPTERS = original;
+    }
   });
 
   it('advertises light workloads even when the memory probe fails', async () => {

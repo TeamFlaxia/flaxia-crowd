@@ -120,6 +120,20 @@ function hasEnoughMemoryForHeavyWorkload(): boolean {
   return hasEnoughWasmMemoryForHeavy();
 }
 
+/**
+ * An unconfigured LoRA expert is a deployment error: no retry, on this node or
+ * another one, can make it succeed. The loader/executor surface it as a plain
+ * Error, so classify it here at the task boundary alongside explicit
+ * `PermanentTaskError`s before the coordinator decides to requeue.
+ */
+function isPermanentTheiaError(message: string): boolean {
+  return (
+    /no adapter pin for expert/.test(message) ||
+    /LoRA expert .* is not distributed yet/.test(message) ||
+    /adapter expert mismatch/.test(message)
+  );
+}
+
 // Releasers for lazily-loaded workload modules, so heavyweight model pipelines
 // (transformers / onnxruntime, vector indexes) can be dropped after an idle
 // period instead of pinning hundreds of MB for the life of the worker.
@@ -139,12 +153,15 @@ function getModelCacheSnapshot(): NodeModelCacheSnapshot {
   const sampledAt = Date.now();
   // Dedupe after flatMap on the full cache identity: the text and multimodal
   // snapshotters can report the same manifest id, while a different dtype or
-  // backend is a distinct download.
+  // backend is a distinct download. The adapter id is part of the identity:
+  // a LoRA expert shares the base download but is a separate resident model,
+  // so without it the expert entry would be swallowed by the base entry and
+  // the coordinator would never see a warm expert placement.
   const seen = new Set<string>();
   const entries = [...cacheSnapshotters.values()].flatMap((snapshot) => {
     try { return snapshot().entries; } catch { return []; }
   }).filter((entry) => {
-    const key = `${entry.modelId}\u0000${entry.dtype}\u0000${entry.backend}`;
+    const key = `${entry.modelId}\u0000${entry.dtype}\u0000${entry.backend}\u0000${entry.adapterId ?? ''}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -336,7 +353,7 @@ self.onmessage = async (e: MessageEvent) => {
     const errorCode = typeof errRec?.code === 'string' ? errRec.code : undefined;
     const errorStatus = typeof errRec?.status === 'number' ? errRec.status : undefined;
     const detail = typeof errRec?.detail === 'string' ? errRec.detail : undefined;
-    const permanent = isPermanentTaskError(err);
+    const permanent = isPermanentTaskError(err) || isPermanentTheiaError(error);
     console.error(`[flaxia-node:worker] task error id=${id} workload=${workload} error=${error} permanent=${permanent}`);
     if (activeTaskId === id) activeTaskId = null;
     releaseTokenFlow(id);

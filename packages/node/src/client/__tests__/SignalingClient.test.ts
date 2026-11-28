@@ -127,10 +127,67 @@ describe('SignalingClient', () => {
     expect(JSON.parse(init.body)).toEqual({
       siteId: 'test-site',
       capabilities: ['ai-inference', 'image-process'],
+      expertCapabilities: [],
       fileSources: false,
       wasmMemoryBytes: 4 * 1024 ** 3,
       deviceMemory: null, // jsdom / mobile WebViews do not expose navigator.deviceMemory
     });
+  });
+
+  it('advertises pinned theia experts when theia-inference is requested', async () => {
+    const original = process.env.THEIA_LORA_ADAPTERS;
+    process.env.THEIA_LORA_ADAPTERS = JSON.stringify({
+      code: { url: 'https://models.example/lora-code.bin', sha256: 'a'.repeat(64), maxBytes: 1024 },
+      math: { url: 'https://models.example/lora-math.bin', sha256: 'b'.repeat(64), maxBytes: 1024 },
+    });
+    try {
+      globalThis.WebSocket = vi.fn() as any;
+      mockFetchToken();
+      seedGrantedConsent();
+
+      initFlaxiaNode({
+        orchestratorUrl: 'https://flaxia.app',
+        siteId: 'test-site',
+        consent: { brandName: 'Test', position: 'bottom-right' },
+        capabilities: ['theia-inference'],
+      });
+      await flush();
+      await flush();
+
+      const [, init] = (global.fetch as any).mock.calls[0];
+      const body = JSON.parse(init.body);
+      expect(body.capabilities).toEqual(['theia-inference']);
+      expect(body.expertCapabilities).toEqual(['theia-expert-code', 'theia-expert-math']);
+    } finally {
+      if (original === undefined) delete process.env.THEIA_LORA_ADAPTERS;
+      else process.env.THEIA_LORA_ADAPTERS = original;
+    }
+  });
+
+  it('does not advertise experts when theia-inference is not requested', async () => {
+    const original = process.env.THEIA_LORA_ADAPTERS;
+    process.env.THEIA_LORA_ADAPTERS = JSON.stringify({
+      code: { url: 'https://models.example/lora-code.bin', sha256: 'a'.repeat(64), maxBytes: 1024 },
+    });
+    try {
+      globalThis.WebSocket = vi.fn() as any;
+      mockFetchToken();
+      seedGrantedConsent();
+
+      initFlaxiaNode({
+        orchestratorUrl: 'https://flaxia.app',
+        siteId: 'test-site',
+        consent: { brandName: 'Test', position: 'bottom-right' },
+      });
+      await flush();
+      await flush();
+
+      const [, init] = (global.fetch as any).mock.calls[0];
+      expect(JSON.parse(init.body).expertCapabilities).toEqual([]);
+    } finally {
+      if (original === undefined) delete process.env.THEIA_LORA_ADAPTERS;
+      else process.env.THEIA_LORA_ADAPTERS = original;
+    }
   });
 
   it('advertises file-source and container support only with explicit HTTPS origin allowlists', async () => {
