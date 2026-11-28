@@ -18,6 +18,7 @@ interface NodeRecord {
   currentTaskId?: string;
   siteId?: string;
   assignedCount?: number;
+  awaitingPong?: boolean;
   warmModels?: Array<{ modelId: string; startLayer: number; endLayer: number; downloadedAt: number }>;
   resources?: NodeResourceReport;
   modelCache?: NodeModelCacheSnapshot;
@@ -43,6 +44,45 @@ function makeTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
 
 function taskPath(taskId: string, tenantId = TENANT): string {
   return `http://internal/task/${tenantId}/${taskId}`;
+}
+
+function freshResourceReport(now = Date.now()): NodeResourceReport {
+  const metric = (value: number | string | null, unit: string, source: string, ttl: number) => ({
+    value, unit, source, sampledAt: now, expiresAt: now + ttl, sampleCount: value === null ? 0 : 1,
+  });
+  return {
+    version: 1,
+    sampledAt: now,
+    expiresAt: now + 90_000,
+    cpuLoad: metric(0.25, 'ratio', 'estimated', 90_000) as NodeResourceReport['cpuLoad'],
+    wasmMemoryLowerBound: metric(2 * 1024 ** 3, 'bytes', 'measured', 24 * 60 * 60 * 1000) as NodeResourceReport['wasmMemoryLowerBound'],
+    deviceMemory: metric(null, 'GiB', 'unknown', 24 * 60 * 60 * 1000) as NodeResourceReport['deviceMemory'],
+    gpu: {
+      status: 'available',
+      sampledAt: now,
+      expiresAt: now + 10 * 60 * 1000,
+      architecture: metric('test-gpu', 'text', 'measured', 10 * 60 * 1000) as NodeResourceReport['gpu']['architecture'],
+      maxStorageBufferBindingSize: metric(128 * 1024 ** 2, 'bytes', 'measured', 10 * 60 * 1000) as NodeResourceReport['gpu']['maxStorageBufferBindingSize'],
+      computeCompletionMs: metric(2, 'ms', 'measured', 10 * 60 * 1000) as NodeResourceReport['gpu']['computeCompletionMs'],
+      memoryBytes: metric(null, 'bytes', 'unknown', 10 * 60 * 1000) as NodeResourceReport['gpu']['memoryBytes'],
+    },
+  };
+}
+
+function readyEntry(modelId: string, adapterId?: string): NodeModelCacheSnapshot['entries'][number] {
+  return {
+    modelId,
+    revision: adapterId ? 'adapter' : 'base',
+    dtype: 'q4_0',
+    backend: 'wasm',
+    state: 'ready',
+    referenceCount: 1,
+    ...(adapterId ? { adapterId } : {}),
+  };
+}
+
+function freshCache(now: number, ...entries: NodeModelCacheSnapshot['entries']): NodeModelCacheSnapshot {
+  return { version: 1, sampledAt: now, expiresAt: now + 60_000, entries };
 }
 
 let stub: DurableObjectStub;
@@ -293,6 +333,81 @@ describe('Coordinator', () => {
     expect(jsonFrames(coder).some((frame) => frame.type === 'task' && frame.taskId === task.id)).toBe(true);
   });
 
+  it('prefers a base-warm node over a cold node for an expert task', async () => {
+    stub = newStub();
+    const baseWarm = await connectNode(
+      'theia-base-warm',
+      'capabilities=theia-inference&expertCapabilities=theia-expert-coder',
+    );
+    const cold = await connectNode(
+      'theia-expert-cold',
+      'capabilities=theia-inference&expertCapabilities=theia-expert-coder',
+    );
+    const now = Date.now();
+    await withStorage(async (storage) => {
+      const record = (await storage.get<NodeRecord>('node:theia-base-warm'))!;
+      record.modelCache = freshCache(now, readyEntry(THEIA_DLLM_MODEL_ID));
+      await storage.put('node:theia-base-warm', record);
+    });
+
+    const task = makeTask({
+      workload: 'theia-inference',
+      payload: {
+        messages: [{ role: 'user', content: 'hi' }],
+        model: THEIA_DLLM_MODEL_ID,
+        expert: 'coder',
+      },
+    });
+    await seedPending([task], ['theia-base-warm', 'theia-expert-cold']);
+    await runAssign();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('theia-base-warm');
+    expect(scheduled.placementReason).toBe('warm-base-model');
+    expect(jsonFrames(baseWarm).some((frame) => frame.type === 'task' && frame.taskId === task.id)).toBe(true);
+    expect(jsonFrames(cold).some((frame) => frame.type === 'task')).toBe(false);
+  });
+
+  it('prefers a fully warm expert node over a base-only warm node', async () => {
+    stub = newStub();
+    const baseWarm = await connectNode(
+      'theia-base-only',
+      'capabilities=theia-inference&expertCapabilities=theia-expert-coder',
+    );
+    const fullyWarm = await connectNode(
+      'theia-adapter-ready',
+      'capabilities=theia-inference&expertCapabilities=theia-expert-coder',
+    );
+    const now = Date.now();
+    await withStorage(async (storage) => {
+      const base = (await storage.get<NodeRecord>('node:theia-base-only'))!;
+      base.modelCache = freshCache(now, readyEntry(THEIA_DLLM_MODEL_ID));
+      await storage.put('node:theia-base-only', base);
+      const adapter = (await storage.get<NodeRecord>('node:theia-adapter-ready'))!;
+      adapter.modelCache = freshCache(now, readyEntry(THEIA_DLLM_MODEL_ID, 'coder'));
+      await storage.put('node:theia-adapter-ready', adapter);
+    });
+
+    const task = makeTask({
+      workload: 'theia-inference',
+      payload: {
+        messages: [{ role: 'user', content: 'hi' }],
+        model: THEIA_DLLM_MODEL_ID,
+        expert: 'coder',
+      },
+    });
+    await seedPending([task], ['theia-base-only', 'theia-adapter-ready']);
+    await runAssign();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('theia-adapter-ready');
+    expect(scheduled.placementReason).toBe('warm-model');
+    expect(jsonFrames(fullyWarm).some((frame) => frame.type === 'task' && frame.taskId === task.id)).toBe(true);
+    expect(jsonFrames(baseWarm).some((frame) => frame.type === 'task')).toBe(false);
+  });
+
   it('does not treat a resident LoRA adapter as warm for an expert-less task', async () => {
     stub = newStub();
     const base = await connectNode('theia-base-cache', 'capabilities=theia-inference');
@@ -516,6 +631,76 @@ describe('Coordinator', () => {
       const updated = await storage.get<NodeRecord>('node:node-1');
       expect(updated?.currentTaskId).toBe(task.id);
     });
+  });
+
+  it('restores fresh snapshots on reconnect and waits for a pong before assigning', async () => {
+    stub = newStub();
+    const first = await connectNode('node-reconnect', 'capabilities=ai-inference');
+    const now = Date.now();
+    const resources = freshResourceReport(now);
+    const modelCache = freshCache(now, readyEntry('test-model'));
+    first.socket.send(JSON.stringify({ type: 'pong', cpuLoad: 0.1, resources, modelCache }));
+    await vi.waitFor(async () => {
+      await withStorage(async (storage) => {
+        const record = await storage.get<NodeRecord>('node:node-reconnect');
+        expect(record?.modelCache).toEqual(modelCache);
+        expect(record?.resources).toEqual(resources);
+      });
+    });
+
+    const replacement = await connectNode('node-reconnect', 'capabilities=ai-inference');
+    await withStorage(async (storage) => {
+      // The fresh snapshots survive the new socket's rebuilt NodeRecord, and
+      // the node waits for a heartbeat before it may receive new work.
+      expect(await storage.get<NodeRecord>('node:node-reconnect')).toMatchObject({
+        modelCache, resources, awaitingPong: true,
+      });
+    });
+
+    const task = makeTask();
+    await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // No assignment until the reconnected node answers a heartbeat.
+    expect((await getTask(task.id)).status).toBe('pending');
+
+    replacement.socket.send(JSON.stringify({ type: 'pong', cpuLoad: 0.1 }));
+    await vi.waitFor(async () => expect((await getTask(task.id)).status).toBe('processing'));
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('node-reconnect');
+    await withStorage(async (storage) => {
+      expect((await storage.get<NodeRecord>('node:node-reconnect'))?.awaitingPong).toBe(false);
+      expect((await storage.get<NodeRecord>('node:node-reconnect'))?.modelCache).toEqual(modelCache);
+    });
+  });
+
+  it('ranks a reconnected node with a restored model cache above a cold node', async () => {
+    stub = newStub();
+    const first = await connectNode('node-reconnect-warm', 'capabilities=ai-inference');
+    const now = Date.now();
+    const modelCache = freshCache(now, readyEntry('test-model'));
+    first.socket.send(JSON.stringify({ type: 'pong', modelCache }));
+    await vi.waitFor(async () => {
+      await withStorage(async (storage) => {
+        expect((await storage.get<NodeRecord>('node:node-reconnect-warm'))?.modelCache).toEqual(modelCache);
+      });
+    });
+
+    const replacement = await connectNode('node-reconnect-warm', 'capabilities=ai-inference');
+    await connectNode('node-reconnect-cold', 'capabilities=ai-inference');
+    replacement.socket.send(JSON.stringify({ type: 'pong' }));
+    await vi.waitFor(async () => {
+      await withStorage(async (storage) => {
+        expect((await storage.get<NodeRecord>('node:node-reconnect-warm'))?.awaitingPong).toBe(false);
+      });
+    });
+
+    const task = makeTask();
+    await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('node-reconnect-warm');
+    expect(scheduled.placementReason).toBe('warm-model');
   });
 
   it('does NOT hand heavy workloads to low-memory nodes', async () => {
@@ -1014,6 +1199,39 @@ describe('Coordinator', () => {
       expect((await storage.get<NodeRecord>('node:node-resource'))!.resources?.wasmMemoryLowerBound.value)
         .toBe(2 * 1024 ** 3);
       expect((await storage.get<NodeRecord>('node:node-resource'))!.modelCache?.entries[0].referenceCount).toBe(1);
+    });
+  });
+
+  it('keeps a fresh saved model cache when a pong reports modelCache: null', async () => {
+    stub = newStub();
+    const node = await connectNode('node-null-pong', 'capabilities=ai-inference');
+    const now = Date.now();
+    const modelCache = freshCache(now, readyEntry('test-model'));
+    node.socket.send(JSON.stringify({ type: 'pong', modelCache }));
+    await vi.waitFor(async () => {
+      await withStorage(async (storage) => {
+        expect((await storage.get<NodeRecord>('node:node-null-pong'))?.modelCache).toEqual(modelCache);
+      });
+    });
+
+    // `null` means "cannot send a snapshot now", not "I evicted everything":
+    // a still-fresh saved snapshot must not be dropped.
+    node.socket.send(JSON.stringify({ type: 'pong', modelCache: null }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await withStorage(async (storage) => {
+      expect((await storage.get<NodeRecord>('node:node-null-pong'))?.modelCache).toEqual(modelCache);
+    });
+
+    // An expired snapshot is not worth keeping and is still discarded.
+    await withStorage(async (storage) => {
+      const record = (await storage.get<NodeRecord>('node:node-null-pong'))!;
+      record.modelCache = { ...modelCache, sampledAt: now - 120_000, expiresAt: now - 60_000 };
+      await storage.put('node:node-null-pong', record);
+    });
+    node.socket.send(JSON.stringify({ type: 'pong', modelCache: null }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await withStorage(async (storage) => {
+      expect((await storage.get<NodeRecord>('node:node-null-pong'))?.modelCache).toBeUndefined();
     });
   });
 

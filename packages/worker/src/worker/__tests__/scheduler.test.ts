@@ -4,6 +4,7 @@ import { rankPlacementCandidates, reservationBlocksAllocation, reservationMatche
 const candidate = (nodeId: string, overrides: Partial<Parameters<typeof rankPlacementCandidates>[0][number]> = {}) => ({
   nodeId,
   warmModel: false,
+  warmBase: false,
   gpuCompletionMs: null,
   capacityBytes: null,
   cpuLoad: null,
@@ -33,6 +34,20 @@ describe('inference placement', () => {
 
     expect(ranked.map(({ candidate: item }) => item.nodeId)).toEqual(['measured-fast', 'measured', 'unknown']);
     expect(ranked[0].reason).toBe('measured-gpu');
+
+    const warmth = rankPlacementCandidates([
+      candidate('cold-fast', { gpuCompletionMs: 1, capacityBytes: 64_000 }),
+      candidate('base-only', { warmBase: true, gpuCompletionMs: 40, capacityBytes: 1_000 }),
+    ]);
+    expect(warmth.map(({ candidate: item }) => item.nodeId)).toEqual(['base-only', 'cold-fast']);
+    expect(warmth[0].reason).toBe('warm-base-model');
+
+    const fullWarm = rankPlacementCandidates([
+      candidate('base-only', { warmBase: true, gpuCompletionMs: 1, capacityBytes: 64_000 }),
+      candidate('fully-warm', { warmModel: true, gpuCompletionMs: 40, capacityBytes: 1_000 }),
+    ]);
+    expect(fullWarm.map(({ candidate: item }) => item.nodeId)).toEqual(['fully-warm', 'base-only']);
+    expect(fullWarm[0].reason).toBe('warm-model');
 
     const fairness = rankPlacementCandidates([
       candidate('more-assignments', { assignedCount: 9 }),

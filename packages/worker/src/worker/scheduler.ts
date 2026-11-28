@@ -1,6 +1,7 @@
 export type PlacementReason =
   | 'only-eligible-candidate'
   | 'warm-model'
+  | 'warm-base-model'
   | 'measured-gpu'
   | 'known-capacity'
   | 'reported-load'
@@ -10,7 +11,10 @@ export type PlacementReason =
 /** Coordinator-side summary used to explain why one eligible node was picked. */
 export interface PlacementCandidate {
   nodeId: string;
+  /** Base model AND (for expert tasks) the requested adapter are resident. */
   warmModel: boolean;
+  /** Base model is resident but the requested expert adapter is not. */
+  warmBase: boolean;
   /** Fresh measured probe latency, or null when unavailable/expired. */
   gpuCompletionMs: number | null;
   /** Known memory capacity hint, or null when unknown. */
@@ -32,7 +36,7 @@ export interface RankedPlacement {
  */
 export function rankPlacementCandidates(candidates: PlacementCandidate[]): RankedPlacement[] {
   const ranked = [...candidates].sort((a, b) =>
-    Number(b.warmModel) - Number(a.warmModel) ||
+    warmthTier(b) - warmthTier(a) ||
     (a.gpuCompletionMs ?? Number.POSITIVE_INFINITY) - (b.gpuCompletionMs ?? Number.POSITIVE_INFINITY) ||
     (b.capacityBytes ?? -1) - (a.capacityBytes ?? -1) ||
     a.assignedCount - b.assignedCount ||
@@ -47,9 +51,18 @@ export function rankPlacementCandidates(candidates: PlacementCandidate[]): Ranke
   }));
 }
 
+/** A fully warm cache beats a resident base, which beats a cold node. */
+function warmthTier(candidate: PlacementCandidate): 0 | 1 | 2 {
+  if (candidate.warmModel) return 2;
+  if (candidate.warmBase) return 1;
+  return 0;
+}
+
 function placementReason(selected: PlacementCandidate, runnerUp?: PlacementCandidate): PlacementReason {
   if (!runnerUp) return 'only-eligible-candidate';
-  if (selected.warmModel !== runnerUp.warmModel) return 'warm-model';
+  const selectedTier = warmthTier(selected);
+  const runnerUpTier = warmthTier(runnerUp);
+  if (selectedTier !== runnerUpTier) return selectedTier === 2 ? 'warm-model' : 'warm-base-model';
   if (selected.gpuCompletionMs !== null && selected.gpuCompletionMs !== runnerUp.gpuCompletionMs) return 'measured-gpu';
   if (selected.capacityBytes !== null && selected.capacityBytes !== runnerUp.capacityBytes) return 'known-capacity';
   if (selected.assignedCount !== runnerUp.assignedCount) return 'assignment-count';

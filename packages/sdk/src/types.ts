@@ -722,6 +722,7 @@ export interface TaskRecord {
   placementReason?:
     | 'only-eligible-candidate'
     | 'warm-model'
+    | 'warm-base-model'
     | 'measured-gpu'
     | 'known-capacity'
     | 'reported-load'

@@ -93,6 +93,11 @@ interface NodeRecord {
   modelCache?: NodeModelCacheSnapshot;
   /** Tasks handed to this node so far, used as a fairness tie-break. */
   assignedCount?: number;
+  /**
+   * A reconnecting node must answer one heartbeat before it may receive new
+   * work: its cache snapshot is only a saved hint until the node re-reports it.
+   */
+  awaitingPong?: boolean;
   /** Lease for the task currently holding this node; fenced by attempt generation. */
   reservation?: NodeReservation;
 }
@@ -162,6 +167,24 @@ export function resolveWarmTarget(
     return { modelId, adapterId: payloadExpert };
   }
   return { modelId };
+}
+
+/**
+ * A cache entry is only warm for a task when it is the exact executable model
+ * the task will load: same base, same adapter (none for a plain task), same
+ * quantization and backend when the task pins them.
+ */
+function cacheEntryMatches(
+  entry: NodeModelCacheSnapshot['entries'][number],
+  modelId: string,
+  adapterId: string | undefined,
+  wantDtype: string | undefined,
+  wantBackend: string | undefined,
+): boolean {
+  if (entry.modelId !== modelId || entry.state !== "ready" || entry.adapterId !== adapterId) return false;
+  if (wantDtype !== undefined && entry.dtype !== wantDtype) return false;
+  if (wantBackend !== undefined && entry.backend !== wantBackend) return false;
+  return true;
 }
 
 /**
@@ -347,6 +370,17 @@ export class Coordinator extends DurableObject<Env> {
       try { sock.close(); } catch {}
     }
 
+    // A reconnect rebuilds the record from unverified URL claims. Carry over
+    // only still-fresh snapshots from the previous connection so an expert
+    // task is not treated as cold while the node re-reports its cache.
+    const reconnectedAt = Date.now();
+    const savedResources = existing?.resources
+      ? validateNodeResourceReport(existing.resources, reconnectedAt) ?? undefined
+      : undefined;
+    const savedModelCache = existing?.modelCache && isNodeModelCacheSnapshot(existing.modelCache, reconnectedAt)
+      ? existing.modelCache
+      : undefined;
+
     const node: NodeRecord = {
       id: nodeId,
       status: resumeTask ? "busy" : "idle",
@@ -354,8 +388,11 @@ export class Coordinator extends DurableObject<Env> {
       expertCapabilities,
       // An unmeasured node must not receive the best possible load score.
       cpuLoad: existing?.cpuLoad ?? 1,
-      connectedAt: existing?.connectedAt ?? Date.now(),
-      lastPongAt: Date.now(),
+      connectedAt: existing?.connectedAt ?? reconnectedAt,
+      lastPongAt: reconnectedAt,
+      resources: savedResources,
+      modelCache: savedModelCache,
+      awaitingPong: !!existing,
       currentTaskId: resumeTask?.id,
       reservation: resumeTask
         ? existing?.reservation ?? {
@@ -390,7 +427,13 @@ export class Coordinator extends DurableObject<Env> {
       }
     }
 
-    await this.tryAssignAll();
+    if (node.awaitingPong) {
+      // Ask for the fresh snapshot now; the alarm below is the fallback ping if
+      // this one is lost. Scheduling resumes in the `pong` handler.
+      this.sendToNode(nodeId, { type: "ping" });
+    } else {
+      await this.tryAssignAll();
+    }
 
     // A signaling-only node can be the first activity in a fresh coordinator.
     // Start heartbeats without waiting for a task to schedule the first alarm,
@@ -433,6 +476,8 @@ export class Coordinator extends DurableObject<Env> {
         const node = await this.ctx.storage.get<NodeRecord>(`node:${nodeId}`);
         if (node) {
           node.lastPongAt = Date.now();
+          const wasAwaitingPong = node.awaitingPong === true;
+          node.awaitingPong = false;
           // The load is self-reported, so only accept a well-formed value: a
           // malformed one must not silently become the best possible score.
           const rawLoad = data.cpuLoad;
@@ -444,11 +489,17 @@ export class Coordinator extends DurableObject<Env> {
             node.resources = resources;
           }
           if (data.modelCache === null) {
-            delete node.modelCache;
+            // `null` means "cannot report a snapshot right now", not an
+            // explicit eviction. Keep a still-fresh saved snapshot; only an
+            // expired one is safe to discard.
+            if (!isNodeModelCacheSnapshot(node.modelCache, Date.now())) delete node.modelCache;
           } else if (isNodeModelCacheSnapshot(data.modelCache)) {
             node.modelCache = data.modelCache;
           }
           await this.ctx.storage.put(`node:${nodeId}`, node);
+          // A reconnected node's saved snapshots are only hints: resume
+          // scheduling after its first heartbeat refreshes them.
+          if (wasAwaitingPong) await this.tryAssignAll();
         }
         return;
       }
@@ -1213,6 +1264,9 @@ export class Coordinator extends DurableObject<Env> {
       for (const nodeId of remainingIdle) {
         const node = nodes.get(nodeId);
         if (!node || node.status !== "idle") continue;
+        // A reconnected node's saved snapshots are hints until its first pong.
+        // Other events (enqueue, settlement, alarm) may run before that pong.
+        if (node.awaitingPong) continue;
         if (reservationBlocksAllocation(node.reservation, Date.now())) continue;
         if (taskNeedsFileSources(task) && !node.fileSources) continue;
         if (!node.capabilities.includes(task.workload as WorkloadType)) continue;
@@ -1245,26 +1299,23 @@ export class Coordinator extends DurableObject<Env> {
           : now - node.lastPongAt <= STALE_NODE_MS ? loadBucket(node.cpuLoad) : null;
         const wantDtype = typeof payload?.options?.dtype === "string" ? payload.options.dtype : undefined;
         const wantBackend = typeof payload?.options?.device === "string" ? payload.options.device : undefined;
+        const cache = node.modelCache && isNodeModelCacheSnapshot(node.modelCache, now) ? node.modelCache : undefined;
+        // The resident base and each LoRA adapter are distinct cache entries:
+        // an expert task needs its own adapter, every other task the bare base.
+        const warmModel = !!model && !!cache?.entries.some((entry) =>
+          cacheEntryMatches(entry, model, adapterId, wantDtype, wantBackend));
+        // Legacy layer ranges describe the base only. A resident base cannot
+        // make an expert task fully warm (the adapter still needs loading), but
+        // it still beats a cold node. Conversely, an adapter entry never makes
+        // an expert-less task base-warm.
+        const warmBase = !!model && adapterId !== undefined && !warmModel && (
+          !!node.warmModels?.some((entry) => entry.modelId === model) ||
+          !!cache?.entries.some((entry) => cacheEntryMatches(entry, model, undefined, wantDtype, wantBackend))
+        );
         candidates.push({
           nodeId,
-          warmModel: !!model && (
-            // Legacy layer ranges describe the base model only; they carry no
-            // adapter identity, so they cannot make an expert task warm.
-            (adapterId === undefined && !!node.warmModels?.some((entry) => entry.modelId === model)) ||
-            !!(node.modelCache && node.modelCache.expiresAt > now && node.modelCache.entries.some((entry) => {
-              if (entry.modelId !== model || entry.state !== "ready") return false;
-              // The resident base and each LoRA adapter are distinct cache
-              // entries. An expert task needs its own adapter; every other
-              // task needs the plain base entry (no adapter id).
-              if (entry.adapterId !== adapterId) return false;
-              // A different quantization/backend is a different download: only
-              // count it as warm when the task's dtype/device matches (or the
-              // task does not pin one, matching the node's q4f16/wasm default).
-              if (wantDtype !== undefined && entry.dtype !== wantDtype) return false;
-              if (wantBackend !== undefined && entry.backend !== wantBackend) return false;
-              return true;
-            }))
-          ),
+          warmModel,
+          warmBase,
           gpuCompletionMs,
           capacityBytes: clampByteCapacity(node.wasmMemoryBytes) ?? null,
           cpuLoad,
@@ -1279,7 +1330,9 @@ export class Coordinator extends DurableObject<Env> {
       if (!chosenNode) continue;
       assignments++;
       servedCursor = queueOrder.cursorAfter[taskId];
-      task.placementReason = selected.reason;
+      // `warm-base-model` is a coordinator-local reason; the published SDK
+      // TaskRecord type will carry it in a separate SDK change.
+      task.placementReason = selected.reason as TaskRecord['placementReason'];
 
       task.status = "processing";
       task.assignedNodeId = chosenNode;
