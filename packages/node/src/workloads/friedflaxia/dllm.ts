@@ -22,7 +22,15 @@ interface AdapterPin {
 
 const EXPERT_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+let configuredPins: Record<string, AdapterPin> | null = null;
+
+/** Browser hosts pass pins via NodeConfig; they have no `process.env`. */
+export function setAdapterPins(pins: Record<string, AdapterPin> | undefined): void {
+  configuredPins = pins ?? null;
+}
+
 function adapterPins(): Record<string, AdapterPin> {
+  if (configuredPins) return configuredPins;
   const raw = process.env.THEIA_LORA_ADAPTERS;
   if (!raw) return {};
   try {

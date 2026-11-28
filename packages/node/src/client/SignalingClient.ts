@@ -26,7 +26,7 @@ import {
   buildNodeSignalProtocols,
   buildWsUrl,
 } from '@flaxia/sdk';
-import { supportedTheiaExperts } from '../workloads/friedflaxia/dllm';
+import { setAdapterPins, supportedTheiaExperts } from '../workloads/friedflaxia/dllm';
 
 import type { ConsentState, FlaxiaNodeController, NodeConfig, WorkloadType } from '@flaxia/sdk';
 import type { AiInferencePayload, AiInferenceResult } from '@flaxia/sdk';
@@ -124,7 +124,9 @@ class SignalingClient {
     private config: NodeConfig,
     private workerPool: WorkerPool,
     private nodeId: string,
-  ) {}
+  ) {
+    if (config.theiaAdapterPins) setAdapterPins(config.theiaAdapterPins);
+  }
 
   async connect() {
     if (this.destroyed) return;

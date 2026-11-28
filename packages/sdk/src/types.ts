@@ -876,6 +876,11 @@ export interface NodeConfig {
   capabilities?: WorkloadType[];
   /** Theia LoRA experts this node can serve (theia-expert-<id>). */
   expertCapabilities?: string[];
+  /** LoRA adapter pins; browser hosts have no `process.env`. */
+  theiaAdapterPins?: Record<
+    string,
+    { url: string; sha256: string; maxBytes: number; revision?: string }
+  >;
   /**
    * Opt in to the bounded WebGPU compute probe used as resource telemetry.
    * Disabled by default: the probe creates a temporary device and submits a
