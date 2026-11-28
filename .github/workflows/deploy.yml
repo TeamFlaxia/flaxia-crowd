@@ -1,0 +1,37 @@
+name: Deploy worker to Cloudflare
+
+# Only a `crowd-v*` tag push may deploy. Branch pushes and workflow_dispatch
+# do not trigger this workflow, and deploy.mjs independently refuses to run
+# without the matching GITHUB_REF_TYPE/GITHUB_REF_NAME values.
+
+on:
+  push:
+    tags:
+      - 'crowd-v*'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build @flaxia/sdk
+        run: npm run build --workspace=@flaxia/sdk
+
+      - name: Validate the Worker configuration
+        run: npm run deploy:worker -- --dry-run
+
+      - name: Deploy the Worker
+        run: npm run deploy:worker

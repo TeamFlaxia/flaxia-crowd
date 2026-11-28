@@ -1,20 +1,24 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSync } from 'node:fs'
+import {
+  mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSync, existsSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const workerRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const repoRoot = resolve(workerRoot, '../..')
+const skipWindows = { skip: process.platform === 'win32' }
 
-// The fake npx records arguments instead of deploying.
-test('root deploy forwards flags and reports only a clean checkout SHA', { skip: process.platform === 'win32' }, () => {
+// Copy deploy.mjs into an isolated fixture: the fake `npx` on PATH is the only
+// thing that can answer a deploy call, and the fixture git repo supplies a SHA.
+function withFixture(run, refs = {}) {
   const root = mkdtempSync(join(tmpdir(), 'crowd-deploy-test-'))
   const worker = join(root, 'packages/worker')
   const bin = join(root, 'bin')
-  const output = join(tmpdir(), `crowd-deploy-args-${process.pid}-${Date.now()}`)
+  const output = join(tmpdir(), `crowd-deploy-args-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`)
   try {
     mkdirSync(join(worker, 'scripts'), { recursive: true })
     mkdirSync(bin)
@@ -30,8 +34,41 @@ test('root deploy forwards flags and reports only a clean checkout SHA', { skip:
     const env = { ...process.env, PATH: bin + ':' + process.env.PATH, DEPLOY_TEST_OUTPUT: output }
     delete env.WORKERS_CI_COMMIT_SHA
     delete env.GITHUB_SHA
+    delete env.GITHUB_REF_TYPE
+    delete env.GITHUB_REF_NAME
+    if (refs.actions !== false) env.GITHUB_ACTIONS = 'true'
+    else delete env.GITHUB_ACTIONS
+    if (refs.refType !== undefined) env.GITHUB_REF_TYPE = refs.refType
+    if (refs.refName !== undefined) env.GITHUB_REF_NAME = refs.refName
+    return run({ root, worker, output, env, sha })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(output, { force: true })
+  }
+}
+
+const invokeDeploy = (root, env) => execFileSync(
+  'npm', ['run', 'deploy', '--', '--dry-run', '--env', 'staging'],
+  { cwd: root, env, stdio: 'pipe' },
+)
+
+function assertDeployRejected({ root, env, output }) {
+  let error
+  try {
+    invokeDeploy(root, env)
+  } catch (caught) {
+    error = caught
+  }
+  assert.ok(error, 'deploy should have failed')
+  assert.equal(error.status, 1)
+  assert.match(String(error.stderr ?? ''), /deploy_requires_tag/)
+  assert.equal(existsSync(output), false, 'wrangler must not be invoked')
+}
+
+test('root deploy forwards flags and reports only a clean checkout SHA', skipWindows, () => {
+  withFixture(({ root, worker, output, env, sha }) => {
     const run = () => {
-      execFileSync('npm', ['run', 'deploy', '--', '--dry-run', '--env', 'staging'], { cwd: root, env, stdio: 'pipe' })
+      invokeDeploy(root, env)
       return readFileSync(output, 'utf8').trim().split('\n')
     }
     let args = run()
@@ -40,8 +77,26 @@ test('root deploy forwards flags and reports only a clean checkout SHA', { skip:
     writeFileSync(join(worker, 'changed.ts'), 'modified')
     args = run()
     assert.ok(args.includes('WORKER_COMMIT_SHA:unknown'))
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-    rmSync(output, { force: true })
-  }
+  }, { refType: 'tag', refName: 'crowd-v0.7.1' })
 })
+
+test('deploy without tag ref information fails before calling wrangler', skipWindows, () => {
+  withFixture(assertDeployRejected)
+})
+
+for (const [label, refs] of [
+  ['main branch push', { refType: 'branch', refName: 'main' }],
+  ['branch named like a crowd tag', { refType: 'branch', refName: 'crowd-v0.7.1' }],
+  ['tag named main', { refType: 'tag', refName: 'main' }],
+  ['node sdk tag', { refType: 'tag', refName: 'node-v0.7.1' }],
+  ['tag name without ref type', { refName: 'crowd-v0.7.1' }],
+  ['forged tag env outside GitHub Actions', {
+    actions: false,
+    refType: 'tag',
+    refName: 'crowd-v0.7.1',
+  }],
+]) {
+  test(`deploy rejects ${label}`, skipWindows, () => {
+    withFixture(assertDeployRejected, refs)
+  })
+}

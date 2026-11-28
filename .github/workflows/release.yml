@@ -16,6 +16,8 @@ on:
           - sdk
   push:
     tags:
+      # Only node/sdk release tags are packed here. Worker releases use
+      # `crowd-v*` tags, which are handled solely by deploy.yml.
       - 'node-v*'
       - 'sdk-v*'
 
