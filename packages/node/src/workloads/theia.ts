@@ -29,11 +29,16 @@ export async function handleTheiaInference(
       'INVALID_PAYLOAD',
     );
   }
-  const loaded = model ?? (await loadFriedFlaxiaDllm());
+  const expert = (payload as { expert?: unknown }).expert;
+  const loaded =
+    model ??
+    (await loadFriedFlaxiaDllm(typeof expert === 'string' ? expert : undefined));
   return runTheiaInference(loaded, payload as TheiaInferencePayload, { onStep, modelId: DLLM_MODEL_ID });
 }
 
 export {
   releaseCache,
   getDllmCacheSnapshot as getModelCacheSnapshot,
+  supportedTheiaExperts,
+  isDllmExpertLoaded,
 } from './friedflaxia/dllm';

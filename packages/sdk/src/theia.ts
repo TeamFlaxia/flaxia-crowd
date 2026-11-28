@@ -45,6 +45,31 @@ export const MAX_THEIA_MESSAGES = 64;
 export const MAX_THEIA_MESSAGE_CHARS = 64_000;
 export const MAX_THEIA_MESSAGES_TOTAL_CHARS = 64_000;
 export const MAX_THEIA_MODEL_CHARS = 128;
+/** Expert ids are short, lowercase, and safe to embed in capability names. */
+export const THEIA_EXPERT_CAPABILITY_PREFIX = 'theia-expert-';
+export const MAX_THEIA_EXPERT_CHARS = 51;
+const THEIA_EXPERT_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export function isTheiaExpertId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_THEIA_EXPERT_CHARS &&
+    THEIA_EXPERT_ID.test(value)
+  );
+}
+
+export function theiaExpertCapability(expert: string): string {
+  return `${THEIA_EXPERT_CAPABILITY_PREFIX}${expert}`;
+}
+
+export function isTheiaExpertCapability(value: unknown): boolean {
+  return (
+    typeof value === 'string' &&
+    value.startsWith(THEIA_EXPERT_CAPABILITY_PREFIX) &&
+    isTheiaExpertId(value.slice(THEIA_EXPERT_CAPABILITY_PREFIX.length))
+  );
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -128,7 +153,7 @@ export function isTheiaDelta(
 ): value is TheiaDelta {
   if (!isTheiaCanvas(canvas)) return false;
   if (!isRecord(value)) return false;
-  if (!isShortString(value.id, 128) || !isShortString(value.expert, 64)) return false;
+  if (!isShortString(value.id, 128) || !isTheiaExpertId(value.expert)) return false;
   if (!isIntegerInRange(value.baseVersion, 0, Number.MAX_SAFE_INTEGER)) return false;
   if (!isIntegerInRange(value.round, 0, Number.MAX_SAFE_INTEGER)) return false;
   if (
@@ -221,7 +246,7 @@ export function isTheiaInferencePayload(value: unknown): value is TheiaInference
 
   const phase = value.phase === undefined ? 'generate' : value.phase;
   if (!isTheiaPhase(phase)) return false;
-  if (value.expert !== undefined && !isShortString(value.expert, 64)) return false;
+  if (value.expert !== undefined && !isTheiaExpertId(value.expert)) return false;
   if (phase === 'denoise') {
     if (!isTheiaCanvas(value.canvas)) return false;
   } else if (value.canvas !== undefined) {

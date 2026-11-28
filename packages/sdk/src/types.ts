@@ -874,6 +874,8 @@ export interface NodeConfig {
   consent: ConsentConfig;
   maxCpuLoad?: number;
   capabilities?: WorkloadType[];
+  /** Theia LoRA experts this node can serve (theia-expert-<id>). */
+  expertCapabilities?: string[];
   /**
    * Opt in to the bounded WebGPU compute probe used as resource telemetry.
    * Disabled by default: the probe creates a temporary device and submits a
@@ -963,6 +965,7 @@ export interface NodeRegisterRequest {
    */
   nodeId?: string;
   capabilities?: WorkloadType[];
+  expertCapabilities?: string[];
   /** Advertises support for the additive container fileSources payload field. */
   fileSources?: boolean;
   deviceMemory?: number | null;

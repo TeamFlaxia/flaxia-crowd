@@ -14,6 +14,8 @@ export interface ModelCacheEntryStatus {
   layerRange?: [number, number];
   state: ModelCacheState;
   referenceCount: number;
+  /** LoRA adapter id when this entry is an expert model. */
+  adapterId?: string;
 }
 
 /** Short-lived snapshot of executable models currently resident in memory. */
@@ -36,6 +38,14 @@ function isEntry(value: unknown): value is ModelCacheEntryStatus {
       (value.state !== 'loading' && value.state !== 'ready' && value.state !== 'evicting' && value.state !== 'failed') ||
       !Number.isInteger(value.referenceCount) || (value.referenceCount as number) < 0 || (value.referenceCount as number) > 64) {
     return false;
+  }
+  if (value.adapterId !== undefined) {
+    if (
+      typeof value.adapterId !== 'string' ||
+      value.adapterId.length === 0 ||
+      value.adapterId.length > 51 ||
+      !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value.adapterId)
+    ) return false;
   }
   if (value.layerRange === undefined) return true;
   const range = value.layerRange;
