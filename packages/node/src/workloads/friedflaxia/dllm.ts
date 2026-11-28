@@ -83,7 +83,10 @@ let modelLoad: Promise<DllmModel> | null = null;
 let baseBytes: Uint8Array | null = null;
 const expertModels = new Map<string, DllmModel>();
 const expertLoads = new Map<string, Promise<DllmModel>>();
+// The base is evicted only on an explicit full reset; experts are evicted on
+// every release, so their in-flight loads need a separate invalidation signal.
 let generation = 0;
+let expertGeneration = 0;
 
 async function loadBase(): Promise<{ loaded: DllmModel; bytes: Uint8Array }> {
   if (model && baseBytes) return { loaded: model, bytes: baseBytes };
@@ -92,7 +95,7 @@ async function loadBase(): Promise<{ loaded: DllmModel; bytes: Uint8Array }> {
     return { loaded, bytes: baseBytes! };
   }
   const pinnedGeneration = generation;
-  modelLoad = (async () => {
+  const pending = (async () => {
     await initFriedFlaxiaWasm();
     const bytes = await downloadPinnedModel(FRIEDFLAXIA_DLLM);
     const { Model } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
@@ -106,11 +109,13 @@ async function loadBase(): Promise<{ loaded: DllmModel; bytes: Uint8Array }> {
     baseBytes = bytes;
     model = loaded;
     return loaded;
-  })().catch((error) => {
-    modelLoad = null;
-    throw error;
+  })();
+  modelLoad = pending;
+  void pending.catch(() => {
+    // Only clear the slot if a full reset has not already replaced this load.
+    if (modelLoad === pending) modelLoad = null;
   });
-  return { loaded: await modelLoad, bytes: baseBytes! };
+  return { loaded: await pending, bytes: baseBytes! };
 }
 
 /** Load the base or a pinned LoRA expert. `expert` must be a configured id. */
@@ -124,7 +129,7 @@ export async function loadFriedFlaxiaDllm(expert?: string): Promise<DllmModel> {
   const pin = adapterPins().get(expert);
   if (!pin) throw new Error(`theia-inference: no adapter pin for expert '${expert}'`);
 
-  const pinnedGeneration = generation;
+  const pinnedExpertGeneration = expertGeneration;
   const load = (async () => {
     const { bytes } = await loadBase();
     const adapter = await downloadPinnedModel(pin);
@@ -132,7 +137,7 @@ export async function loadFriedFlaxiaDllm(expert?: string): Promise<DllmModel> {
     const loaded = (Model as unknown as {
       withLora: (base: Uint8Array, lora: Uint8Array) => DllmModel;
     }).withLora(bytes, adapter);
-    if (loaded.loraExpert?.() !== expert || pinnedGeneration !== generation) {
+    if (loaded.loraExpert?.() !== expert || pinnedExpertGeneration !== expertGeneration) {
       try {
         loaded.free();
       } catch {}
@@ -140,16 +145,21 @@ export async function loadFriedFlaxiaDllm(expert?: string): Promise<DllmModel> {
     }
     expertModels.set(expert, loaded);
     return loaded;
-  })().catch((error) => {
-    expertLoads.delete(expert);
-    throw error;
-  });
+  })();
   expertLoads.set(expert, load);
+  void load.catch(() => {
+    // A release may have cleared and restarted the load for this expert.
+    if (expertLoads.get(expert) === load) expertLoads.delete(expert);
+  });
   return load;
 }
 
-export const releaseCache = (): void => {
-  generation += 1;
+/**
+ * Evict resident experts. The 342 MB base is kept unless `includeBase` is
+ * explicitly set, so an eviction cycle does not trigger a re-download.
+ */
+export const releaseCache = (options: { includeBase?: boolean } = {}): void => {
+  expertGeneration += 1;
   for (const entry of expertModels.values()) {
     try {
       entry.free();
@@ -157,6 +167,8 @@ export const releaseCache = (): void => {
   }
   expertModels.clear();
   expertLoads.clear();
+  if (options.includeBase !== true) return;
+  generation += 1;
   try {
     model?.free();
   } catch {}
