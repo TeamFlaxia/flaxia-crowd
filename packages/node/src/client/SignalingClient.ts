@@ -471,6 +471,7 @@ class SignalingClient {
           fileSourceOrigins: validatedHttpsOrigins(this.config.fileSourceOrigins),
           containerImageOrigins: validatedHttpsOrigins(this.config.containerImageOrigins),
           ccRangeOrigins: validatedHttpsOrigins(this.config.ccRangeOrigins),
+          theiaAdapterPins: this.config.theiaAdapterPins,
         },
       );
       this.send({ type: 'result', taskId: data.taskId, payload: result, attemptId });

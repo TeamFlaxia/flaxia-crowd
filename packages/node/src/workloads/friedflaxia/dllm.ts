@@ -22,50 +22,60 @@ interface AdapterPin {
 
 const EXPERT_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-let configuredPins: Record<string, AdapterPin> | null = null;
-
-/** Browser hosts pass pins via NodeConfig; they have no `process.env`. */
-export function setAdapterPins(pins: Record<string, AdapterPin> | undefined): void {
-  configuredPins = pins ?? null;
+function normalizePins(value: unknown): Map<string, AdapterPin> {
+  const pins = new Map<string, AdapterPin>();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return pins;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!EXPERT_ID.test(id) || !raw || typeof raw !== 'object') continue;
+    const pin = raw as Record<string, unknown>;
+    if (
+      typeof pin.url === 'string' &&
+      /^https:\/\//.test(pin.url) &&
+      typeof pin.sha256 === 'string' &&
+      /^[0-9a-f]{64}$/.test(pin.sha256) &&
+      typeof pin.maxBytes === 'number' &&
+      Number.isSafeInteger(pin.maxBytes) &&
+      pin.maxBytes > 0
+    ) {
+      pins.set(id, {
+        url: pin.url,
+        sha256: pin.sha256,
+        maxBytes: pin.maxBytes,
+        ...(typeof pin.revision === 'string' && /^[0-9a-f]{40}$/.test(pin.revision)
+          ? { revision: pin.revision }
+          : {}),
+      });
+    }
+  }
+  return pins;
 }
 
-function adapterPins(): Record<string, AdapterPin> {
+let configuredPins: Map<string, AdapterPin> | null = null;
+
+/** Browser hosts pass pins via NodeConfig; they have no `process.env`. */
+export function setAdapterPins(pins: unknown): void {
+  const normalized = normalizePins(pins);
+  configuredPins = normalized.size > 0 ? normalized : null;
+}
+
+function adapterPins(): Map<string, AdapterPin> {
   if (configuredPins) return configuredPins;
-  const raw = process.env.THEIA_LORA_ADAPTERS;
-  if (!raw) return {};
+  let raw: string | undefined;
   try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const result: Record<string, AdapterPin> = {};
-    for (const [id, value] of Object.entries(parsed)) {
-      if (!EXPERT_ID.test(id) || !value || typeof value !== 'object') continue;
-      const pin = value as Record<string, unknown>;
-      if (
-        typeof pin.url === 'string' &&
-        /^https:\/\//.test(pin.url) &&
-        typeof pin.sha256 === 'string' &&
-        /^[0-9a-f]{64}$/.test(pin.sha256) &&
-        typeof pin.maxBytes === 'number' &&
-        Number.isSafeInteger(pin.maxBytes) &&
-        pin.maxBytes > 0
-      ) {
-        result[id] = {
-          url: pin.url,
-          sha256: pin.sha256,
-          maxBytes: pin.maxBytes,
-          ...(typeof pin.revision === 'string' && /^[0-9a-f]{40}$/.test(pin.revision)
-            ? { revision: pin.revision }
-            : {}),
-        };
-      }
-    }
-    return result;
+    raw = process.env.THEIA_LORA_ADAPTERS;
   } catch {
-    return {};
+    raw = undefined;
+  }
+  if (!raw) return new Map();
+  try {
+    return normalizePins(JSON.parse(raw));
+  } catch {
+    return new Map();
   }
 }
 
 export function supportedTheiaExperts(): string[] {
-  return Object.keys(adapterPins());
+  return [...adapterPins().keys()];
 }
 
 let model: DllmModel | null = null;
@@ -73,6 +83,7 @@ let modelLoad: Promise<DllmModel> | null = null;
 let baseBytes: Uint8Array | null = null;
 const expertModels = new Map<string, DllmModel>();
 const expertLoads = new Map<string, Promise<DllmModel>>();
+let generation = 0;
 
 async function loadBase(): Promise<{ loaded: DllmModel; bytes: Uint8Array }> {
   if (model && baseBytes) return { loaded: model, bytes: baseBytes };
@@ -80,11 +91,18 @@ async function loadBase(): Promise<{ loaded: DllmModel; bytes: Uint8Array }> {
     const loaded = await modelLoad;
     return { loaded, bytes: baseBytes! };
   }
+  const pinnedGeneration = generation;
   modelLoad = (async () => {
     await initFriedFlaxiaWasm();
     const bytes = await downloadPinnedModel(FRIEDFLAXIA_DLLM);
     const { Model } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
     const loaded = new Model(bytes) as DllmModel;
+    if (pinnedGeneration !== generation) {
+      try {
+        loaded.free();
+      } catch {}
+      throw new Error('friedflaxia: stale base load');
+    }
     baseBytes = bytes;
     model = loaded;
     return loaded;
@@ -103,9 +121,10 @@ export async function loadFriedFlaxiaDllm(expert?: string): Promise<DllmModel> {
   const pending = expertLoads.get(expert);
   if (pending) return pending;
 
-  const pin = adapterPins()[expert];
+  const pin = adapterPins().get(expert);
   if (!pin) throw new Error(`theia-inference: no adapter pin for expert '${expert}'`);
 
+  const pinnedGeneration = generation;
   const load = (async () => {
     const { bytes } = await loadBase();
     const adapter = await downloadPinnedModel(pin);
@@ -113,8 +132,11 @@ export async function loadFriedFlaxiaDllm(expert?: string): Promise<DllmModel> {
     const loaded = (Model as unknown as {
       withLora: (base: Uint8Array, lora: Uint8Array) => DllmModel;
     }).withLora(bytes, adapter);
-    if (loaded.loraExpert?.() !== expert) {
-      throw new Error(`theia-inference: adapter expert mismatch (${loaded.loraExpert?.()})`);
+    if (loaded.loraExpert?.() !== expert || pinnedGeneration !== generation) {
+      try {
+        loaded.free();
+      } catch {}
+      throw new Error('theia-inference: stale expert load');
     }
     expertModels.set(expert, loaded);
     return loaded;
@@ -127,6 +149,7 @@ export async function loadFriedFlaxiaDllm(expert?: string): Promise<DllmModel> {
 }
 
 export const releaseCache = (): void => {
+  generation += 1;
   for (const entry of expertModels.values()) {
     try {
       entry.free();
@@ -160,7 +183,7 @@ export function getDllmCacheSnapshot(): NodeModelCacheSnapshot {
     });
   }
   for (const expert of expertModels.keys()) {
-    const pin = adapterPins()[expert];
+    const pin = adapterPins().get(expert);
     entries.push({
       modelId: DLLM_MODEL_ID,
       revision: pin?.revision ?? 'adapter',

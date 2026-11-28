@@ -270,6 +270,10 @@ self.onmessage = async (e: MessageEvent) => {
   }
 
   const { id, workload, payload, config } = data;
+  if (config?.theiaAdapterPins) {
+    const dllm = await import('../workloads/friedflaxia/dllm');
+    dllm.setAdapterPins(config.theiaAdapterPins);
+  }
   const taskStartedAt = performance.now();
   activeTaskId = id;
   releaseTokenFlow(id);

@@ -84,7 +84,7 @@ export class WorkerPool {
     payload: unknown,
     timeoutMs?: number,
     onToken?: (token: string) => void,
-    config?: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[] },
+    config?: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[]; theiaAdapterPins?: Record<string, { url: string; sha256: string; maxBytes: number; revision?: string }> },
     /** 0 = foreground, 1 = speculative preload. Preloads yield to foreground. */
     priority = 0,
   ): Promise<unknown> {
