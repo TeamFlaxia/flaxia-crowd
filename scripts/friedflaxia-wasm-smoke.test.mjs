@@ -30,6 +30,17 @@ async function instantiate(wasmName, cacheKey) {
     assert.equal(typeof glue.Model.prototype.generate, 'function');
     assert.equal(typeof glue.Model.prototype.generate_stream, 'function');
     assert.equal(typeof glue.Model.prototype.embed, 'function');
+    // Theia's LoRA path loads an expert with `Model.withLora` and reads its
+    // identity/rank from the loaded model, so a missing export breaks every
+    // expert task even though the plain text paths still work.
+    assert.equal(typeof glue.Model.withLora, 'function', `${wasmName}: Model.withLora is missing`);
+    for (const name of ['denoise_topk', 'loraExpert', 'loraRank']) {
+      assert.equal(
+        typeof glue.Model.prototype[name],
+        'function',
+        `${wasmName}: Model.prototype.${name} is missing`,
+      );
+    }
     assert.equal(typeof glue.D1MultimodalModel.prototype.decision, 'function');
     return glue;
   } finally {

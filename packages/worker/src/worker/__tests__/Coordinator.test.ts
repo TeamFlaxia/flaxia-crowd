@@ -2,7 +2,7 @@ import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, vi } from 'vitest';
 import type { NodeResourceReport, NodeModelCacheSnapshot, TaskRecord } from '@flaxia/sdk';
 import { MAX_RESOURCE_CAPACITY_BYTES, THEIA_DLLM_MODEL_ID, verifyCrowdWebhook } from '@flaxia/sdk';
-import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK, resolveWarmModelId, resolveWarmTarget } from '../Coordinator';
+import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK, THEIA_MAX_PENDING_TTL_MS, pendingTtlMs, resolveWarmModelId, resolveWarmTarget, taskTimeoutMs } from '../Coordinator';
 import { parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
 
@@ -878,6 +878,58 @@ describe('Coordinator', () => {
     const stored = await getTask(task.id);
     expect(stored.status).toBe('failed');
     expect(stored.error).toMatch(/deadline/);
+  });
+
+  it('uses the Theia pending cap only for theia-inference, never past the task timeout', () => {
+    expect(taskTimeoutMs('theia-inference')).toBe(THEIA_MAX_PENDING_TTL_MS);
+    expect(pendingTtlMs('theia-inference')).toBe(THEIA_MAX_PENDING_TTL_MS);
+    expect(pendingTtlMs('theia-inference', THEIA_MAX_PENDING_TTL_MS)).toBe(THEIA_MAX_PENDING_TTL_MS);
+    expect(pendingTtlMs('theia-inference', 120_000)).toBe(120_000);
+    expect(pendingTtlMs('ai-inference', THEIA_MAX_PENDING_TTL_MS)).toBe(MAX_PENDING_TTL_MS);
+  });
+
+  it('schedules the sweep at the Theia cap instead of the generic five minutes', async () => {
+    stub = newStub();
+    const task = makeTask({
+      workload: 'theia-inference',
+      timeoutMs: THEIA_MAX_PENDING_TTL_MS,
+    });
+    await stub.fetch('http://internal/enqueue', { method: 'POST', body: JSON.stringify(task) });
+
+    const alarm = await withStorage((storage) => storage.getAlarm());
+    expect(alarm).toBeTruthy();
+    expect(alarm!).toBeGreaterThan(Date.now() + MAX_PENDING_TTL_MS + 1000);
+    expect(alarm!).toBeLessThanOrEqual(Date.now() + THEIA_MAX_PENDING_TTL_MS + 1000);
+  });
+
+  it('keeps a Theia task pending past the generic TTL while waiting for an expert node', async () => {
+    stub = newStub();
+    const task = makeTask({
+      workload: 'theia-inference',
+      createdAt: Date.now() - MAX_PENDING_TTL_MS - 1000,
+      timeoutMs: THEIA_MAX_PENDING_TTL_MS,
+    });
+    await seedPending([task], []);
+
+    await runAlarm();
+
+    expect((await getTask(task.id)).status).toBe('pending');
+  });
+
+  it('fails a Theia task permanently, with a clear reason, after its full pending deadline', async () => {
+    stub = newStub();
+    const task = makeTask({
+      workload: 'theia-inference',
+      createdAt: Date.now() - THEIA_MAX_PENDING_TTL_MS - 1000,
+      timeoutMs: THEIA_MAX_PENDING_TTL_MS,
+    });
+    await seedPending([task], []);
+
+    await runAlarm();
+
+    const stored = await getTask(task.id);
+    expect(stored.status).toBe('failed');
+    expect(stored.error).toMatch(/theia-inference.*30-minute queue deadline/);
   });
 
   it('fails a pending task whose site allow-list no node matches', async () => {

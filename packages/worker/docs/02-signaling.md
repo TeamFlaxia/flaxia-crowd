@@ -134,5 +134,5 @@ Signaling ハンドラは `Coordinator` Durable Object に以下を委譲する�
 - `upgradeWebSocket` は Cloudflare Workers でのみ動作する。ローカルの
   `wrangler dev` では動くが、Node.js環境では動かない
 - WebSocketのメッセージはすべて `JSON.stringify` / `JSON.parse` で扱う
-- タイムアウト（`timeoutMs`）を超えたタスクは `TaskQueue` が自動で
+- タイムアウト（`timeoutMs`）を超えたタスクは `Coordinator` が自動で
   再キューイングする（`03-task-queue.md` 参照）

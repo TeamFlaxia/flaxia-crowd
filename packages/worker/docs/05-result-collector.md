@@ -8,13 +8,12 @@
 ## 結果返却フロー
 
 ```
-[Node] --{ type: 'result', taskId, payload }--> [NodeManager DO]
-                                                      ↓
-                                               [TaskQueue DO]
-                                               complete(taskId, result)
-                                                      ↓
-                                          callbackUrl があれば POST
-                                          なければ KV に結果を保存
+[Node] --{ type: 'result', taskId, attemptId, payload }--> [Coordinator DO /ws]
+                                                       ↓
+                                      completeTask(taskId, result, nodeId, attemptId)
+                                                       ↓
+                                           callbackUrl があれば署名付き POST
+                                           結果は Coordinator の DO Storage に保存
 ```
 
 ## コールバック方式（SDKがcallbackUrlを指定した場合）
@@ -61,14 +60,16 @@ await fetch(task.callbackUrl, {
 
 ## ポーリング方式（SDKがcallbackUrlを指定しない場合）
 
-結果をKVに保存し、SDKがポーリングで取得する：
+結果は Coordinator の DO Storage（`task:<tenantId>:<taskId>`）に保存され、
+SDKがポーリングで取得する：
 
 ```
 GET /crowd/tasks/:id
 → { taskId, status, result?, error?, processingMs? }
 ```
 
-KVのキー：`result:${taskId}`、TTL: 1時間
+キーは `task:${tenantId}:${taskId}`（テナントスコープ）。結果はタスクの
+ライフサイクル終了後も取得できる別途の TTL は設定していない。
 
 ## 結果レスポンス型
 
@@ -85,14 +86,15 @@ type TaskResult = {
 
 ## 失敗時の処理
 
-- `retryCount < 3` → TaskQueue が自動でPENDINGに戻す
+- `retryCount < 3` → Coordinator が自動で PENDING に戻す（恒久失敗は即 failed）
 - `retryCount >= 3` → status を `failed` に確定
-  - callbackUrl があれば `{ status: 'failed', error }` をPOST
-  - なければKVに保存
+  - callbackUrl があれば `{ status: 'failed', error }` を署名付きで POST
+  - 結果は DO Storage に保存され REST/購読で取得できる
 
 ## セキュリティ
 
 - コールバック先URLはHTTPSのみ許可
 - コールバックには `X-Flaxia-Signature` ヘッダを付与（HMAC-SHA256）
   → SDKはこれを検証してなりすましを防ぐ
-- 結果のKVは `result:${taskId}` のみ参照可能（タスクIDを知っている者のみ）
+- 結果は REST ではテナントスコープの `GET /crowd/tasks/:id` からのみ参照でき、
+  他テナントのタスクIDでは取得できない。

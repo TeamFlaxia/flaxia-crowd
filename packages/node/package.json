@@ -1,6 +1,6 @@
 {
   "name": "@flaxia/node",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": false,
   "main": "dist/index.js",
   "types": "./dist/index.d.ts",
@@ -29,10 +29,10 @@
     "@testing-library/dom": "^10.4.1",
     "@types/node": "^22.0.0",
     "vitest": "^4.1.6",
-    "@flaxia/sdk": "^0.8.0"
+    "@flaxia/sdk": "^0.9.0"
   },
   "peerDependencies": {
-    "@flaxia/sdk": "^0.8.0"
+    "@flaxia/sdk": "^0.9.0"
   },
   "peerDependenciesMeta": {
     "@flaxia/sdk": {

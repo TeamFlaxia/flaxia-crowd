@@ -30,6 +30,12 @@ jobs:
       - name: Build @flaxia/sdk
         run: npm run build --workspace=@flaxia/sdk
 
+      - name: Typecheck all workspaces
+        run: npm run typecheck
+
+      - name: Run workspace tests
+        run: npm test --workspaces --if-present
+
       - name: Validate the Worker configuration
         run: npm run deploy:worker -- --dry-run
 

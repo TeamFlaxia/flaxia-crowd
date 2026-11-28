@@ -115,6 +115,43 @@ describe('friedflaxia dLLM LoRA loader', () => {
     expect(supportedTheiaExperts()).toEqual(['code', 'math']);
   });
 
+  it('warns when a malformed pin is dropped, without logging its values', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    process.env.THEIA_LORA_ADAPTERS = JSON.stringify({
+      code: PINS.code,
+      'BAD ID': PINS.code,
+      math: { ...PINS.math, sha256: 'not-a-sha256' },
+    });
+    try {
+      expect(supportedTheiaExperts()).toEqual(['code']);
+      const messages = warn.mock.calls.map(([message]) => String(message));
+      expect(messages).toEqual([
+        expect.stringContaining("pin 'BAD ID': invalid expert id"),
+        expect.stringContaining("pin 'math': sha256"),
+      ]);
+      expect(messages.join('\n')).not.toContain(PINS.code.url);
+      // A repeated read uses the cached parse; do not spam the same warning.
+      expect(supportedTheiaExperts()).toEqual(['code']);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns once when THEIA_LORA_ADAPTERS is not valid JSON', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    process.env.THEIA_LORA_ADAPTERS = '{not json';
+    try {
+      expect(supportedTheiaExperts()).toEqual([]);
+      supportedTheiaExperts();
+      expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
+        expect.stringContaining('invalid JSON'),
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('downloads the pinned base once, even with several experts resident', async () => {
     const base = await loadFriedFlaxiaDllm();
     const code = await loadFriedFlaxiaDllm('code');

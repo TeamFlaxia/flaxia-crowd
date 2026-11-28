@@ -71,7 +71,7 @@
 | グローバル pending | 500 | `429` |
 | テナント別 pending | 50 | `429` |
 | テナント別 enqueue | 60/分 | `429` |
-| pending TTL | 5 分 | `alarm()` が恒久失敗させる |
+| pending TTL | 5 分（`theia-inference` のみ 30 分） | `alarm()` が恒久失敗させる |
 | `timeoutMs` | 1s..1h | `400` |
 | リトライ | 3 回 | 以降は `failed` |
 | 購読者/タスク | 8 | `429` |
@@ -79,7 +79,9 @@
 | 1 パスの割り当て対象 | 32 タスク | 残りは次回以降 |
 
 `alarm()` は processing のタイムアウトに加えて pending も巡回し、
-`createdAt + min(timeoutMs, 5分)` を超えたタスクを失敗させる。
+`queuedAt + min(timeoutMs, cap)` を超えたタスクを失敗させる（cap は通常 5 分、
+Theia の LoRA タスクは 30 分）。理由は `No eligible node picked up <workload>
+before its N-minute queue deadline` として記録される。
 
 ## 6. Webhook 署名（Issue #13）
 

@@ -7,13 +7,17 @@ CORS_ORIGINS = "http://localhost:5173,http://localhost:5174,http://localhost:878
 RATE_LIMIT_MAX = "100"
 MAX_PAYLOAD_SIZE = "1048576"
 
-# API_KEYS and NODE_TOKEN_SECRET are secrets and must never be committed here.
-# Configure production values with:
-#   wrangler secret put API_KEYS
-#   wrangler secret put NODE_TOKEN_SECRET
-# Use .dev.vars for local development (the file is gitignored).
-# Without API_KEYS, task submission/polling fails closed with 401.
-# Without NODE_TOKEN_SECRET, /crowd/nodes/register returns 503.
+# Secrets must never be committed here. Configure production values with:
+#   wrangler secret put API_KEYS                 # task API keys (key or key:tenant)
+#   wrangler secret put NODE_TOKEN_SECRET        # signs node registration tokens
+#   wrangler secret put SUBSCRIBE_TOKEN_SECRET   # signs /crowd/subscribe tokens
+#   wrangler secret put WEBHOOK_SIGNING_SECRET   # signs webhook deliveries
+# Keep the three signing secrets distinct so one leak cannot forge the others.
+# Use .dev.vars for local development (the file is gitignored); see
+# .dev.vars.example. Without API_KEYS, task submission/polling fails closed
+# with 401; without NODE_TOKEN_SECRET or SUBSCRIBE_TOKEN_SECRET, registration
+# and subscription return 503; without WEBHOOK_SIGNING_SECRET, tasks with a
+# callbackUrl are rejected with 400.
 
 [[durable_objects.bindings]]
 name = "COORDINATOR"

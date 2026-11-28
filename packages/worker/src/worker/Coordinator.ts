@@ -9,6 +9,7 @@ import type {
   WorkloadType,
 } from "@flaxia/sdk";
 import {
+  DEFAULT_WORKLOAD_TIMEOUT_MS,
   HEAVY_WORKLOADS,
   MAX_SUBSCRIBER_INFLIGHT_TOKENS,
   MAX_SUBSCRIBER_INFLIGHT_BYTES,
@@ -50,6 +51,25 @@ export const MAX_ENQUEUE_PER_MINUTE = 60;
  * living in the queue forever.
  */
 export const MAX_PENDING_TTL_MS = 5 * 60 * 1000;
+/**
+ * Theia waits for a node that has the requested LoRA expert resident; its host
+ * timeout defaults to 30 minutes. The generic 5-minute cap would permanently
+ * fail those tasks before the host's own deadline, so give this workload a cap
+ * that matches its budget. A shorter explicit `timeoutMs` is still honoured.
+ */
+export const THEIA_MAX_PENDING_TTL_MS = DEFAULT_WORKLOAD_TIMEOUT_MS['theia-inference'];
+
+/** The task's timeout, including the SDK's 30-minute Theia default. */
+export function taskTimeoutMs(workload: string, timeoutMs?: number): number {
+  if (typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0) return timeoutMs;
+  return workload === 'theia-inference' ? THEIA_MAX_PENDING_TTL_MS : DEFAULT_TIMEOUT_MS;
+}
+
+/** Per-workload pending deadline: the earlier of the task timeout and its cap. */
+export function pendingTtlMs(workload: string, timeoutMs?: number): number {
+  const cap = workload === 'theia-inference' ? THEIA_MAX_PENDING_TTL_MS : MAX_PENDING_TTL_MS;
+  return Math.min(taskTimeoutMs(workload, timeoutMs), cap);
+}
 /** Concurrent `/crowd/subscribe` sockets per task. */
 export const MAX_SUBSCRIBERS_PER_TASK = 8;
 /** Subscribe upgrades accepted per task per minute. */
@@ -398,7 +418,7 @@ export class Coordinator extends DurableObject<Env> {
         ? existing?.reservation ?? {
             taskId: resumeTask.id,
             generation: crypto.randomUUID(),
-            expiresAt: (resumeTask.assignedAt ?? Date.now()) + (resumeTask.timeoutMs || DEFAULT_TIMEOUT_MS),
+            expiresAt: (resumeTask.assignedAt ?? Date.now()) + taskTimeoutMs(resumeTask.workload, resumeTask.timeoutMs),
           }
         : undefined,
       lowMemory: url.searchParams.get("lowMemory") === "true",
@@ -916,9 +936,10 @@ export class Coordinator extends DurableObject<Env> {
 
     const alarm = await this.ctx.storage.getAlarm();
     // Wake up for the earliest deadline that matters: the task timeout, or the
-    // pending TTL when that is sooner (a task nobody can serve must not sit in
-    // the queue for a full hour just because it asked for a long timeout).
-    const sweepAt = Date.now() + Math.min(body.timeoutMs || DEFAULT_TIMEOUT_MS, MAX_PENDING_TTL_MS);
+    // workload's pending TTL when that is sooner (a task nobody can serve must
+    // not sit in the queue for a full hour just because it asked for a long
+    // timeout). Theia's cap matches its 30-minute host budget.
+    const sweepAt = Date.now() + pendingTtlMs(body.workload, body.timeoutMs);
     if (!alarm || alarm > sweepAt) {
       await this.ctx.storage.setAlarm(sweepAt);
     }
@@ -1179,7 +1200,7 @@ export class Coordinator extends DurableObject<Env> {
       node.reservation = {
         taskId: task.id,
         generation,
-        expiresAt: (task.assignedAt ?? Date.now()) + (task.timeoutMs || DEFAULT_TIMEOUT_MS),
+        expiresAt: (task.assignedAt ?? Date.now()) + taskTimeoutMs(task.workload, task.timeoutMs),
       };
       await this.ctx.storage.put(`node:${task.assignedNodeId}`, node);
     }
@@ -1363,7 +1384,7 @@ export class Coordinator extends DurableObject<Env> {
         node.reservation = {
           taskId,
           generation,
-          expiresAt: task.assignedAt + (task.timeoutMs || DEFAULT_TIMEOUT_MS),
+          expiresAt: task.assignedAt + taskTimeoutMs(task.workload, task.timeoutMs),
         };
         await this.ctx.storage.put(`node:${chosenNode}`, node);
       }
@@ -1399,7 +1420,7 @@ export class Coordinator extends DurableObject<Env> {
         await this.ctx.storage.put("queue:processing", this.processingCache);
         continue;
       }
-      if (task.assignedAt && now - task.assignedAt > (task.timeoutMs || DEFAULT_TIMEOUT_MS)) {
+      if (task.assignedAt && now - task.assignedAt > taskTimeoutMs(task.workload, task.timeoutMs)) {
         await this.failTask(taskId, "Task timed out");
       }
       const current = await this.getTask(taskId);
@@ -1418,17 +1439,17 @@ export class Coordinator extends DurableObject<Env> {
         await this.ctx.storage.put("queue:pending", this.pendingCache);
         continue;
       }
-      const ttl = Math.min(task.timeoutMs || DEFAULT_TIMEOUT_MS, MAX_PENDING_TTL_MS);
-      if (now - task.createdAt > ttl) {
-        await this.failTask(
-          taskId,
-          task.allowedSites?.length
-            ? "No eligible node for the requested sites"
-            : "No eligible node picked up the task before its queue deadline",
-          undefined,
-          true,
-          true,
-        );
+      const ttl = pendingTtlMs(task.workload, task.timeoutMs);
+      // Measure from the latest queue entry: a task requeued after a transient
+      // failure gets a fresh waiting window rather than inheriting its age.
+      const queuedAt = Number.isFinite(task.queuedAt) ? task.queuedAt! : task.createdAt;
+      if (now - queuedAt > ttl) {
+        // No serviceable node inside the deadline is an explicit permanent
+        // failure; retrying would run into the same empty node pool.
+        const reason = task.allowedSites?.length
+          ? "No eligible node for the requested sites"
+          : `No eligible node picked up ${task.workload} before its ${Math.round(ttl / 60_000)}-minute queue deadline`;
+        await this.failTask(taskId, reason, undefined, true, true);
       }
     }
 

@@ -2,19 +2,22 @@
 
 ## 概要
 
-`TaskQueue` Durable Object がタスクのライフサイクル全体を管理する。
+`Coordinator` Durable Object（`COORDINATOR` バインディング）がタスクの
+ライフサイクル全体を管理する。`TaskQueue` という別クラスは存在しない。
 
 ## タスクのステータス遷移
 
 ```
-PENDING → ASSIGNING → PROCESSING → DONE
-                  ↘            ↘
-                  TIMEOUT →  PENDING（再キュー）
-                             （最大3回）
-                  FAILED（3回失敗で確定）
+PENDING → PROCESSING → DONE
+                  ↘
+                  TIMEOUT → PENDING（再キュー、最大3回）
+                  FAILED（恒久失敗 or リトライ枯渇で確定）
 ```
 
-## Durable Object: TaskQueue
+`TaskStatus` 型には `assigning` も定義されているが、実装では使用しない
+（割り当ては `pending` → `processing` の一度の遷移で行う）。
+
+## Durable Object: Coordinator
 
 ### 内部ストレージ構造（DO Storage）
 
@@ -37,7 +40,9 @@ PENDING → ASSIGNING → PROCESSING → DONE
 ```typescript
 type TaskStatus = 'pending' | 'assigning' | 'processing' | 'done' | 'failed'
 
-type WorkloadType = 'ai-inference' | 'image-process' | 'file-convert'
+type WorkloadType = 'ai-inference' | 'image-process' | 'file-convert' | 'container'
+  | 'vector-embed' | 'vector-store' | 'vector-query' | 'moe-inference'
+  | 'nudenet' | 'cc-extract' | 'embed-gemma' | 'theia-inference'
 
 type TaskRecord = {
   id: string
@@ -60,17 +65,18 @@ type TaskRecord = {
 }
 ```
 
-### 公開メソッド（RPC or fetch）
+### Coordinator の入口と内部処理
 
-| メソッド | 説明 |
-|---------|------|
-| `enqueue(task)` | タスクをPENDINGキューに追加 |
-| `assign(taskId, nodeId)` | ASSIGNING→PROCESSINGに遷移 |
-| `complete(taskId, result)` | PROCESSING→DONEに遷移・callback発火 |
-| `fail(taskId, error)` | 失敗処理・リトライ判定 |
-| `getTask(taskId)` | タスク取得 |
-| `getPending()` | PENDING一覧取得 |
-| `checkTimeouts()` | タイムアウト確認・再キュー |
+| 入口 | 説明 |
+|------|------|
+| `POST /enqueue` | タスクを pending キューに追加し、割り当てを試みる |
+| `GET /task/:tenantId/:taskId` | テナントスコープでタスクを取得 |
+| `GET /queue-stats` | テナント別キュー統計 |
+| `GET /ws` | ノードの WebSocket シグナリング |
+| `GET /subscribe` | 結果ストリームの購読 |
+| `tryAssignAll()` | pending を順に取り、適格ノードへ配信（内部処理） |
+| `completeTask()` / `failTask()` | PROCESSING→DONE / リトライ判定・FAILED（内部処理） |
+| `alarm()` | タイムアウト・pending TTL の巡回とノードの heartbeat（内部処理） |
 
 ## キュー上限と pending TTL（Issue #6）
 
@@ -79,7 +85,7 @@ type TaskRecord = {
 | グローバル pending | 500 | `429` |
 | テナント別 pending | 50 | `429` |
 | テナント別 enqueue | 60/分 | `429` |
-| pending TTL | `createdAt + min(timeoutMs, 5分)` | `alarm()` が恒久失敗 |
+| pending TTL | `queuedAt + min(timeoutMs, cap)` (`theia-inference` の cap は 30 分、他は 5 分) | `alarm()` が恒久失敗 |
 | `minNodes` / `maxNodes` | 1..16 | `400` |
 | 1 パスで見る pending | 32 件 | 残りは次回のパス |
 

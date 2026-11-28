@@ -121,7 +121,7 @@ npm install
 
 # 外部リポジトリから使う場合、@flaxia/sdk はリリース tarball を指定する
 # （@flaxia/worker は非公開。npm レジストリでは配布していない）
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.8.0/flaxia-sdk-0.8.0.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.9.0/flaxia-sdk-0.9.0.tgz
 
 # wrangler.tomlへの追記は packages/worker/docs/06-wrangler.md を参照
 ```

@@ -43,6 +43,16 @@ test('generated d.ts exposes the incremental generation API', () => {
   assert.match(declarations, /generate_stream\(/);
 });
 
+test('generated d.ts exposes the Theia LoRA API on Model', () => {
+  const declarations = readFileSync(resolve(VENDOR_DIR, 'friedflaxia_wasm.d.ts'), 'utf8');
+  const model = declarations.match(/export class Model \{[\s\S]*?\n\}/);
+  assert.ok(model, 'Model class declaration is missing');
+  assert.match(model[0], /static withLora\(/, 'Model.withLora is missing');
+  assert.match(model[0], /denoise_topk\(/, 'Model.denoise_topk is missing');
+  assert.match(model[0], /loraExpert\(\): string \| undefined/, 'Model.loraExpert is missing');
+  assert.match(model[0], /loraRank\(\): number \| undefined/, 'Model.loraRank is missing');
+});
+
 test('vendoring README records the same source commit', () => {
   const readme = readFileSync(resolve(VENDOR_DIR, 'README.md'), 'utf8');
   assert.ok(readme.includes(manifest.sourceCommit));

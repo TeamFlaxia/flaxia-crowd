@@ -1,3 +1,11 @@
 # Copy to .dev.vars and replace the placeholders. Never commit .dev.vars.
+# These are the four secrets read by Env in src/index.ts.
 API_KEYS=replace-with-a-local-development-key
 NODE_TOKEN_SECRET=replace-with-a-long-random-local-secret
+SUBSCRIBE_TOKEN_SECRET=replace-with-a-different-long-random-local-secret
+WEBHOOK_SIGNING_SECRET=replace-with-a-different-long-random-local-secret
+# Keep all three signing secrets distinct: a leak in one plane must not let a
+# token from that plane forge another. Without API_KEYS, task routes fail closed
+# with 401; without NODE_TOKEN_SECRET or SUBSCRIBE_TOKEN_SECRET, registration
+# and subscription return 503; without WEBHOOK_SIGNING_SECRET, tasks with a
+# callbackUrl are rejected with 400.

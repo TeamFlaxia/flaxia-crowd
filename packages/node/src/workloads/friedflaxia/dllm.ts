@@ -22,35 +22,61 @@ interface AdapterPin {
 
 const EXPERT_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+function rejectPin(id: string, reason: string): void {
+  // Never log pin values (a URL can carry credentials); the id and reason are
+  // enough to find the bad entry in THEIA_LORA_ADAPTERS.
+  console.warn(`theia-inference: ignored THEIA_LORA_ADAPTERS pin '${id.slice(0, 64)}': ${reason}`);
+}
+
 function normalizePins(value: unknown): Map<string, AdapterPin> {
   const pins = new Map<string, AdapterPin>();
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return pins;
-  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (!EXPERT_ID.test(id) || !raw || typeof raw !== 'object') continue;
-    const pin = raw as Record<string, unknown>;
-    if (
-      typeof pin.url === 'string' &&
-      /^https:\/\//.test(pin.url) &&
-      typeof pin.sha256 === 'string' &&
-      /^[0-9a-f]{64}$/.test(pin.sha256) &&
-      typeof pin.maxBytes === 'number' &&
-      Number.isSafeInteger(pin.maxBytes) &&
-      pin.maxBytes > 0
-    ) {
-      pins.set(id, {
-        url: pin.url,
-        sha256: pin.sha256,
-        maxBytes: pin.maxBytes,
-        ...(typeof pin.revision === 'string' && /^[0-9a-f]{40}$/.test(pin.revision)
-          ? { revision: pin.revision }
-          : {}),
-      });
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    if (value !== undefined && value !== null) {
+      console.warn('theia-inference: ignored THEIA_LORA_ADAPTERS: expected a JSON object of expert ids');
     }
+    return pins;
+  }
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!EXPERT_ID.test(id)) {
+      rejectPin(id, 'invalid expert id (use lowercase letters, digits and hyphens)');
+      continue;
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      rejectPin(id, 'pin must be an object');
+      continue;
+    }
+    const pin = raw as Record<string, unknown>;
+    if (typeof pin.url !== 'string' || !/^https:\/\//.test(pin.url)) {
+      rejectPin(id, 'url must be an https string');
+      continue;
+    }
+    if (typeof pin.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(pin.sha256)) {
+      rejectPin(id, 'sha256 must be 64 lowercase hex characters');
+      continue;
+    }
+    if (typeof pin.maxBytes !== 'number' || !Number.isSafeInteger(pin.maxBytes) || pin.maxBytes <= 0) {
+      rejectPin(id, 'maxBytes must be a positive safe integer');
+      continue;
+    }
+    if (pin.revision !== undefined && !(typeof pin.revision === 'string' && /^[0-9a-f]{40}$/.test(pin.revision))) {
+      console.warn(`theia-inference: THEIA_LORA_ADAPTERS pin '${id}' has an invalid revision; using 'adapter'`);
+    }
+    pins.set(id, {
+      url: pin.url,
+      sha256: pin.sha256,
+      maxBytes: pin.maxBytes,
+      ...(typeof pin.revision === 'string' && /^[0-9a-f]{40}$/.test(pin.revision)
+        ? { revision: pin.revision }
+        : {}),
+    });
   }
   return pins;
 }
 
 let configuredPins: Map<string, AdapterPin> | null = null;
+// Parse the environment once per value so a bad config is reported once, not
+// on every heartbeat / model-cache snapshot.
+let envPins: { raw: string; pins: Map<string, AdapterPin> } | null = null;
 
 /** Browser hosts pass pins via NodeConfig; they have no `process.env`. */
 export function setAdapterPins(pins: unknown): void {
@@ -67,11 +93,16 @@ function adapterPins(): Map<string, AdapterPin> {
     raw = undefined;
   }
   if (!raw) return new Map();
+  if (envPins?.raw === raw) return envPins.pins;
+  let pins: Map<string, AdapterPin>;
   try {
-    return normalizePins(JSON.parse(raw));
+    pins = normalizePins(JSON.parse(raw));
   } catch {
-    return new Map();
+    console.warn('theia-inference: ignored THEIA_LORA_ADAPTERS: invalid JSON');
+    pins = new Map();
   }
+  envPins = { raw, pins };
+  return pins;
 }
 
 export function supportedTheiaExperts(): string[] {
