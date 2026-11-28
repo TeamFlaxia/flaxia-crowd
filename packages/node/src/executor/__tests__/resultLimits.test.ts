@@ -39,7 +39,10 @@ describe('resultLimits', () => {
     const multibyte = { output: 'あ'.repeat(1_500_000) };
     const realBytes = new TextEncoder().encode(JSON.stringify(multibyte)).byteLength;
     expect(realBytes).toBeGreaterThan(MAX_TASK_RESULT_BYTES);
-    expect(estimateSerializedBytes(multibyte)).toBeGreaterThanOrEqual(realBytes);
+    // The default estimate exits early once the cap is crossed; compare the
+    // full estimate to the real byte count with an effectively unlimited cap.
+    expect(estimateSerializedBytes(multibyte, Number.MAX_SAFE_INTEGER)).toBeGreaterThanOrEqual(realBytes);
+    expect(estimateSerializedBytes(multibyte)).toBeGreaterThan(MAX_TASK_RESULT_BYTES);
     expect(isResultWithinLimit(multibyte)).toBe(false);
 
     const within = { output: 'あ'.repeat(1_000_000) };

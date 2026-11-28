@@ -41,16 +41,16 @@ Bump `version` in the package you are releasing and in the matching entry of
 whose name is `<package>-v<version>`:
 
 ```sh
-git tag node-v0.11.0
-git push origin node-v0.11.0
+git tag node-v0.11.1
+git push origin node-v0.11.1
 ```
 
 Tag prefixes:
 
 | Package        | Tag           | Release asset              |
 | -------------- | ------------- | -------------------------- |
-| `@flaxia/node` | `node-v0.11.0` | `flaxia-node-0.11.0.tgz`    |
-| `@flaxia/sdk`  | `sdk-v0.9.0`  | `flaxia-sdk-0.9.0.tgz`     |
+| `@flaxia/node` | `node-v0.11.1` | `flaxia-node-0.11.1.tgz`    |
+| `@flaxia/sdk`  | `sdk-v0.9.1`  | `flaxia-sdk-0.9.1.tgz`     |
 
 `release.yml` re-runs the vendoring verification (tag pushes do not trigger
 `ci.yml`), installs with `npm ci`, builds the workspace, runs the package tests,
@@ -80,8 +80,8 @@ input) to rebuild a tarball for the version currently in `package.json`.
 Outside consumers can install the release asset directly:
 
 ```sh
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.11.0/flaxia-node-0.11.0.tgz
-npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.9.0/flaxia-sdk-0.9.0.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/node-v0.11.1/flaxia-node-0.11.1.tgz
+npm install https://github.com/TeamFlaxia/flaxia-crowd/releases/download/sdk-v0.9.1/flaxia-sdk-0.9.1.tgz
 ```
 
 `flaxia` does not install from the URL; it vendors the assets so CI needs no
@@ -101,8 +101,8 @@ assets.
 
 ## 4. Verify production
 
-- `https://flaxia.app/crowd/v0.11.0-0/index.js` returns JS (not 404).
-- `https://flaxia.app/crowd/v0.11.0-0/friedflaxia_wasm_bg.wasm` and
+- `https://flaxia.app/crowd/v0.11.1-0/index.js` returns JS (not 404).
+- `https://flaxia.app/crowd/v0.11.1-0/friedflaxia_wasm_bg.wasm` and
   `friedflaxia_wasm_bg.scalar.wasm` are served as separate assets (not 404, and
   not `data:` URLs embedded in the JS).
 - A consenting browser node registers and a `text-generation` / `decision`
