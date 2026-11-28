@@ -17,6 +17,7 @@ import {
   MAX_EMBED_GEMMA_TEXT_CHARS,
   isEmbedGemmaDimensions,
   isTheiaInferencePayload,
+  isTheiaExpertCapability,
   MAX_THEIA_CANVAS_CHARS,
   CC_CRAWL_PATTERN,
   ccWarcPathMatchesCrawl,
@@ -35,6 +36,7 @@ import {
   SUBSCRIBE_TOKEN_TTL_MS,
   clampByteCapacity,
   MAX_WARM_MODEL_LAYERS,
+  MAX_NODE_EXPERT_CAPABILITIES,
 } from '../security'
 
 // Re-exported from @flaxia/sdk so hosts, worker and node share one definition.
@@ -455,6 +457,8 @@ app.post('/nodes/register', async (c) => {
     siteId?: string
     nodeId?: string
     capabilities?: string[]
+    /** Theia LoRA experts this node can serve (theia-expert-<id>). */
+    expertCapabilities?: unknown
     /** Whether this client understands the signed container fileSources field. */
     fileSources?: boolean
     deviceMemory?: number | null
@@ -493,6 +497,26 @@ app.post('/nodes/register', async (c) => {
     }
     capabilities.push(cap)
   }
+
+  // Expert capabilities are a signed scheduling claim: a node that advertises
+  // one will be handed LoRA tasks for that expert. Validate the id with the
+  // same guard the SDK and the node executor use, so a malformed capability
+  // can never widen placement or become an invalid cache identity.
+  if (body?.expertCapabilities !== undefined && !Array.isArray(body.expertCapabilities)) {
+    return c.json({ error: 'expertCapabilities must be an array of capability strings' }, 400)
+  }
+  const rawExpertCapabilities = Array.isArray(body?.expertCapabilities) ? body.expertCapabilities : []
+  if (rawExpertCapabilities.length > MAX_NODE_EXPERT_CAPABILITIES) {
+    return c.json({ error: `expertCapabilities must hold at most ${MAX_NODE_EXPERT_CAPABILITIES} entries` }, 400)
+  }
+  const expertCapabilities: string[] = []
+  for (const cap of rawExpertCapabilities) {
+    if (!isTheiaExpertCapability(cap)) {
+      return c.json({ error: 'expertCapabilities entries must be theia-expert-<id> strings' }, 400)
+    }
+    expertCapabilities.push(cap)
+  }
+
   const fileSources = body.fileSources === true
   // Node identity is server-issued, always. A client-supplied `nodeId` is
   // ignored so it cannot register (and later connect) as another live node.
@@ -523,6 +547,7 @@ app.post('/nodes/register', async (c) => {
     siteId: body.siteId || '',
     nodeId,
     capabilities,
+    expertCapabilities,
     fileSources,
     deviceMemory,
     wasmMemoryBytes,
@@ -561,9 +586,17 @@ app.get('/signal', async (c) => {
   const url = new URL(c.req.url)
   url.pathname = '/ws'
   url.searchParams.delete('token')
+  // Drop every claim the caller may have put in the URL. Only the verified
+  // token below is allowed to populate them on the internal /ws request.
+  url.searchParams.delete('expertCapabilities')
   url.searchParams.set('nodeId', payload.nodeId)
   url.searchParams.set('site', payload.siteId)
   url.searchParams.set('capabilities', payload.capabilities.join(','))
+  // Expert capabilities come from the signed token, never from the socket's
+  // query string, so a node cannot claim an expert it did not register.
+  if (payload.expertCapabilities?.length) {
+    url.searchParams.set('expertCapabilities', payload.expertCapabilities.join(','))
+  }
   if (payload.fileSources) url.searchParams.set('fileSources', 'true')
   url.searchParams.set('lowMemory', String(isLowMemoryNode(payload.wasmMemoryBytes, payload.deviceMemory)))
   if (typeof payload.wasmMemoryBytes === 'number') {

@@ -1,4 +1,4 @@
-import type { WarmModelRange } from '@flaxia/sdk';
+import { isTheiaExpertCapability, type WarmModelRange } from '@flaxia/sdk';
 
 const encoder = new TextEncoder();
 
@@ -118,10 +118,15 @@ export async function resolveTenantId(
 
 // --- Node registration tokens ---
 
+/** Upper bound on the number of Theia experts one node may advertise. */
+export const MAX_NODE_EXPERT_CAPABILITIES = 32;
+
 export interface NodeTokenPayload {
   siteId: string;
   nodeId: string;
   capabilities: string[];
+  /** Theia LoRA experts this node can serve. */
+  expertCapabilities?: string[];
   /** Node can fetch scoped file-source URLs for container payloads. */
   fileSources?: boolean;
   exp: number;
@@ -161,6 +166,12 @@ export async function verifyNodeToken(secret: string, token: string | null): Pro
     // as (or for) a different node than the one it was issued to.
     if (typeof payload.nodeId !== 'string' || !payload.nodeId) return null;
     if (!Array.isArray(payload.capabilities)) return null;
+    if (
+      payload.expertCapabilities !== undefined &&
+      (!Array.isArray(payload.expertCapabilities) ||
+        payload.expertCapabilities.length > MAX_NODE_EXPERT_CAPABILITIES ||
+        !payload.expertCapabilities.every(isTheiaExpertCapability))
+    ) return null;
     return payload;
   } catch {
     return null;

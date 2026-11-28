@@ -104,6 +104,53 @@ describe('#5 node identity is server-issued and token-bound', () => {
     (connected as unknown as { webSocket?: WebSocket }).webSocket?.accept();
   });
 
+  it('binds Theia expert capabilities into the signed token and coordinator record', async () => {
+    const env = makeEnv();
+    const registered = await registerNode(env, {
+      capabilities: ['theia-inference'],
+      expertCapabilities: ['theia-expert-coder', 'theia-expert-writer'],
+    });
+    expect(registered.status).toBe(200);
+    const { token, nodeId } = await registered.json() as { token: string; nodeId: string };
+    expect((await verifyNodeToken(TEST_NODE_TOKEN_SECRET, token))?.expertCapabilities).toEqual([
+      'theia-expert-coder',
+      'theia-expert-writer',
+    ]);
+
+    const connected = await upgradeSignal(env, token);
+    expect(connected.status).toBe(101);
+    expect((await readNodeRecord(nodeId))?.expertCapabilities).toEqual([
+      'theia-expert-coder',
+      'theia-expert-writer',
+    ]);
+    (connected as unknown as { webSocket?: WebSocket }).webSocket?.accept();
+  });
+
+  it('ignores expert capabilities injected into the signal query string', async () => {
+    const env = makeEnv();
+    const registered = await registerNode(env, { capabilities: ['theia-inference'] });
+    const { token, nodeId } = await registered.json() as { token: string; nodeId: string };
+
+    const connected = await upgradeSignal(env, token, '?expertCapabilities=theia-expert-coder');
+    expect(connected.status).toBe(101);
+    expect((await readNodeRecord(nodeId))?.expertCapabilities).toBeUndefined();
+    (connected as unknown as { webSocket?: WebSocket }).webSocket?.accept();
+  });
+
+  it('rejects a signed token that carries malformed expert capabilities', async () => {
+    const forged = await createNodeToken(TEST_NODE_TOKEN_SECRET, {
+      siteId: 'example.com',
+      nodeId: 'forged-expert-node',
+      capabilities: ['theia-inference'],
+      expertCapabilities: ['theia-expert-coder', 'not-a-theia-capability'],
+      exp: Date.now() + 60_000,
+    });
+    expect(await verifyNodeToken(TEST_NODE_TOKEN_SECRET, forged)).toBeNull();
+
+    const env = makeEnv();
+    expect((await upgradeSignal(env, forged)).status).toBe(401);
+  });
+
   it('ignores a client-supplied nodeId and issues a fresh one', async () => {
     const env = makeEnv();
     const first = await registerNode(env, { siteId: 'example.com', nodeId: 'attacker-chosen' });
@@ -478,5 +525,29 @@ describe('register endpoint hardening', () => {
     const env = makeEnv();
     expect((await registerNode(env, { capabilities: 'ai-inference' })).status).toBe(400);
     expect((await registerNode(env, { capabilities: [42] })).status).toBe(400);
+  });
+
+  it('accepts well-formed expert capabilities', async () => {
+    const env = makeEnv();
+    const resp = await registerNode(env, {
+      capabilities: ['theia-inference'],
+      expertCapabilities: ['theia-expert-coder', 'theia-expert-text-editor-2'],
+    });
+    expect(resp.status).toBe(200);
+  });
+
+  it.each([
+    ['non-array', 'theia-expert-coder'],
+    ['more than 32 entries', Array.from({ length: 33 }, (_, i) => `theia-expert-e${i}`)],
+    ['non-string entry', ['theia-expert-coder', 7]],
+    ['missing prefix', ['coder']],
+    ['uppercase id', ['theia-expert-Coder']],
+    ['empty id', ['theia-expert-']],
+    ['unsafe id', ['theia-expert-a_b']],
+    ['over-long id', [`theia-expert-${'a'.repeat(52)}`]],
+  ])('rejects %s in expertCapabilities', async (_label, expertCapabilities) => {
+    const env = makeEnv();
+    const resp = await registerNode(env, { capabilities: ['theia-inference'], expertCapabilities });
+    expect(resp.status).toBe(400);
   });
 });

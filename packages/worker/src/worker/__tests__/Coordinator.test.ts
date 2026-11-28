@@ -1,8 +1,8 @@
 import { env, fetchMock, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, vi } from 'vitest';
 import type { NodeResourceReport, NodeModelCacheSnapshot, TaskRecord } from '@flaxia/sdk';
-import { MAX_RESOURCE_CAPACITY_BYTES, verifyCrowdWebhook } from '@flaxia/sdk';
-import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK, resolveWarmModelId } from '../Coordinator';
+import { MAX_RESOURCE_CAPACITY_BYTES, THEIA_DLLM_MODEL_ID, verifyCrowdWebhook } from '@flaxia/sdk';
+import { ALARM_INTERVAL_MS, MAX_PENDING_TASKS, MAX_PENDING_TTL_MS, MAX_RETRIES, MAX_SUBSCRIBERS_PER_TASK, resolveWarmModelId, resolveWarmTarget } from '../Coordinator';
 import { parseWarmModels } from '../../crowd/index';
 import { TEST_WEBHOOK_SIGNING_SECRET } from './testSecrets';
 
@@ -10,6 +10,7 @@ interface NodeRecord {
   id: string;
   status: "idle" | "busy";
   capabilities: string[];
+  expertCapabilities?: string[];
   cpuLoad: number;
   connectedAt: number;
   lastPongAt: number;
@@ -205,6 +206,141 @@ describe('Coordinator', () => {
 
     expect((await getTask(task.id)).assignedNodeId).toBe('container-legacy-inline');
     expect(jsonFrames(legacyNode).some((frame) => frame.type === 'task')).toBe(true);
+  });
+
+  it('routes a theia expert task only to nodes that registered that expert', async () => {
+    stub = newStub();
+    const base = await connectNode('theia-base', 'capabilities=theia-inference');
+    const other = await connectNode('theia-other-expert', 'capabilities=theia-inference&expertCapabilities=theia-expert-writer');
+    const expert = await connectNode(
+      'theia-coder',
+      'capabilities=theia-inference&expertCapabilities=theia-expert-coder,theia-expert-writer',
+    );
+    const task = makeTask({
+      workload: 'theia-inference',
+      payload: {
+        messages: [{ role: 'user', content: 'hi' }],
+        model: THEIA_DLLM_MODEL_ID,
+        expert: 'coder',
+      },
+    });
+    await seedPending([task], ['theia-base', 'theia-other-expert', 'theia-coder']);
+    await runAssign();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect((await getTask(task.id)).assignedNodeId).toBe('theia-coder');
+    expect(jsonFrames(expert).some((frame) => frame.type === 'task' && frame.taskId === task.id)).toBe(true);
+    expect(jsonFrames(base).some((frame) => frame.type === 'task')).toBe(false);
+    expect(jsonFrames(other).some((frame) => frame.type === 'task')).toBe(false);
+  });
+
+  it('keeps expert-less theia tasks routable to an ordinary node', async () => {
+    stub = newStub();
+    const base = await connectNode('theia-plain', 'capabilities=theia-inference');
+    const task = makeTask({
+      workload: 'theia-inference',
+      payload: { messages: [{ role: 'user', content: 'hi' }], model: THEIA_DLLM_MODEL_ID },
+    });
+    await seedPending([task], ['theia-plain']);
+    await runAssign();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect((await getTask(task.id)).assignedNodeId).toBe('theia-plain');
+    expect(jsonFrames(base).some((frame) => frame.type === 'task' && frame.taskId === task.id)).toBe(true);
+  });
+
+  it('matches a resident LoRA adapter by adapter id when placing an expert task', async () => {
+    stub = newStub();
+    const coder = await connectNode(
+      'theia-warm-coder',
+      'capabilities=theia-inference&expertCapabilities=theia-expert-coder',
+    );
+    const writer = await connectNode(
+      'theia-warm-writer',
+      'capabilities=theia-inference&expertCapabilities=theia-expert-coder,theia-expert-writer',
+    );
+    const now = Date.now();
+    const cacheFor = (adapterId: string): NodeModelCacheSnapshot => ({
+      version: 1,
+      sampledAt: now,
+      expiresAt: now + 60_000,
+      entries: [{
+        modelId: THEIA_DLLM_MODEL_ID,
+        revision: 'adapter',
+        dtype: 'q4_0',
+        backend: 'wasm',
+        state: 'ready',
+        referenceCount: 1,
+        adapterId,
+      }],
+    });
+    await withStorage(async (storage) => {
+      await storage.put('node:theia-warm-coder', { ...(await storage.get<NodeRecord>('node:theia-warm-coder'))!, modelCache: cacheFor('coder') });
+      await storage.put('node:theia-warm-writer', { ...(await storage.get<NodeRecord>('node:theia-warm-writer'))!, modelCache: cacheFor('writer') });
+    });
+
+    const task = makeTask({
+      workload: 'theia-inference',
+      payload: { messages: [{ role: 'user', content: 'hi' }], model: 'a-public-alias', expert: 'coder' },
+    });
+    await seedPending([task], ['theia-warm-coder', 'theia-warm-writer']);
+    await runAssign();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('theia-warm-coder');
+    expect(scheduled.placementReason).toBe('warm-model');
+    expect(jsonFrames(coder).some((frame) => frame.type === 'task' && frame.taskId === task.id)).toBe(true);
+  });
+
+  it('does not treat a resident LoRA adapter as warm for an expert-less task', async () => {
+    stub = newStub();
+    const base = await connectNode('theia-base-cache', 'capabilities=theia-inference');
+    const adapter = await connectNode(
+      'theia-adapter-cache',
+      'capabilities=theia-inference&expertCapabilities=theia-expert-coder',
+    );
+    const now = Date.now();
+    await withStorage(async (storage) => {
+      const shared = { version: 1, sampledAt: now, expiresAt: now + 60_000 } as const;
+      await storage.put('node:theia-base-cache', {
+        ...(await storage.get<NodeRecord>('node:theia-base-cache'))!,
+        modelCache: { ...shared, entries: [{
+          modelId: THEIA_DLLM_MODEL_ID,
+          revision: 'base',
+          dtype: 'q4_0',
+          backend: 'wasm',
+          state: 'ready',
+          referenceCount: 1,
+        }] },
+      });
+      await storage.put('node:theia-adapter-cache', {
+        ...(await storage.get<NodeRecord>('node:theia-adapter-cache'))!,
+        modelCache: { ...shared, entries: [{
+          modelId: THEIA_DLLM_MODEL_ID,
+          revision: 'adapter',
+          dtype: 'q4_0',
+          backend: 'wasm',
+          state: 'ready',
+          referenceCount: 1,
+          adapterId: 'coder',
+        }] },
+      });
+    });
+
+    const task = makeTask({
+      workload: 'theia-inference',
+      payload: { messages: [{ role: 'user', content: 'hi' }], model: THEIA_DLLM_MODEL_ID },
+    });
+    await seedPending([task], ['theia-base-cache', 'theia-adapter-cache']);
+    await runAssign();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const scheduled = await getTask(task.id);
+    expect(scheduled.assignedNodeId).toBe('theia-base-cache');
+    expect(scheduled.placementReason).toBe('warm-model');
+    expect(jsonFrames(base).some((frame) => frame.type === 'task' && frame.taskId === task.id)).toBe(true);
+    expect(jsonFrames(adapter).some((frame) => frame.type === 'task')).toBe(false);
   });
 
   it('rejects malformed JSON on enqueue', async () => {
@@ -1212,6 +1348,15 @@ describe('warm model identity', () => {
     expect(resolveWarmModelId('ai-inference', 'Xenova/distilbert')).toBe('Xenova/distilbert');
     expect(resolveWarmModelId('ai-inference', undefined)).toBe('');
     expect(resolveWarmModelId('ai-inference', '')).toBe('');
+  });
+
+  it('keeps the LoRA adapter identity separate from the base model id', () => {
+    expect(resolveWarmTarget('theia-inference', 'qwen-dlm-4b', 'coder')).toEqual({
+      modelId: THEIA_DLLM_MODEL_ID,
+      adapterId: 'coder',
+    });
+    expect(resolveWarmTarget('theia-inference', 'qwen-dlm-4b')).toEqual({ modelId: THEIA_DLLM_MODEL_ID });
+    expect(resolveWarmTarget('ai-inference', 'Xenova/distilbert', 'coder')).toEqual({ modelId: 'Xenova/distilbert' });
   });
 });
 

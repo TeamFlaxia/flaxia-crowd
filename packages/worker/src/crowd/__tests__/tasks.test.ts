@@ -94,6 +94,24 @@ describe('POST /tasks payload validation', () => {
     expect(body.error).toBeTruthy();
   });
 
+  it('accepts a theia task that pins a valid expert', async () => {
+    const res = await submit({
+      messages: [{ role: 'user', content: 'hi' }],
+      model: 'qwen3-0.6b-diffusion-bd3lm',
+      expert: 'coder',
+    }, 'theia-inference');
+    expect(res.status).toBe(200);
+  });
+
+  it.each(['Coder', 'a_b', '', 'a'.repeat(52)])('rejects an invalid theia expert id %s', async (expert) => {
+    const res = await submit({
+      messages: [{ role: 'user', content: 'hi' }],
+      model: 'qwen3-0.6b-diffusion-bd3lm',
+      expert,
+    }, 'theia-inference');
+    expect(res.status).toBe(400);
+  });
+
   it('still rejects an unroutable workload before payload validation', async () => {
     const res = await submit({ task: 'text-generation' }, 'moe-inference');
     expect(res.status).toBe(400);

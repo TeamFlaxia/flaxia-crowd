@@ -1,6 +1,41 @@
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { describe, expect, it } from 'vitest';
-import { validateCallbackUrl } from '../security';
+import { createNodeToken, validateCallbackUrl, verifyNodeToken } from '../security';
+import { TEST_NODE_TOKEN_SECRET } from '../worker/__tests__/testSecrets';
+
+describe('verifyNodeToken expert capabilities', () => {
+  const base = {
+    siteId: 'example.com',
+    nodeId: 'node-1',
+    capabilities: ['theia-inference'],
+    exp: Date.now() + 60_000,
+  };
+
+  it('accepts a token with valid expert capabilities', async () => {
+    const token = await createNodeToken(TEST_NODE_TOKEN_SECRET, {
+      ...base,
+      expertCapabilities: ['theia-expert-coder', 'theia-expert-text-editor-2'],
+    });
+    expect((await verifyNodeToken(TEST_NODE_TOKEN_SECRET, token))?.expertCapabilities).toEqual([
+      'theia-expert-coder',
+      'theia-expert-text-editor-2',
+    ]);
+  });
+
+  it.each<[string, unknown]>([
+    ['non-array', 'theia-expert-coder'],
+    ['more than 32 entries', Array.from({ length: 33 }, (_, i) => `theia-expert-e${i}`)],
+    ['bad prefix', ['coder']],
+    ['bad id', ['theia-expert-Bad']],
+    ['over-long id', [`theia-expert-${'a'.repeat(52)}`]],
+  ])('rejects %s', async (_label, expertCapabilities) => {
+    const token = await createNodeToken(TEST_NODE_TOKEN_SECRET, {
+      ...base,
+      expertCapabilities: expertCapabilities as string[] | undefined,
+    });
+    expect(await verifyNodeToken(TEST_NODE_TOKEN_SECRET, token)).toBeNull();
+  });
+});
 
 describe('validateCallbackUrl IPv6 SSRF checks', () => {
   it.each([

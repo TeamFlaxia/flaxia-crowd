@@ -17,9 +17,11 @@ import {
   SUBSCRIBER_RESUME_AT_TOKENS,
   validateNodeResourceReport,
   isNodeModelCacheSnapshot,
+  isTheiaExpertCapability,
+  theiaExpertCapability,
   THEIA_DLLM_MODEL_ID,
 } from "@flaxia/sdk";
-import { clampByteCapacity, createWebhookSignature, validateCallbackUrl } from "../security";
+import { clampByteCapacity, createWebhookSignature, MAX_NODE_EXPERT_CAPABILITIES, validateCallbackUrl } from "../security";
 import { parseWarmModels } from "../crowd";
 import {
   rankPlacementCandidates,
@@ -66,6 +68,8 @@ interface NodeRecord {
   id: string;
   status: "idle" | "busy";
   capabilities: WorkloadType[];
+  /** Registered Theia LoRA expert capabilities (`theia-expert-<id>`). */
+  expertCapabilities?: string[];
   cpuLoad: number;
   connectedAt: number;
   lastPongAt: number;
@@ -138,6 +142,26 @@ export function resolveWarmModelId(workload: string, payloadModel: unknown): str
   const implicit = implicitWarmModelId(workload);
   if (implicit) return implicit;
   return typeof payloadModel === 'string' && payloadModel ? payloadModel : '';
+}
+
+/**
+ * Full warm-cache identity of a task: the base model plus, for `theia-expert`
+ * tasks, the LoRA adapter that must be resident.
+ *
+ * A LoRA adapter is a different executable model from the base dLLM. Treating
+ * either as warm for the other would send a task to a node that has to
+ * download it after placement, or worse, serve it with the wrong adapter.
+ */
+export function resolveWarmTarget(
+  workload: string,
+  payloadModel: unknown,
+  payloadExpert?: unknown,
+): { modelId: string; adapterId?: string } {
+  const modelId = resolveWarmModelId(workload, payloadModel);
+  if (workload === 'theia-inference' && typeof payloadExpert === 'string' && payloadExpert) {
+    return { modelId, adapterId: payloadExpert };
+  }
+  return { modelId };
 }
 
 /**
@@ -269,6 +293,15 @@ export class Coordinator extends DurableObject<Env> {
     const nodeId = url.searchParams.get("nodeId");
     if (!nodeId) return new Response("nodeId is required", { status: 400 });
     const capabilities = (url.searchParams.get("capabilities") || "").split(",").filter(Boolean) as WorkloadType[];
+    // The Worker copies these from the signed node token. Re-validate here so
+    // an internal /ws request cannot smuggle an arbitrary expert claim into a
+    // node record even if it bypasses the public /signal route.
+    const rawExpertCapabilities = (url.searchParams.get("expertCapabilities") || "").split(",").filter(Boolean);
+    const expertCapabilities = rawExpertCapabilities.length > 0 &&
+      rawExpertCapabilities.length <= MAX_NODE_EXPERT_CAPABILITIES &&
+      rawExpertCapabilities.every(isTheiaExpertCapability)
+      ? rawExpertCapabilities
+      : undefined;
     // `site` is only a client-submitted claim that was signed by the Worker.
     // Registration is public, so that signature does not prove control of the
     // claimed site. Keep it for diagnostics/legacy API shape only; restricted
@@ -318,6 +351,7 @@ export class Coordinator extends DurableObject<Env> {
       id: nodeId,
       status: resumeTask ? "busy" : "idle",
       capabilities,
+      expertCapabilities,
       // An unmeasured node must not receive the best possible load score.
       cpuLoad: existing?.cpuLoad ?? 1,
       connectedAt: existing?.connectedAt ?? Date.now(),
@@ -1167,6 +1201,12 @@ export class Coordinator extends DurableObject<Env> {
       if (assignments >= MAX_ASSIGN_PER_PASS || !remainingIdle.length) break;
       const task = await this.getTask(taskId);
       if (!task || task.status !== "pending") continue;
+      const payload = task.payload as {
+        model?: unknown;
+        expert?: unknown;
+        options?: { dtype?: unknown; device?: unknown };
+      } | null;
+      const { modelId: model, adapterId } = resolveWarmTarget(task.workload, payload?.model, payload?.expert);
 
       const candidates: PlacementCandidate[] = [];
 
@@ -1176,6 +1216,12 @@ export class Coordinator extends DurableObject<Env> {
         if (reservationBlocksAllocation(node.reservation, Date.now())) continue;
         if (taskNeedsFileSources(task) && !node.fileSources) continue;
         if (!node.capabilities.includes(task.workload as WorkloadType)) continue;
+        // A LoRA expert is an opt-in capability: never send an expert task to
+        // a node that did not register that exact adapter. Tasks without an
+        // expert keep the old, capability-only routing.
+        if (adapterId !== undefined && !node.expertCapabilities?.includes(theiaExpertCapability(adapterId))) {
+          continue;
+        }
         // Never hand a heavy WASM workload to a low-memory / mobile node; the
         // model load would spike memory and get the device's process killed.
         if (node.lowMemory && HEAVY_WORKLOADS.has(task.workload)) continue;
@@ -1197,16 +1243,20 @@ export class Coordinator extends DurableObject<Env> {
           cpuMetric.expiresAt > now && cpuMetric.value !== null
           ? cpuMetric.value
           : now - node.lastPongAt <= STALE_NODE_MS ? loadBucket(node.cpuLoad) : null;
-        const payload = task.payload as { model?: unknown; options?: { dtype?: unknown; device?: unknown } } | null;
-        const model = resolveWarmModelId(task.workload, payload?.model);
         const wantDtype = typeof payload?.options?.dtype === "string" ? payload.options.dtype : undefined;
         const wantBackend = typeof payload?.options?.device === "string" ? payload.options.device : undefined;
         candidates.push({
           nodeId,
           warmModel: !!model && (
-            !!node.warmModels?.some((entry) => entry.modelId === model) ||
+            // Legacy layer ranges describe the base model only; they carry no
+            // adapter identity, so they cannot make an expert task warm.
+            (adapterId === undefined && !!node.warmModels?.some((entry) => entry.modelId === model)) ||
             !!(node.modelCache && node.modelCache.expiresAt > now && node.modelCache.entries.some((entry) => {
               if (entry.modelId !== model || entry.state !== "ready") return false;
+              // The resident base and each LoRA adapter are distinct cache
+              // entries. An expert task needs its own adapter; every other
+              // task needs the plain base entry (no adapter id).
+              if (entry.adapterId !== adapterId) return false;
               // A different quantization/backend is a different download: only
               // count it as warm when the task's dtype/device matches (or the
               // task does not pin one, matching the node's q4f16/wasm default).
