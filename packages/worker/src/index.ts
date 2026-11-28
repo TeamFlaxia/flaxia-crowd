@@ -8,6 +8,11 @@ export interface Env {
   COORDINATOR: DurableObjectNamespace
   /** Comma-separated API keys: `key` or `key:tenantId`. */
   API_KEYS: string
+  /**
+   * Extra keys accepted alongside `API_KEYS`. Lets a second host (e.g. Theia)
+   * register its own key without reading or rotating the existing Flaxia keys.
+   */
+  API_KEYS_EXTRA?: string
   CORS_ORIGINS: string
   RATE_LIMIT_MAX: string
   MAX_PAYLOAD_SIZE: string

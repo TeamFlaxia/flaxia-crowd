@@ -100,7 +100,8 @@ function isSafeMediaUrl(value: unknown): boolean {
  * that it can no longer read another tenant's tasks.
  */
 export async function resolveCallerTenant(env: Env, authHeader: string | undefined): Promise<string | null> {
-  return resolveTenantId(env.API_KEYS, authHeader)
+  const keys = [env.API_KEYS, env.API_KEYS_EXTRA].filter(Boolean).join(',')
+  return resolveTenantId(keys, authHeader)
 }
 
 export async function validateApiKey(env: Env, authHeader: string | undefined): Promise<boolean> {

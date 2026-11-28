@@ -15,7 +15,7 @@
 
 import { env as testEnv, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
-import { crowdApp } from '../index';
+import { crowdApp, resolveCallerTenant } from '../index';
 import type { Env } from '../../index';
 import { createNodeToken, createSubscribeToken, validateCallbackUrl, verifyNodeToken } from '../../security';
 import {
@@ -556,5 +556,14 @@ describe('register endpoint hardening', () => {
     const env = makeEnv();
     const resp = await registerNode(env, { capabilities: ['theia-inference'], expertCapabilities });
     expect(resp.status).toBe(400);
+  });
+});
+
+describe('API_KEYS_EXTRA', () => {
+  it('accepts a second host key without reading or rotating the primary keys', async () => {
+    const env = { API_KEYS: 'fc_live_primary', API_KEYS_EXTRA: 'fc_live_theia_extra' } as Env;
+    expect(await resolveCallerTenant(env, 'Bearer fc_live_primary')).not.toBeNull();
+    expect(await resolveCallerTenant(env, 'Bearer fc_live_theia_extra')).not.toBeNull();
+    expect(await resolveCallerTenant(env, 'Bearer fc_live_unknown')).toBeNull();
   });
 });
