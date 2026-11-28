@@ -162,7 +162,7 @@ export class WorkerPool {
     payload: unknown,
     timeoutMs: number | undefined,
     onToken: ((token: string) => void) | undefined,
-    config: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[] } | undefined,
+    config: { maxCpuLoad?: number; fileSourceOrigins?: string[]; containerImageOrigins?: string[]; ccRangeOrigins?: string[]; theiaAdapterPins?: Record<string, { url: string; sha256: string; maxBytes: number; revision?: string }> } | undefined,
     resolve: (value: unknown) => void,
     reject: (error: Error) => void,
     priority = 0,

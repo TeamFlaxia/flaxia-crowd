@@ -126,11 +126,23 @@ async function loadBase(): Promise<{ loaded: DllmModel; bytes: Uint8Array }> {
     return { loaded, bytes: baseBytes! };
   }
   const pinnedGeneration = generation;
+  const loadStartedAt = performance.now();
   const pending = (async () => {
+    const wasmStartedAt = performance.now();
     await initFriedFlaxiaWasm();
+    const wasmMs = performance.now() - wasmStartedAt;
+    const downloadStartedAt = performance.now();
     const bytes = await downloadPinnedModel(FRIEDFLAXIA_DLLM);
+    const downloadMs = performance.now() - downloadStartedAt;
+    const constructStartedAt = performance.now();
     const { Model } = await import('../../vendor/friedflaxia/friedflaxia_wasm.js');
     const loaded = new Model(bytes) as DllmModel;
+    const constructMs = performance.now() - constructStartedAt;
+    console.log(
+      `[flaxia-node:worker] model load modelId=${FRIEDFLAXIA_DLLM.modelId} bytes=${bytes.byteLength} ` +
+        `wasmMs=${Math.round(wasmMs)} downloadMs=${Math.round(downloadMs)} constructMs=${Math.round(constructMs)} ` +
+        `totalMs=${Math.round(performance.now() - loadStartedAt)}`,
+    );
     if (pinnedGeneration !== generation) {
       try {
         loaded.free();

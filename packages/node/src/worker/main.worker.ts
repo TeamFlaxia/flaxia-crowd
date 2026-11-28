@@ -55,6 +55,21 @@ function waitForTokenFlow(id: string): Promise<void> {
 // The task this worker is executing right now, if any (tasks are serialized).
 let activeTaskId: string | null = null;
 
+/**
+ * Duty-cycle accounting starts at the first real work signal (a streamed token
+ * or an inference step), not at task dispatch. Model downloads and wasm init
+ * run inside `runWorkload`; charging that cold load to the burst made the first
+ * yield compute a pause of work * (1/maxLoad - 1) — minutes for a 342 MB model —
+ * with no log, so the coordinator timed the task out. The first step still
+ * opens the burst and every later step is charged and held to the CPU cap.
+ */
+let dutyCycleStarted = false;
+function beginDutyCycle(): void {
+  if (dutyCycleStarted) return;
+  dutyCycleStarted = true;
+  throttle?.beginWork();
+}
+
 const IDLE_EVICT_MS = 60_000;
 
 /**
@@ -100,6 +115,7 @@ function createTokenSink(id: string): (token: string) => Promise<void> {
   return async (token: string): Promise<void> => {
     await waitForTokenFlow(id);
     postToken(token);
+    beginDutyCycle();
     await throttle?.yieldIfOverloaded();
   };
 }
@@ -295,6 +311,7 @@ self.onmessage = async (e: MessageEvent) => {
   }
   const taskStartedAt = performance.now();
   activeTaskId = id;
+  dutyCycleStarted = false;
   releaseTokenFlow(id);
 
   try {
@@ -317,10 +334,10 @@ self.onmessage = async (e: MessageEvent) => {
 
     await waitForCpuSlot();
 
-    // Mid-execution limiting: the pre-task gate alone cannot stop a 10-minute
-    // generation from pinning a core at 100%, so the streaming path yields
-    // between tokens/batches and holds the configured duty cycle.
-    throttle.beginWork();
+    // Mid-execution limiting is started lazily by `beginDutyCycle()` on the
+    // first token/step, after any model download and wasm init have finished.
+    // The pre-task gate alone cannot stop a 10-minute generation from pinning
+    // a core at 100%; the yields between tokens/batches hold the duty cycle.
 
     const heartbeat = setInterval(() => {
       self.postMessage({
@@ -349,6 +366,7 @@ self.onmessage = async (e: MessageEvent) => {
         emitToken,
         { fileSourceOrigins, containerImageOrigins, ccRangeOrigins },
         async () => {
+          beginDutyCycle();
           await throttle?.yieldIfOverloaded();
         },
       );
@@ -367,6 +385,9 @@ self.onmessage = async (e: MessageEvent) => {
       cancelRequested.delete(id);
       releaseTokenFlow(id);
       clearInterval(heartbeat);
+      // A task that fails before its first token/step never opened the burst;
+      // close it here so cold-load wall time is not charged as CPU work either.
+      beginDutyCycle();
       throttle.markTaskComplete(performance.now() - taskStart);
       armIdleEviction();
     }
