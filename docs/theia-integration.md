@@ -15,8 +15,8 @@ defines the protocol contract **and** the node executor that serves it.
 | Worker submit validator | `isTheiaInferencePayload` |
 | Node executor | `packages/node/src/workloads/theia.ts` + `friedflaxia/theia.ts` |
 | Pinned base dLLM | `qwen3-0.6b-diffusion-bd3lm` (Q4_0, 342 MB) |
-| LoRA adapters | not distributed yet; `expert` is rejected |
-| Theia consumer | `TeamFlaxia/theia` `CrowdInference` (submit → poll) |
+| LoRA adapters | pinned via `THEIA_LORA_ADAPTERS`; unpinned `expert` → `PermanentTaskError` |
+| Theia consumer | `TeamFlaxia/theia` `CrowdInference` (submit → poll/subscribe) / `EnsembleInference` (`THEIA_ENSEMBLE=1`) |
 
 ## Payload
 
@@ -72,9 +72,11 @@ open span tokens with `<|mask|>`, and runs low-confidence remasking with
   at `<|im_end|>`. `.maxNewTokens` bounds the response.
 - Control markers (`<|...|>`) in message or canvas text are rejected: the
   tokenizer matches them verbatim, so allowing them would inject turns.
-- A requested `expert` is rejected until LoRA adapters are distributed (T5); an
-  adapter-loaded node also rejects an expert-less payload. The node never
-  silently returns a base-model answer under an expert's name.
+- A requested `expert` is served only when the node has a matching pin in
+  `THEIA_LORA_ADAPTERS`; an unpinned expert fails with `PermanentTaskError`
+  (no retry) instead of falling back to the base model. An adapter-loaded node
+  also rejects an expert-less payload. The node never silently returns a
+  base-model answer under an expert's name.
 - `maxSteps`, `temperature`, `strength`, `mergeRule` and `theia.preferWarm` are
   accepted by the contract but not used by this executor. `maxNewTokens`
   controls the generate response; `steps` is per 32-token chunk.
@@ -162,6 +164,64 @@ interface TheiaInferenceResult {
 `nodes` and `expertCount` are **host-side aggregates**: a single node task returns one
 expert's deltas, and a node cannot observe how many deltas were later superseded.
 
+## Wire example: denoise round
+
+One task per expert per canvas snapshot. `canvas.text` is capped at
+`THEIA_MAX_CANVAS_CHARS = 16_000` characters (rejected before tokenization), and
+`expert` is included only when Theia opts in with `THEIA_ENSEMBLE_SEND_EXPERT=1`
+and the node has a matching `THEIA_LORA_ADAPTERS` pin.
+
+```jsonc
+// POST /crowd/tasks
+{
+  "workload": "theia-inference",
+  "payload": {
+    "messages": [{ "role": "user", "content": "..." }],
+    "model": "qwen-dlm-4b",
+    "phase": "denoise",
+    "expert": "code",
+    "canvas": {
+      "version": 3,
+      "text": "Use ____ to sort.",
+      "spans": [{ "id": "s1", "start": 4, "end": 8, "open": true }]
+    },
+    "round": 2,
+    "steps": 8
+  },
+  "timeoutMs": 120000,
+  "priority": 3
+}
+```
+
+`round` is the host's block-round stamp and `steps` is this task's denoise budget.
+
+```jsonc
+// GET /crowd/tasks/:id -> result (one expert's proposal)
+{
+  "model": "qwen3-0.6b-diffusion-bd3lm",
+  "phase": "denoise",
+  "expert": "code",
+  "round": 2,
+  "steps": 8,
+  "canvasVersion": 3,
+  "deltas": [
+    {
+      "id": "<uuid>",
+      "expert": "code",
+      "baseVersion": 3,
+      "round": 2,
+      "ops": [{ "kind": "replace", "span": [4, 8], "text": "np.argsort" }],
+      "confidence": 0.82
+    }
+  ],
+  "durationMs": 1234
+}
+```
+
+The host batches `result.deltas` from all experts, checks `baseVersion`/`round`
+and the delta-to-task `expert` binding, then reduces them into the next canvas
+version.
+
 ## Host flow (target)
 
 Theia is a **star topology**. The host owns the canvas and fans normal tasks out
@@ -190,6 +250,35 @@ The research question is how much staleness the merge tolerates. Deltas carry
 current snapshot and decays evidence by `decay^age`. A soft deadline (all experts
 or `T` ms) means a straggler never blocks the round.
 
+## WebSocket subscribe
+
+For streaming task progress (Theia: `THEIA_CROWD_SUBSCRIBE=1`), Crowd exposes
+`wss://<host>/crowd/subscribe?taskId=<taskId>`. The short-lived `subscribeToken`
+returned by `POST /crowd/tasks` (or `GET /crowd/tasks/:id`) is carried as a
+WebSocket subprotocol, never in the query string:
+
+```
+Sec-WebSocket-Protocol: flaxia-subscribe-v1, bearer.<subscribeToken>
+```
+
+The token is bound to one task id: a token for task A cannot stream task B.
+Immediately after `open`, the client sends
+`{"type":"flow-control","version":1}`; without it the coordinator applies a
+fixed legacy in-flight window instead of per-token flow control. Server frames
+are JSON:
+
+| Frame | Meaning |
+|---|---|
+| `{"type":"token","token":...,"sequence":n}` | streamed token; `sequence` starts at 1 |
+| `{"type":"reset","epoch":n}` | stream restarted; drop buffered tokens |
+| `{"type":"done","result":...}` | terminal task result; close the socket |
+| `{"type":"error","error":...}` | terminal error; close the socket |
+
+For every `token` frame the client replies `{"type":"ack","sequence":n}` once
+the token has been consumed. A subscriber that exceeds the in-flight
+token/byte budget is paused; a slow consumer is closed with 1013. Polling
+`GET /crowd/tasks/:id` remains the fallback when the WebSocket is unavailable.
+
 ## LoRA experts (v1)
 
 Heterogeneous tokenizers are deferred. v1 uses one base model (QwenDLM-4B, with
@@ -197,13 +286,15 @@ Qwen3-0.6B-bd3lm for algorithm validation) plus LoRA adapters for `code`,
 `math`, and `chat`. The tokenizer and vocabulary are shared by construction, so
 deltas and confidences are directly comparable.
 
-- Distribution: base GGUF + adapter files, each pinned by SHA-256.
-- Routing (planned, T5): expert capabilities such as `theia-expert-code`. The
-  current capability schema is `WorkloadType[]`, so this needs an
-  `expertCapabilities` field (or equivalent) before it can be advertised.
-- Warm placement (planned, T5): the existing `modelCache` heartbeat extended
-  with the adapter id. The base model is advertised today, so `preferWarm`
-  places a theia task on a node that already holds the dLLM.
+- Distribution: base GGUF + adapter files, each pinned by SHA-256. Adapter pins
+  are configured per Node in `THEIA_LORA_ADAPTERS`, a JSON object
+  `id -> { url, sha256, maxBytes, revision }`; a requested `expert` without a
+  pin fails with `PermanentTaskError`.
+- Routing: `expertCapabilities` advertises `theia-expert-<id>` (for example
+  `theia-expert-code`) alongside the existing `capabilities: WorkloadType[]`.
+- Warm placement: `modelCache` snapshot entries carry `adapterId` for resident
+  experts (the base entry has none), so `preferWarm` favors a node that already
+  holds the dLLM and the requested adapter.
 
 
 ## Validation
@@ -238,7 +329,9 @@ License safety comes first; avoid PolyForm Noncommercial models.
 - [x] Add the submit validation branch in the worker using the SDK guards.
 - [x] Add the node executor: `generate` and `denoise` over the pinned base dLLM.
 - [x] Move `theia-inference` into `ROUTABLE_WORKLOADS` with the executor.
-- [ ] Add expert capabilities (`theia-expert-*`), distribute LoRA adapters and
-      extend warm `modelCache` entries with the adapter id (T5).
+- [x] Add expert capabilities (`theia-expert-<id>` via `expertCapabilities`),
+      distribute LoRA adapters via `THEIA_LORA_ADAPTERS` pins
+      (`url`/`sha256`/`maxBytes`/`revision`) and extend warm `modelCache`
+      entries with `adapterId` (T5).
 - [ ] Add the block/KV cache so a denoise step does not recompute the prefix.
 - [ ] Add a Theia single-expert / multi-expert generation check.
